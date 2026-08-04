@@ -1,0 +1,25 @@
+Verifiers: 1
+Average Getting verifiers: 0.004987 seconds (stddev: 0.001213)
+Average Getting evidence: 0.229915 seconds (stddev: 0.006329)
+Average Appraising evidence: 0.321577 seconds (stddev: 0.009846)
+Average Total Attestation Duration: 0.556479 seconds (stddev: 0.009903)
+Verifiers: 2
+Average Getting verifiers: 0.007308 seconds (stddev: 0.000881)
+Average Getting evidence: 0.227766 seconds (stddev: 0.010267)
+Average Appraising evidence: 0.632848 seconds (stddev: 0.012770)
+Average Total Attestation Duration: 0.867922 seconds (stddev: 0.016556)
+Verifiers: 3
+Average Getting verifiers: 0.010165 seconds (stddev: 0.002277)
+Average Getting evidence: 0.232063 seconds (stddev: 0.009614)
+Average Appraising evidence: 0.948632 seconds (stddev: 0.019439)
+Average Total Attestation Duration: 1.190860 seconds (stddev: 0.019832)
+Verifiers: 4
+Average Getting verifiers: 0.014772 seconds (stddev: 0.003024)
+Average Getting evidence: 0.228298 seconds (stddev: 0.007526)
+Average Appraising evidence: 1.276820 seconds (stddev: 0.028252)
+Average Total Attestation Duration: 1.519890 seconds (stddev: 0.031610)
+Verifiers: 5
+Average Getting verifiers: 0.014587 seconds (stddev: 0.001718)
+Average Getting evidence: 0.228397 seconds (stddev: 0.007667)
+Average Appraising evidence: 1.557992 seconds (stddev: 0.012585)
+Average Total Attestation Duration: 1.800976 seconds (stddev: 0.011255)
