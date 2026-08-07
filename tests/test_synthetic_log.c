@@ -15,7 +15,7 @@
 #include <string.h>
 
 #include "../src/core/charra_event_log.h"
-#include "../src/core/charra_synth_log.h"
+#include "../src/core/charra_synthetic_log.h"
 
 static unsigned int tests_run = 0;
 static unsigned int tests_failed = 0;

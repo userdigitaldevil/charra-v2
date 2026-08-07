@@ -1,9 +1,9 @@
 /**
- * @file charra_synth_log.c
- * @brief Synthetic IMA event log generation. See charra_synth_log.h.
+ * @file charra_synthetic_log.c
+ * @brief Synthetic IMA event log generation. See charra_synthetic_log.h.
  */
 
-#include "charra_synth_log.h"
+#include "charra_synthetic_log.h"
 
 #include <stdlib.h>
 #include <string.h>

@@ -391,7 +391,7 @@ add `(const uint8_t* replayed_pcr_value, uint32_t replayed_pcr_index)` to
 each candidate reference set before its digest is computed, `NULL` to
 preserve original behaviour.)*
 
-### New: `src/core/charra_synth_log.h` / `.c`
+### New: `src/core/charra_synthetic_log.h` / `.c`
 
 Synthetic IMA log generator for the RP qualification check. Produces a
 genuinely well-formed, realistic-looking raw log — not random bytes — so
@@ -430,12 +430,12 @@ arguments rejected.
 
 ### Modified: `Makefile`
 
-- `charra_event_log`, `charra_synth_log` added to the `core` object list.
+- `charra_event_log`, `charra_synthetic_log` added to the `core` object list.
 - `test`, `test_event_log`, `test_synth_log` targets added.
 
 ### Verified so far
 
-- `charra_event_log.c` and `charra_synth_log.c` compiled standalone (stub
+- `charra_event_log.c` and `charra_synthetic_log.c` compiled standalone (stub
   TSS2/mbedTLS headers, real SHA-256 via CommonCrypto); all 42 tests pass.
 - Cross-checked `charra_replay_ima_log` against an independent Python
   re-implementation on a 423-byte 4-entry log: both produce

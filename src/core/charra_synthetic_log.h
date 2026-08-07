@@ -1,5 +1,5 @@
 /**
- * @file charra_synth_log.h
+ * @file charra_synthetic_log.h
  * @brief Synthetic IMA event log generation, for the Verifier's RP
  * qualification check.
  *
@@ -20,8 +20,8 @@
  * whatever redaction logic is exercised against it.
  */
 
-#ifndef CHARRA_SYNTH_LOG_H
-#define CHARRA_SYNTH_LOG_H
+#ifndef CHARRA_SYNTHETIC_LOG_H
+#define CHARRA_SYNTHETIC_LOG_H
 
 #include <inttypes.h>
 
@@ -54,4 +54,4 @@
 CHARRA_RC charra_synth_generate_ima_log(uint32_t num_entries, uint32_t seed,
         uint8_t** log_out, uint32_t* log_len_out);
 
-#endif /* CHARRA_SYNTH_LOG_H */
+#endif /* CHARRA_SYNTHETIC_LOG_H */
