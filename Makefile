@@ -125,12 +125,13 @@ SOURCES = $(shell find $(SRCDIR) -name '*.c')
 INCLUDE = -I$(INCDIR)
 
 OBJECTS =  $(addsuffix .o, $(addprefix $(OBJDIR)/common/, charra_log))
-OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling))
+OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log))
 OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/util/, cbor_util charra_util coap_util crypto_util io_util tpm2_util cli_util parser_util))
 
 TARGETS = $(addprefix $(BINDIR)/, attester verifier verifier_old relying_party trust_manager)
 
-.PHONY: all attester verifier verifier_old relying_party trust_manager clean
+.PHONY: all attester verifier verifier_old relying_party trust_manager \
+        test test_event_log clean
 
 all: $(TARGETS)
 attester: $(BINDIR)/attester
@@ -138,6 +139,11 @@ verifier: $(BINDIR)/verifier
 verifier_server: $(BINDIR)/verifier_old
 relying_party: $(BINDIR)/relying_party
 trust_manager: $(BINDIR)/trust_manager
+test_event_log: $(BINDIR)/test_event_log
+
+## run the test suite
+test: $(BINDIR)/test_event_log
+	./$(BINDIR)/test_event_log
 
 
 # ------------------------------------------------------------------------------
@@ -175,6 +181,12 @@ $(BINDIR)/trust_manager: $(SRCDIR)/trust_manager.c $(OBJECTS)
 ifeq ($(enable_stripping),1)
 	strip --strip-unneeded $@
 endif
+
+## --- tests -------------------------------------------------------------------
+
+$(BINDIR)/test_event_log: tests/test_event_log.c $(OBJECTS)
+	@mkdir -p $(@D)
+	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
 ## --- objects -----------------------------------------------------------------
 
