@@ -21,7 +21,7 @@
 
 ## --- set base image(s) -------------------------------------------------------
 
-FROM ghcr.io/tpm2-software/ubuntu-20.04:latest AS base
+FROM --platform=linux/amd64 ghcr.io/tpm2-software/ubuntu-20.04:latest AS base
 
 ## --- metadata ----------------------------------------------------------------
 
@@ -47,6 +47,10 @@ ARG pytss_version='2.1.0'
 ## -----------------------------------------------------------------------------
 ## --- pre-work for interactive environment ------------------------------------
 ## -----------------------------------------------------------------------------
+
+## make apt resilient to the slow/flaky mirror throughput seen under emulation
+RUN echo 'Acquire::Retries "5"; Acquire::http::Timeout "60"; Acquire::https::Timeout "60";' \
+    > /etc/apt/apt.conf.d/80-retries
 
 ## unminimize Ubuntu container image
 RUN yes | unminimize
@@ -84,7 +88,7 @@ RUN git reset --hard \
     && ./bootstrap \
     && ./configure --enable-integration --disable-doxygen-doc \
     && make clean \
-    && make -j \
+    && make -j4 \
     && make install \
     && ldconfig
 
@@ -100,7 +104,7 @@ RUN git clone --depth=1 -b "${tpm2tools_version}" \
 WORKDIR /tmp/tpm2-tools
 RUN ./bootstrap \
     && ./configure \
-    && make -j \
+    && make -j4 \
     && make install
 RUN rm -rfv /tmp/tpm2-tools
 
@@ -110,7 +114,7 @@ RUN git clone --recursive -b "${libcoap_version}" \
 WORKDIR /tmp/libcoap
 RUN ./autogen.sh \
     && ./configure --disable-tests --disable-documentation --disable-manpages --enable-dtls --with-tinydtls --enable-fast-install \
-    && make -j \
+    && make -j4 \
     && make install
 RUN rm -rfv /tmp/libcoap
 
@@ -123,7 +127,7 @@ RUN apt-get update \
 RUN git clone --recursive -b "${mbedtls_version}" \
     'https://github.com/ARMmbed/mbedtls.git' /tmp/mbedtls
 WORKDIR /tmp/mbedtls
-RUN make -j lib SHARED=true \
+RUN make -j4 lib SHARED=true \
     && make install
 RUN rm -rfv /tmp/mbedtls
 
@@ -131,7 +135,7 @@ RUN rm -rfv /tmp/mbedtls
 RUN git clone --depth=1 --recursive -b "${qcbor_version}" \
     'https://github.com/laurencelundblade/QCBOR.git' /tmp/qcbor
 WORKDIR /tmp/qcbor
-RUN make -j all so \
+RUN make -j4 all so \
     && make install install_so
 RUN rm -rfv /tmp/qcbor
 
@@ -139,7 +143,7 @@ RUN rm -rfv /tmp/qcbor
 RUN git clone --depth=1 --recursive -b "${tcose_version}" \
     'https://github.com/laurencelundblade/t_cose.git' /tmp/t_cose
 WORKDIR /tmp/t_cose
-RUN make -j -f Makefile.psa libt_cose.a libt_cose.so \
+RUN make -j4 -f Makefile.psa libt_cose.a libt_cose.so \
     &&  make -f Makefile.psa install install_so
 RUN rm -rfv /tmp/t_cose
 

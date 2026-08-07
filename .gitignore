@@ -11,6 +11,9 @@ obj/*
 # keep folders
 !.gitkeep
 
+# local scratch notes
+NOTES.md
+
 # VSCode
 .vscode/
 
