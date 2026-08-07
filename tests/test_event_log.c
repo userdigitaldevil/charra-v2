@@ -1,5 +1,3 @@
-/* SPDX-License-Identifier: BSD-3-Clause */
-
 /**
  * @file test_event_log.c
  * @brief Standalone tests for IMA event log replay.
