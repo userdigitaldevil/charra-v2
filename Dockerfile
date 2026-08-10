@@ -237,8 +237,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 ## create non-root user and grant sudo permission
+## (the GID may already exist in the base image -- e.g. macOS hosts pass
+## gid=20, which Ubuntu already uses for 'dialout'; reuse it in that case)
 RUN export user="${user}" uid="${uid}" gid="${gid}" \
-    && addgroup --gid "${gid}" "${user}" \
+    && { getent group "${gid}" > /dev/null || addgroup --gid "${gid}" "${user}" ; } \
     && adduser --home /home/"${user}" --uid "${uid}" --gid "${gid}" \
     --disabled-password --gecos '' "${user}" \
     && mkdir -vp /etc/sudoers.d/ \
@@ -271,7 +273,7 @@ COPY "./docker/dist/usr/local/bin/compile-tss" "/usr/local/bin/"
 
 ## add tpm2-tss code examples and test script
 COPY "./docker/dist/home/user/code-examples/" "/home/${user}/code-examples/"
-RUN chown -R "${user}:${user}" "/home/${user}/code-examples/"
+RUN chown -R "${uid}:${gid}" "/home/${user}/code-examples/"
 COPY "./docker/dist/home/user/test-charra-and-tpm2-tss.sh" "/home/${user}/"
 
 ## Docker entrypoint

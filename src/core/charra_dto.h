@@ -97,4 +97,26 @@ typedef struct {
     uint8_t* event_log;
 } msg_attestation_response_dto;
 
+typedef struct {
+    /* Attester's evidence, forwarded by RP */
+    uint32_t attestation_data_len;
+    uint8_t attestation_data[sizeof(TPM2B_ATTEST)];
+    uint32_t tpm2_signature_len;
+    uint8_t tpm2_signature[sizeof(TPMT_SIGNATURE)];
+    uint32_t tpm2_public_key_len;
+    uint8_t tpm2_public_key[sizeof(TPM2B_PUBLIC)];
+
+    /* RP's own quote, proving RP genuinely produced event_log below */
+    uint32_t attestation_data_rp_len;
+    uint8_t attestation_data_rp[sizeof(TPM2B_ATTEST)];
+    uint32_t tpm2_signature_rp_len;
+    uint8_t tpm2_signature_rp[sizeof(TPMT_SIGNATURE)];
+    uint32_t tpm2_public_key_rp_len;
+    uint8_t tpm2_public_key_rp[sizeof(TPM2B_PUBLIC)];
+
+    /* log_r -- RP's redacted log, not Attester's raw one */
+    uint32_t event_log_len;
+    uint8_t* event_log;
+} msg_rp_appraisal_dto;
+
 #endif /* CHARRA_DTO_H */
