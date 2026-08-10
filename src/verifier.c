@@ -291,6 +291,12 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
 
     ESYS_TR sig_key_handle = ESYS_TR_NONE;
     TPMT_TK_VERIFIED* validation = NULL;
+    /* Declared here (rather than right before first use, further down) and
+     * initialized to NULL so that every earlier 'goto cleanup' -- including
+     * the fopen() failure right below -- leaves cleanup able to safely check
+     * them instead of reading indeterminate values. */
+    ESYS_CONTEXT* esys_ctx = NULL;
+    TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
 
     FILE * p_file;
     p_file = fopen("durations_verifier.txt", "w");
@@ -366,8 +372,6 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     double init_duration;
     start_init = clock();
     /* initialize ESAPI */
-    ESYS_CONTEXT* esys_ctx = NULL;
-    TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
     if ((tss_r = Tss2_TctiLdr_Initialize(getenv("CHARRA_TCTI"), &tcti_ctx)) !=
             TSS2_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Tss2_TctiLdr_Initialize.");
