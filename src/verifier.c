@@ -438,6 +438,8 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     end_verifiy_signature = clock();
     verify_signature_duration = ((double) (end_verifiy_signature - start_verifiy_signature)) / CLOCKS_PER_SEC;
     fprintf(p_file, "verify signature took %f seconds to execute \n", verify_signature_duration);
+    /* --- verify attestation signature (defense in depth, mbedTLS) --- */
+    bool attestation_result_signature_mbedtls = false;
     {
         /* convert TPM public key to mbedTLS public key */
         charra_log_info(
@@ -461,6 +463,7 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
                 CHARRA_RC_SUCCESS) {
             charra_log_info(
                     "[" LOG_NAME "]     => TPM Quote signature is valid!");
+            attestation_result_signature_mbedtls = true;
         } else {
             charra_log_error(
                     "[" LOG_NAME "]     => TPM Quote signature is NOT valid!");
@@ -573,6 +576,7 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     /* --- output result --- */
 
     bool attestation_result = attestation_result_signature &&
+                              attestation_result_signature_mbedtls &&
                               attestation_result_nonce &&
                               attestation_result_pcrs && attestation_event_log;
 
