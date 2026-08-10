@@ -151,6 +151,69 @@ static void test_different_entries_redact_differently(void) {
     free(redacted);
 }
 
+static void test_file_digest_preserved_path_redacted(void) {
+    printf("\nfile-content digest survives redaction unchanged; path does not\n");
+
+    uint8_t* raw_log = NULL;
+    uint32_t raw_log_len = 0;
+    charra_synth_generate_ima_log(1, 42, &raw_log, &raw_log_len);
+
+    uint8_t* redacted = NULL;
+    uint32_t redacted_len = 0;
+    charra_sdk_redact_ima_log(raw_log, raw_log_len, &redacted, &redacted_len);
+
+    /* pull the file-content digest straight out of the RAW entry's
+     * template_data: "sha256:" (7 bytes) + digest (32 bytes) + NUL + path */
+    uint16_t raw_digest_len = 0;
+    charra_event_log_ima_detect_digest_len(
+            raw_log, raw_log_len, &raw_digest_len);
+    uint32_t raw_offset = 0;
+    charra_event_log_entry raw_entry = {0};
+    charra_event_log_parse_entry(
+            raw_log, raw_log_len, &raw_offset, raw_digest_len, &raw_entry);
+    const char* prefix = "sha256:";
+    uint32_t prefix_len = (uint32_t)strlen(prefix);
+    check("raw template_data is at least prefix+digest long",
+            raw_entry.template_data_len >= prefix_len + TPM2_SHA256_DIGEST_SIZE);
+    const uint8_t* raw_file_digest = raw_entry.template_data + prefix_len;
+
+    /* now pull the redacted entry's template_data apart the same way */
+    uint16_t redacted_digest_len = 0;
+    charra_event_log_ima_detect_digest_len(
+            redacted, redacted_len, &redacted_digest_len);
+    uint32_t red_offset = 0;
+    charra_event_log_entry red_entry = {0};
+    charra_event_log_parse_entry(redacted, redacted_len, &red_offset,
+            redacted_digest_len, &red_entry);
+
+    check("redacted template_data is exactly 71 bytes "
+          "(7-byte prefix + 32-byte file digest + 32-byte path hash)",
+            red_entry.template_data_len == 71);
+    check("redacted template_data starts with \"sha256:\"",
+            red_entry.template_data_len >= prefix_len &&
+                    memcmp(red_entry.template_data, prefix, prefix_len) == 0);
+    check("file-content digest is preserved byte-for-byte",
+            red_entry.template_data_len >= prefix_len + TPM2_SHA256_DIGEST_SIZE &&
+                    memcmp(red_entry.template_data + prefix_len,
+                            raw_file_digest, TPM2_SHA256_DIGEST_SIZE) == 0);
+
+    /* the sensitive path must not appear anywhere in the redacted log */
+    const char* needle = "/etc/company/api_keys.conf";
+    size_t needle_len = strlen(needle);
+    bool path_found = false;
+    for (uint32_t i = 0; i + needle_len <= redacted_len; ++i) {
+        if (memcmp(redacted + i, needle, needle_len) == 0) {
+            path_found = true;
+            break;
+        }
+    }
+    check("the raw path does NOT appear anywhere in the redacted log",
+            !path_found);
+
+    free(raw_log);
+    free(redacted);
+}
+
 static void test_empty_log(void) {
     printf("\nempty log redacts to an empty log\n");
 
@@ -200,6 +263,7 @@ int main(void) {
     test_redacted_pcr_differs_from_raw();
     test_deterministic();
     test_different_entries_redact_differently();
+    test_file_digest_preserved_path_redacted();
     test_empty_log();
     test_bad_arguments();
     test_malformed_log_rejected();
