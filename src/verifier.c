@@ -339,7 +339,13 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     fprintf(p_file, "unmarshal evidence took %f seconds to execute \n", unmarshal_duration);
 
     /* verify data */
-    if (res.attestation_data_len > sizeof(TPM2B_ATTEST)) {
+    /* Checked against sizeof(TPMS_ATTEST), not sizeof(TPM2B_ATTEST): this
+     * data is later memcpy'd into attest.attestationData (see below), which
+     * is a BYTE[sizeof(TPMS_ATTEST)] sub-field of TPM2B_ATTEST -- smaller
+     * than the whole struct by (at least) the leading UINT16 size field.
+     * Checking against the larger struct size let a too-long
+     * attestation_data_len pass here and then overflow attestationData. */
+    if (res.attestation_data_len > sizeof(TPMS_ATTEST)) {
         charra_log_error(
                 "[" LOG_NAME
                 "] Length of attestation data exceeds maximum allowed size.");
