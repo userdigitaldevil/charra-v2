@@ -1,0 +1,10 @@
+# Blacklist of known-bad file-content SHA-256 hashes, one per line.
+#
+# Consulted by verify_log_r_file_hashes_against_policy() in src/verifier.c
+# against the file-content digest preserved in each log_r entry by
+# charra_sdk_redact_ima_log() (see src/core/charra_sdk.h). A digest matching
+# an entry here fails appraisal outright, distinct from "just not
+# whitelisted" in the logs.
+#
+# Format: "0x" followed by 64 hex characters (32 bytes), one hash per line.
+# Blank lines and '#' comments are ignored.
