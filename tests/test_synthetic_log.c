@@ -1,12 +1,12 @@
 /**
- * @file test_synth_log.c
+ * @file test_synthetic_log.c
  * @brief Standalone tests for synthetic IMA log generation.
  *
  * The strongest check available: the generator's own output is fed straight
  * into charra_replay_ima_log(), the already-proven replay function. If the
  * generator produces well-formed entries, replay must succeed.
  *
- * Build and run:  make test_synth_log && ./bin/test_synth_log
+ * Build and run:  make test_synthetic_log && ./bin/test_synthetic_log
  */
 
 #include <stdbool.h>

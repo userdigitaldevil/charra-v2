@@ -28,6 +28,23 @@ static uint32_t read_u32(const uint8_t* p) {
            ((uint32_t)p[3] << 24);
 }
 
+void charra_event_log_append_u32(
+        uint8_t* buf, uint32_t* offset, uint32_t value) {
+    buf[*offset + 0] = (uint8_t)(value & 0xff);
+    buf[*offset + 1] = (uint8_t)((value >> 8) & 0xff);
+    buf[*offset + 2] = (uint8_t)((value >> 16) & 0xff);
+    buf[*offset + 3] = (uint8_t)((value >> 24) & 0xff);
+    *offset += sizeof(uint32_t);
+}
+
+void charra_event_log_append_bytes(
+        uint8_t* buf, uint32_t* offset, const void* data, uint32_t len) {
+    if (len > 0) {
+        memcpy(buf + *offset, data, len);
+    }
+    *offset += len;
+}
+
 /**
  * @brief Parse the entry starting at *offset and advance *offset past it.
  *
@@ -39,7 +56,7 @@ static uint32_t read_u32(const uint8_t* p) {
  * @returns CHARRA_RC_SUCCESS, or CHARRA_RC_MARSHALING_ERROR if the entry is
  * truncated or structurally implausible.
  */
-static CHARRA_RC parse_next_entry(const uint8_t* log, uint32_t log_len,
+CHARRA_RC charra_event_log_parse_entry(const uint8_t* log, uint32_t log_len,
         uint32_t* offset, uint16_t digest_len, charra_event_log_entry* out) {
     uint32_t off = *offset;
 
@@ -120,7 +137,7 @@ static bool log_parses_at(
 
     while (offset < log_len) {
         charra_event_log_entry entry = {0};
-        if (parse_next_entry(log, log_len, &offset, digest_len, &entry) !=
+        if (charra_event_log_parse_entry(log, log_len, &offset, digest_len, &entry) !=
                 CHARRA_RC_SUCCESS) {
             return false;
         }
@@ -228,7 +245,7 @@ static bool replay_at(const uint8_t* log, uint32_t log_len,
     uint32_t num_extended = 0;
     while (offset < log_len) {
         charra_event_log_entry entry = {0};
-        if (parse_next_entry(log, log_len, &offset, digest_len, &entry) !=
+        if (charra_event_log_parse_entry(log, log_len, &offset, digest_len, &entry) !=
                 CHARRA_RC_SUCCESS) {
             return false;
         }
@@ -281,7 +298,7 @@ CHARRA_RC charra_replay_ima_log(const uint8_t* log, uint32_t log_len,
     {
         uint32_t peek_offset = 0;
         charra_event_log_entry peek_entry = {0};
-        if (parse_next_entry(log, log_len, &peek_offset,
+        if (charra_event_log_parse_entry(log, log_len, &peek_offset,
                     TPM2_SHA1_DIGEST_SIZE, &peek_entry) != CHARRA_RC_SUCCESS) {
             candidates[0] = TPM2_SHA256_DIGEST_SIZE;
             candidates[1] = TPM2_SHA1_DIGEST_SIZE;

@@ -53,20 +53,6 @@ static CHARRA_RC make_fake_file_digest(
     return hash_sha256(sizeof(material), material, out);
 }
 
-static void append_u32(uint8_t* buf, uint32_t* offset, uint32_t value) {
-    buf[*offset + 0] = (uint8_t)(value & 0xff);
-    buf[*offset + 1] = (uint8_t)((value >> 8) & 0xff);
-    buf[*offset + 2] = (uint8_t)((value >> 16) & 0xff);
-    buf[*offset + 3] = (uint8_t)((value >> 24) & 0xff);
-    *offset += sizeof(uint32_t);
-}
-
-static void append_bytes(
-        uint8_t* buf, uint32_t* offset, const void* data, uint32_t len) {
-    memcpy(buf + *offset, data, len);
-    *offset += len;
-}
-
 CHARRA_RC charra_synth_generate_ima_log(uint32_t num_entries, uint32_t seed,
         uint8_t** log_out, uint32_t* log_len_out) {
     if (num_entries == 0 || log_out == NULL || log_len_out == NULL) {
@@ -135,13 +121,16 @@ CHARRA_RC charra_synth_generate_ima_log(uint32_t num_entries, uint32_t seed,
             return rc;
         }
 
-        append_u32(buf, &offset, CHARRA_IMA_PCR_INDEX);
-        append_bytes(buf, &offset, template_digest, TPM2_SHA256_DIGEST_SIZE);
-        append_u32(buf, &offset, (uint32_t)(sizeof(TEMPLATE_NAME) - 1));
-        append_bytes(
+        charra_event_log_append_u32(buf, &offset, CHARRA_IMA_PCR_INDEX);
+        charra_event_log_append_bytes(
+                buf, &offset, template_digest, TPM2_SHA256_DIGEST_SIZE);
+        charra_event_log_append_u32(
+                buf, &offset, (uint32_t)(sizeof(TEMPLATE_NAME) - 1));
+        charra_event_log_append_bytes(
                 buf, &offset, TEMPLATE_NAME, sizeof(TEMPLATE_NAME) - 1);
-        append_u32(buf, &offset, template_data_len);
-        append_bytes(buf, &offset, template_data, template_data_len);
+        charra_event_log_append_u32(buf, &offset, template_data_len);
+        charra_event_log_append_bytes(
+                buf, &offset, template_data, template_data_len);
 
         free(template_data);
     }

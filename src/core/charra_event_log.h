@@ -60,6 +60,51 @@ typedef struct {
     uint32_t template_data_len;
 } charra_event_log_entry;
 
+/**
+ * @brief Parse the entry starting at *offset and advance *offset past it.
+ *
+ * Public deliberately: the RP-side redaction logic needs a second, genuine
+ * consumer of this exact bounds-checked TLV parser, and reusing it here
+ * beats writing a second one that could silently diverge from the one
+ * charra_replay_ima_log() depends on.
+ *
+ * The log is untrusted input: every field read is bounds-checked, and a
+ * malformed entry fails rather than reading past the buffer. Bounds checks
+ * are written as 'need > log_len - offset', not 'offset + need > log_len',
+ * so a hostile length field cannot overflow the check.
+ *
+ * @param[in] log log bytes
+ * @param[in] log_len length of log
+ * @param[in,out] offset position to start parsing at; advanced past the
+ * parsed entry on success, left unspecified on failure
+ * @param[in] digest_len expected size of template_digest (see
+ * charra_event_log_ima_detect_digest_len())
+ * @param[out] out the parsed entry; all pointers inside it borrow into log
+ * @returns CHARRA_RC_SUCCESS, or CHARRA_RC_MARSHALING_ERROR if the entry is
+ * truncated or structurally implausible.
+ */
+CHARRA_RC charra_event_log_parse_entry(const uint8_t* log, uint32_t log_len,
+        uint32_t* offset, uint16_t digest_len, charra_event_log_entry* out);
+
+/**
+ * @brief Write a uint32 at buf[*offset] in the same byte order
+ * charra_event_log_parse_entry() reads, and advance *offset past it.
+ *
+ * Public for the same reason charra_event_log_parse_entry() is: more than
+ * one module builds log entries in this exact TLV shape (synthetic log
+ * generation, redaction), and keeping one writer here -- next to the reader
+ * it must stay in sync with -- beats each one reimplementing it.
+ */
+void charra_event_log_append_u32(
+        uint8_t* buf, uint32_t* offset, uint32_t value);
+
+/**
+ * @brief Copy len bytes to buf[*offset] and advance *offset past them.
+ * A no-op copy (but still advances *offset) when len is 0.
+ */
+void charra_event_log_append_bytes(
+        uint8_t* buf, uint32_t* offset, const void* data, uint32_t len);
+
 /* --- PCR accumulator ---------------------------------------------------- */
 
 /**

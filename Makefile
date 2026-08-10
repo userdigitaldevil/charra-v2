@@ -131,7 +131,7 @@ OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/util/, cbor_util charra_util co
 TARGETS = $(addprefix $(BINDIR)/, attester verifier verifier_old relying_party trust_manager)
 
 .PHONY: all attester verifier verifier_old relying_party trust_manager \
-        test test_event_log test_synth_log clean
+        test test_event_log test_synthetic_log clean
 
 all: $(TARGETS)
 attester: $(BINDIR)/attester
@@ -140,12 +140,12 @@ verifier_server: $(BINDIR)/verifier_old
 relying_party: $(BINDIR)/relying_party
 trust_manager: $(BINDIR)/trust_manager
 test_event_log: $(BINDIR)/test_event_log
-test_synth_log: $(BINDIR)/test_synth_log
+test_synthetic_log: $(BINDIR)/test_synthetic_log
 
 ## run the test suite
-test: $(BINDIR)/test_event_log $(BINDIR)/test_synth_log
+test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log
 	./$(BINDIR)/test_event_log
-	./$(BINDIR)/test_synth_log
+	./$(BINDIR)/test_synthetic_log
 
 
 # ------------------------------------------------------------------------------
@@ -190,7 +190,7 @@ $(BINDIR)/test_event_log: tests/test_event_log.c $(OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
-$(BINDIR)/test_synth_log: tests/test_synth_log.c $(OBJECTS)
+$(BINDIR)/test_synthetic_log: tests/test_synthetic_log.c $(OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
