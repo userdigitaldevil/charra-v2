@@ -1,0 +1,388 @@
+[36mDEBUG[0m[attester] Attester Configuration:
+[36mDEBUG[0m[attester]     Used local port: 5683
+[36mDEBUG[0m[attester]     DTLS-PSK enabled: false
+[36mDEBUG[0m[attester]     DTLS-RPK enabled: false
+[32mINFO [0m[attester] Initializing CoAP in block-wise mode.
+[32mINFO [0m[attester] Creating CoAP server endpoint using UDP.
+[32mINFO [0m[attester] Registering CoAP resources.
+[36mDEBUG[0m[attester] Entering main loop.
+[32mINFO [0m[attester] Resource 'attest': Received message.
+[32mINFO [0m[attester] Received data of length 52.
+[32mINFO [0m[attester] Received data of total length 52.
+[32mINFO [0m[attester] Received an attestation request.
+[32mINFO [0m[attester] Parsing received CBOR data.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborFalseType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[attester] Preparing TPM quote data.
+[32mINFO [0mReceived nonce of length 20:
+                                   0xddb582368942453b0f5adb57dc62c684bd44854b
+[32mINFO [0m[attester] Loading TPM key.
+[32mINFO [0mLoading key "PK.RSA.default".
+[32mINFO [0mPrimary Key created successfully.
+[32mINFO [0m[attester] Do TPM Quote.
+[32mINFO [0m[attester] TPM Quote successful.
+[32mINFO [0m[attester] Preparing response.
+[32mINFO [0m[attester] Marshaling response to CBOR.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[attester] Size of marshaled response is 1277 bytes.
+[32mINFO [0m[attester] Adding marshaled data to CoAP response PDU and send it.
+[32mINFO [0m[attester] Evidence sent to the relying party.
+[32mINFO [0m[attester] Resource 'attest': Received message.
+[32mINFO [0m[attester] Received data of length 52.
+[32mINFO [0m[attester] Received data of total length 52.
+[32mINFO [0m[attester] Received an attestation request.
+[32mINFO [0m[attester] Parsing received CBOR data.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborFalseType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[attester] Preparing TPM quote data.
+[32mINFO [0mReceived nonce of length 20:
+                                   0xdf19ee1f7a0e26943c510b4aa1e43bc5192eedb6
+[32mINFO [0m[attester] Loading TPM key.
+[32mINFO [0mLoading key "PK.RSA.default".
+[32mINFO [0mPrimary Key created successfully.
+[32mINFO [0m[attester] Do TPM Quote.
+[32mINFO [0m[attester] TPM Quote successful.
+[32mINFO [0m[attester] Preparing response.
+[32mINFO [0m[attester] Marshaling response to CBOR.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[attester] Size of marshaled response is 1277 bytes.
+[32mINFO [0m[attester] Adding marshaled data to CoAP response PDU and send it.
+[32mINFO [0m[attester] Evidence sent to the relying party.
+[32mINFO [0m[attester] Resource 'attest': Received message.
+[32mINFO [0m[attester] Received data of length 52.
+[32mINFO [0m[attester] Received data of total length 52.
+[32mINFO [0m[attester] Received an attestation request.
+[32mINFO [0m[attester] Parsing received CBOR data.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborFalseType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[attester] Preparing TPM quote data.
+[32mINFO [0mReceived nonce of length 20:
+                                   0x987b93f28839a484dee53cfc228ac5ffb9017070
+[32mINFO [0m[attester] Loading TPM key.
+[32mINFO [0mLoading key "PK.RSA.default".
+[32mINFO [0mPrimary Key created successfully.
+[32mINFO [0m[attester] Do TPM Quote.
+[32mINFO [0m[attester] TPM Quote successful.
+[32mINFO [0m[attester] Preparing response.
+[32mINFO [0m[attester] Marshaling response to CBOR.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[attester] Size of marshaled response is 1277 bytes.
+[32mINFO [0m[attester] Adding marshaled data to CoAP response PDU and send it.
+[32mINFO [0m[attester] Evidence sent to the relying party.
+[32mINFO [0m[attester] Resource 'attest': Received message.
+[32mINFO [0m[attester] Received data of length 52.
+[32mINFO [0m[attester] Received data of total length 52.
+[32mINFO [0m[attester] Received an attestation request.
+[32mINFO [0m[attester] Parsing received CBOR data.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborFalseType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[attester] Preparing TPM quote data.
+[32mINFO [0mReceived nonce of length 20:
+                                   0xd848a5b398b5805ecb2193434a5a98d2b668eb8e
+[32mINFO [0m[attester] Loading TPM key.
+[32mINFO [0mLoading key "PK.RSA.default".
+[32mINFO [0mPrimary Key created successfully.
+[32mINFO [0m[attester] Do TPM Quote.
+[32mINFO [0m[attester] TPM Quote successful.
+[32mINFO [0m[attester] Preparing response.
+[32mINFO [0m[attester] Marshaling response to CBOR.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[attester] Size of marshaled response is 1277 bytes.
+[32mINFO [0m[attester] Adding marshaled data to CoAP response PDU and send it.
+[32mINFO [0m[attester] Evidence sent to the relying party.
+[32mINFO [0m[attester] Resource 'attest': Received message.
+[32mINFO [0m[attester] Received data of length 52.
+[32mINFO [0m[attester] Received data of total length 52.
+[32mINFO [0m[attester] Received an attestation request.
+[32mINFO [0m[attester] Parsing received CBOR data.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborFalseType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[attester] Preparing TPM quote data.
+[32mINFO [0mReceived nonce of length 20:
+                                   0x8a58bc8fa6ccbdf4c0a0b98c52f83107bec91195
+[32mINFO [0m[attester] Loading TPM key.
+[32mINFO [0mLoading key "PK.RSA.default".
+[32mINFO [0mPrimary Key created successfully.
+[32mINFO [0m[attester] Do TPM Quote.
+[32mINFO [0m[attester] TPM Quote successful.
+[32mINFO [0m[attester] Preparing response.
+[32mINFO [0m[attester] Marshaling response to CBOR.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[attester] Size of marshaled response is 1277 bytes.
+[32mINFO [0m[attester] Adding marshaled data to CoAP response PDU and send it.
+[32mINFO [0m[attester] Evidence sent to the relying party.
+[32mINFO [0m[attester] Resource 'attest': Received message.
+[32mINFO [0m[attester] Received data of length 52.
+[32mINFO [0m[attester] Received data of total length 52.
+[32mINFO [0m[attester] Received an attestation request.
+[32mINFO [0m[attester] Parsing received CBOR data.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborFalseType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[attester] Preparing TPM quote data.
+[32mINFO [0mReceived nonce of length 20:
+                                   0x169530ae3245da4756e61f5f43a7b6b4ebd254eb
+[32mINFO [0m[attester] Loading TPM key.
+[32mINFO [0mLoading key "PK.RSA.default".
+[32mINFO [0mPrimary Key created successfully.
+[32mINFO [0m[attester] Do TPM Quote.
+[32mINFO [0m[attester] TPM Quote successful.
+[32mINFO [0m[attester] Preparing response.
+[32mINFO [0m[attester] Marshaling response to CBOR.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[attester] Size of marshaled response is 1277 bytes.
+[32mINFO [0m[attester] Adding marshaled data to CoAP response PDU and send it.
+[32mINFO [0m[attester] Evidence sent to the relying party.
+[32mINFO [0m[attester] Resource 'attest': Received message.
+[32mINFO [0m[attester] Received data of length 52.
+[32mINFO [0m[attester] Received data of total length 52.
+[32mINFO [0m[attester] Received an attestation request.
+[32mINFO [0m[attester] Parsing received CBOR data.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborFalseType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[attester] Preparing TPM quote data.
+[32mINFO [0mReceived nonce of length 20:
+                                   0x4726af19abb4797b5707e0950ff0e6545f692370
+[32mINFO [0m[attester] Loading TPM key.
+[32mINFO [0mLoading key "PK.RSA.default".
+[32mINFO [0mPrimary Key created successfully.
+[32mINFO [0m[attester] Do TPM Quote.
+[32mINFO [0m[attester] TPM Quote successful.
+[32mINFO [0m[attester] Preparing response.
+[32mINFO [0m[attester] Marshaling response to CBOR.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[attester] Size of marshaled response is 1277 bytes.
+[32mINFO [0m[attester] Adding marshaled data to CoAP response PDU and send it.
+[32mINFO [0m[attester] Evidence sent to the relying party.
+[32mINFO [0m[attester] Resource 'attest': Received message.
+[32mINFO [0m[attester] Received data of length 52.
+[32mINFO [0m[attester] Received data of total length 52.
+[32mINFO [0m[attester] Received an attestation request.
+[32mINFO [0m[attester] Parsing received CBOR data.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborFalseType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[attester] Preparing TPM quote data.
+[32mINFO [0mReceived nonce of length 20:
+                                   0x39205a500b75edbea7a6bdb404bd463c2434ebbd
+[32mINFO [0m[attester] Loading TPM key.
+[32mINFO [0mLoading key "PK.RSA.default".
+[32mINFO [0mPrimary Key created successfully.
+[32mINFO [0m[attester] Do TPM Quote.
+[32mINFO [0m[attester] TPM Quote successful.
+[32mINFO [0m[attester] Preparing response.
+[32mINFO [0m[attester] Marshaling response to CBOR.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[attester] Size of marshaled response is 1277 bytes.
+[32mINFO [0m[attester] Adding marshaled data to CoAP response PDU and send it.
+[32mINFO [0m[attester] Evidence sent to the relying party.
+[32mINFO [0m[attester] Resource 'attest': Received message.
+[32mINFO [0m[attester] Received data of length 52.
+[32mINFO [0m[attester] Received data of total length 52.
+[32mINFO [0m[attester] Received an attestation request.
+[32mINFO [0m[attester] Parsing received CBOR data.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborFalseType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[attester] Preparing TPM quote data.
+[32mINFO [0mReceived nonce of length 20:
+                                   0xa9e16058e75aa988fe654d9a737a39be9b1914d6
+[32mINFO [0m[attester] Loading TPM key.
+[32mINFO [0mLoading key "PK.RSA.default".
+[32mINFO [0mPrimary Key created successfully.
+[32mINFO [0m[attester] Do TPM Quote.
+[32mINFO [0m[attester] TPM Quote successful.
+[32mINFO [0m[attester] Preparing response.
+[32mINFO [0m[attester] Marshaling response to CBOR.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[attester] Size of marshaled response is 1277 bytes.
+[32mINFO [0m[attester] Adding marshaled data to CoAP response PDU and send it.
+[32mINFO [0m[attester] Evidence sent to the relying party.
+[32mINFO [0m[attester] Resource 'attest': Received message.
+[32mINFO [0m[attester] Received data of length 52.
+[32mINFO [0m[attester] Received data of total length 52.
+[32mINFO [0m[attester] Received an attestation request.
+[32mINFO [0m[attester] Parsing received CBOR data.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborFalseType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[attester] Preparing TPM quote data.
+[32mINFO [0mReceived nonce of length 20:
+                                   0x30a8f4abe5bd7875bb688d6e2a0d0bc87969a0e7
+[32mINFO [0m[attester] Loading TPM key.
+[32mINFO [0mLoading key "PK.RSA.default".
+[32mINFO [0mPrimary Key created successfully.
+[32mINFO [0m[attester] Do TPM Quote.
+[32mINFO [0m[attester] TPM Quote successful.
+[32mINFO [0m[attester] Preparing response.
+[32mINFO [0m[attester] Marshaling response to CBOR.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[attester] Size of marshaled response is 1277 bytes.
+[32mINFO [0m[attester] Adding marshaled data to CoAP response PDU and send it.
+[32mINFO [0m[attester] Evidence sent to the relying party.

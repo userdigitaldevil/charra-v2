@@ -1,0 +1,8 @@
+unmarshal evidence took 0.000393 seconds to execute 
+init took 0.003216 seconds to execute 
+load external public key took 0.004911 seconds to execute 
+verify signature took 0.000865 seconds to execute 
+verify nonce took 0.000224 seconds to execute 
+verify pcr took 0.005270 seconds to execute 
+appraising took 0.016621 seconds to execute 
+total measured 0.014879  

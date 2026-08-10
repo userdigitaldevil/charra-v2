@@ -1,0 +1,600 @@
+[32mINFO [0m[relying party] Checking environment variables.
+[32mINFO [0m[relying party] Getting verifiers.
+[32mINFO [0m[relying party]  +------------ Interaction with the Trust Manager --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending CoAP message.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received data of length 28.
+[32mINFO [0m[relying party] Received data of total length 28.
+[32mINFO [0m[relying party] Verifier ID 1: IP Address = 127.0.0.1, Port Number = 5684
+[32mINFO [0m[relying party] Getting evidence.
+[32mINFO [0m[relying party]  +------------ Interaction with the Attester --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Creating attestation request.
+[32mINFO [0m[relying party] Generated nonce of length 20:
+                                                  0xddb582368942453b0f5adb57dc62c684bd44854b
+[32mINFO [0m[relying party] Marshaling attestation request data to CBOR.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending attestation request.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received evidence of total length 1277.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[relying party] Forwarding evidence to the verifiers.
+[32mINFO [0m[relying party] Getting attestation results.
+[32mINFO [0m[relying party]  +------------ Interaction with the Verifiers --------------+
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 1 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[relying party] Verifier 1: Attestation successful!
+[32mINFO [0m[relying party] Attestation successful by majority vote!
+[32mINFO [0m[relying party] Checking environment variables.
+[32mINFO [0m[relying party] Getting verifiers.
+[32mINFO [0m[relying party]  +------------ Interaction with the Trust Manager --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending CoAP message.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received data of length 28.
+[32mINFO [0m[relying party] Received data of total length 28.
+[32mINFO [0m[relying party] Verifier ID 1: IP Address = 127.0.0.1, Port Number = 5684
+[32mINFO [0m[relying party] Getting evidence.
+[32mINFO [0m[relying party]  +------------ Interaction with the Attester --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Creating attestation request.
+[32mINFO [0m[relying party] Generated nonce of length 20:
+                                                  0xdf19ee1f7a0e26943c510b4aa1e43bc5192eedb6
+[32mINFO [0m[relying party] Marshaling attestation request data to CBOR.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending attestation request.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received evidence of total length 1277.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[relying party] Forwarding evidence to the verifiers.
+[32mINFO [0m[relying party] Getting attestation results.
+[32mINFO [0m[relying party]  +------------ Interaction with the Verifiers --------------+
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 1 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[relying party] Verifier 1: Attestation successful!
+[32mINFO [0m[relying party] Attestation successful by majority vote!
+[32mINFO [0m[relying party] Checking environment variables.
+[32mINFO [0m[relying party] Getting verifiers.
+[32mINFO [0m[relying party]  +------------ Interaction with the Trust Manager --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending CoAP message.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received data of length 56.
+[32mINFO [0m[relying party] Received data of total length 56.
+[32mINFO [0m[relying party] Verifier ID 1: IP Address = 127.0.0.1, Port Number = 5684
+[32mINFO [0m[relying party] Verifier ID 2: IP Address = 127.0.0.1, Port Number = 5685
+[32mINFO [0m[relying party] Getting evidence.
+[32mINFO [0m[relying party]  +------------ Interaction with the Attester --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Creating attestation request.
+[32mINFO [0m[relying party] Generated nonce of length 20:
+                                                  0x987b93f28839a484dee53cfc228ac5ffb9017070
+[32mINFO [0m[relying party] Marshaling attestation request data to CBOR.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending attestation request.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received evidence of total length 1277.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[relying party] Forwarding evidence to the verifiers.
+[32mINFO [0m[relying party] Getting attestation results.
+[32mINFO [0m[relying party]  +------------ Interaction with the Verifiers --------------+
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 1 ...
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 2 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[relying party] Verifier 1: Attestation successful!
+[32mINFO [0m[relying party] Verifier 2: Attestation successful!
+[32mINFO [0m[relying party] Attestation successful by majority vote!
+[32mINFO [0m[relying party] Checking environment variables.
+[32mINFO [0m[relying party] Getting verifiers.
+[32mINFO [0m[relying party]  +------------ Interaction with the Trust Manager --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending CoAP message.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received data of length 56.
+[32mINFO [0m[relying party] Received data of total length 56.
+[32mINFO [0m[relying party] Verifier ID 1: IP Address = 127.0.0.1, Port Number = 5684
+[32mINFO [0m[relying party] Verifier ID 2: IP Address = 127.0.0.1, Port Number = 5685
+[32mINFO [0m[relying party] Getting evidence.
+[32mINFO [0m[relying party]  +------------ Interaction with the Attester --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Creating attestation request.
+[32mINFO [0m[relying party] Generated nonce of length 20:
+                                                  0xd848a5b398b5805ecb2193434a5a98d2b668eb8e
+[32mINFO [0m[relying party] Marshaling attestation request data to CBOR.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending attestation request.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received evidence of total length 1277.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[relying party] Forwarding evidence to the verifiers.
+[32mINFO [0m[relying party] Getting attestation results.
+[32mINFO [0m[relying party]  +------------ Interaction with the Verifiers --------------+
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 1 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 2 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[relying party] Verifier 1: Attestation successful!
+[32mINFO [0m[relying party] Verifier 2: Attestation successful!
+[32mINFO [0m[relying party] Attestation successful by majority vote!
+[32mINFO [0m[relying party] Checking environment variables.
+[32mINFO [0m[relying party] Getting verifiers.
+[32mINFO [0m[relying party]  +------------ Interaction with the Trust Manager --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending CoAP message.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received data of length 84.
+[32mINFO [0m[relying party] Received data of total length 84.
+[32mINFO [0m[relying party] Verifier ID 1: IP Address = 127.0.0.1, Port Number = 5684
+[32mINFO [0m[relying party] Verifier ID 2: IP Address = 127.0.0.1, Port Number = 5685
+[32mINFO [0m[relying party] Verifier ID 3: IP Address = 127.0.0.1, Port Number = 5686
+[32mINFO [0m[relying party] Getting evidence.
+[32mINFO [0m[relying party]  +------------ Interaction with the Attester --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Creating attestation request.
+[32mINFO [0m[relying party] Generated nonce of length 20:
+                                                  0x8a58bc8fa6ccbdf4c0a0b98c52f83107bec91195
+[32mINFO [0m[relying party] Marshaling attestation request data to CBOR.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending attestation request.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received evidence of total length 1277.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[relying party] Forwarding evidence to the verifiers.
+[32mINFO [0m[relying party] Getting attestation results.
+[32mINFO [0m[relying party]  +------------ Interaction with the Verifiers --------------+
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 1 ...
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 2 ...
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 3 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[relying party] Verifier 1: Attestation successful!
+[32mINFO [0m[relying party] Verifier 2: Attestation successful!
+[32mINFO [0m[relying party] Verifier 3: Attestation successful!
+[32mINFO [0m[relying party] Attestation successful by majority vote!
+[32mINFO [0m[relying party] Checking environment variables.
+[32mINFO [0m[relying party] Getting verifiers.
+[32mINFO [0m[relying party]  +------------ Interaction with the Trust Manager --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending CoAP message.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received data of length 84.
+[32mINFO [0m[relying party] Received data of total length 84.
+[32mINFO [0m[relying party] Verifier ID 1: IP Address = 127.0.0.1, Port Number = 5684
+[32mINFO [0m[relying party] Verifier ID 2: IP Address = 127.0.0.1, Port Number = 5685
+[32mINFO [0m[relying party] Verifier ID 3: IP Address = 127.0.0.1, Port Number = 5686
+[32mINFO [0m[relying party] Getting evidence.
+[32mINFO [0m[relying party]  +------------ Interaction with the Attester --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Creating attestation request.
+[32mINFO [0m[relying party] Generated nonce of length 20:
+                                                  0x169530ae3245da4756e61f5f43a7b6b4ebd254eb
+[32mINFO [0m[relying party] Marshaling attestation request data to CBOR.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending attestation request.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received evidence of total length 1277.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[relying party] Forwarding evidence to the verifiers.
+[32mINFO [0m[relying party] Getting attestation results.
+[32mINFO [0m[relying party]  +------------ Interaction with the Verifiers --------------+
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 1 ...
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 2 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 3 ...
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0m[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+Size of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[relying party] Verifier 1: Attestation successful!
+[32mINFO [0m[relying party] Verifier 2: Attestation successful!
+[32mINFO [0m[relying party] Verifier 3: Attestation successful!
+[32mINFO [0m[relying party] Attestation successful by majority vote!
+[32mINFO [0m[relying party] Checking environment variables.
+[32mINFO [0m[relying party] Getting verifiers.
+[32mINFO [0m[relying party]  +------------ Interaction with the Trust Manager --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending CoAP message.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received data of length 112.
+[32mINFO [0m[relying party] Received data of total length 112.
+[32mINFO [0m[relying party] Verifier ID 1: IP Address = 127.0.0.1, Port Number = 5684
+[32mINFO [0m[relying party] Verifier ID 2: IP Address = 127.0.0.1, Port Number = 5685
+[32mINFO [0m[relying party] Verifier ID 3: IP Address = 127.0.0.1, Port Number = 5686
+[32mINFO [0m[relying party] Verifier ID 4: IP Address = 127.0.0.1, Port Number = 5687
+[32mINFO [0m[relying party] Getting evidence.
+[32mINFO [0m[relying party]  +------------ Interaction with the Attester --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Creating attestation request.
+[32mINFO [0m[relying party] Generated nonce of length 20:
+                                                  0x4726af19abb4797b5707e0950ff0e6545f692370
+[32mINFO [0m[relying party] Marshaling attestation request data to CBOR.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending attestation request.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received evidence of total length 1277.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[relying party] Forwarding evidence to the verifiers.
+[32mINFO [0m[relying party] Getting attestation results.
+[32mINFO [0m[relying party]  +------------ Interaction with the Verifiers --------------+
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 1 ...
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 2 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 3 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 4 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[relying party] Verifier 1: Attestation successful!
+[32mINFO [0m[relying party] Verifier 2: Attestation successful!
+[32mINFO [0m[relying party] Verifier 3: Attestation successful!
+[32mINFO [0m[relying party] Verifier 4: Attestation successful!
+[32mINFO [0m[relying party] Attestation successful by majority vote!
+[32mINFO [0m[relying party] Checking environment variables.
+[32mINFO [0m[relying party] Getting verifiers.
+[32mINFO [0m[relying party]  +------------ Interaction with the Trust Manager --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending CoAP message.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received data of length 112.
+[32mINFO [0m[relying party] Received data of total length 112.
+[32mINFO [0m[relying party] Verifier ID 1: IP Address = 127.0.0.1, Port Number = 5684
+[32mINFO [0m[relying party] Verifier ID 2: IP Address = 127.0.0.1, Port Number = 5685
+[32mINFO [0m[relying party] Verifier ID 3: IP Address = 127.0.0.1, Port Number = 5686
+[32mINFO [0m[relying party] Verifier ID 4: IP Address = 127.0.0.1, Port Number = 5687
+[32mINFO [0m[relying party] Getting evidence.
+[32mINFO [0m[relying party]  +------------ Interaction with the Attester --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Creating attestation request.
+[32mINFO [0m[relying party] Generated nonce of length 20:
+                                                  0x39205a500b75edbea7a6bdb404bd463c2434ebbd
+[32mINFO [0m[relying party] Marshaling attestation request data to CBOR.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending attestation request.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received evidence of total length 1277.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[relying party] Forwarding evidence to the verifiers.
+[32mINFO [0m[relying party] Getting attestation results.
+[32mINFO [0m[relying party]  +------------ Interaction with the Verifiers --------------+
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 1 ...
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 2 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 3 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 4 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[relying party] Verifier 1: Attestation successful!
+[32mINFO [0m[relying party] Verifier 2: Attestation successful!
+[32mINFO [0m[relying party] Verifier 3: Attestation successful!
+[32mINFO [0m[relying party] Verifier 4: Attestation successful!
+[32mINFO [0m[relying party] Attestation successful by majority vote!
+[32mINFO [0m[relying party] Checking environment variables.
+[32mINFO [0m[relying party] Getting verifiers.
+[32mINFO [0m[relying party]  +------------ Interaction with the Trust Manager --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending CoAP message.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received data of length 140.
+[32mINFO [0m[relying party] Received data of total length 140.
+[32mINFO [0m[relying party] Verifier ID 1: IP Address = 127.0.0.1, Port Number = 5684
+[32mINFO [0m[relying party] Verifier ID 2: IP Address = 127.0.0.1, Port Number = 5685
+[32mINFO [0m[relying party] Verifier ID 3: IP Address = 127.0.0.1, Port Number = 5686
+[32mINFO [0m[relying party] Verifier ID 4: IP Address = 127.0.0.1, Port Number = 5687
+[32mINFO [0m[relying party] Verifier ID 5: IP Address = 127.0.0.1, Port Number = 5688
+[32mINFO [0m[relying party] Getting evidence.
+[32mINFO [0m[relying party]  +------------ Interaction with the Attester --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Creating attestation request.
+[32mINFO [0m[relying party] Generated nonce of length 20:
+                                                  0xa9e16058e75aa988fe654d9a737a39be9b1914d6
+[32mINFO [0m[relying party] Marshaling attestation request data to CBOR.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending attestation request.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received evidence of total length 1277.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[relying party] Forwarding evidence to the verifiers.
+[32mINFO [0m[relying party] Getting attestation results.
+[32mINFO [0m[relying party]  +------------ Interaction with the Verifiers --------------+
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 1 ...
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 2 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 3 ...
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 4 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 5 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[relying party] Verifier 1: Attestation successful!
+[32mINFO [0m[relying party] Verifier 2: Attestation successful!
+[32mINFO [0m[relying party] Verifier 3: Attestation successful!
+[32mINFO [0m[relying party] Verifier 4: Attestation successful!
+[32mINFO [0m[relying party] Verifier 5: Attestation successful!
+[32mINFO [0m[relying party] Attestation successful by majority vote!
+[32mINFO [0m[relying party] Checking environment variables.
+[32mINFO [0m[relying party] Getting verifiers.
+[32mINFO [0m[relying party]  +------------ Interaction with the Trust Manager --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending CoAP message.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received data of length 140.
+[32mINFO [0m[relying party] Received data of total length 140.
+[32mINFO [0m[relying party] Verifier ID 1: IP Address = 127.0.0.1, Port Number = 5684
+[32mINFO [0m[relying party] Verifier ID 2: IP Address = 127.0.0.1, Port Number = 5685
+[32mINFO [0m[relying party] Verifier ID 3: IP Address = 127.0.0.1, Port Number = 5686
+[32mINFO [0m[relying party] Verifier ID 4: IP Address = 127.0.0.1, Port Number = 5687
+[32mINFO [0m[relying party] Verifier ID 5: IP Address = 127.0.0.1, Port Number = 5688
+[32mINFO [0m[relying party] Getting evidence.
+[32mINFO [0m[relying party]  +------------ Interaction with the Attester --------------+
+[32mINFO [0m[relying party] Initializing CoAP in block-wise mode.
+[32mINFO [0m[relying party] Registering CoAP response handler.
+[32mINFO [0m[relying party] Creating CoAP client session using UDP.
+[32mINFO [0m[relying party] Creating attestation request.
+[32mINFO [0m[relying party] Generated nonce of length 20:
+                                                  0x30a8f4abe5bd7875bb688d6e2a0d0bc87969a0e7
+[32mINFO [0m[relying party] Marshaling attestation request data to CBOR.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Adding CoAP option URI_PATH.
+[32mINFO [0m[relying party] Adding CoAP option CONTENT_TYPE.
+[32mINFO [0m[relying party] Creating request PDU.
+[32mINFO [0m[relying party] Sending attestation request.
+[32mINFO [0m[relying party] Processing and waiting for response ...
+[32mINFO [0m[relying party] Received evidence of total length 1277.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[relying party] Forwarding evidence to the verifiers.
+[32mINFO [0m[relying party] Getting attestation results.
+[32mINFO [0m[relying party]  +------------ Interaction with the Verifiers --------------+
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 1 ...
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 2 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 3 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 4 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 5 ...
+[36mDEBUG[0mSize of marshaled data is 52 bytes.
+[36mDEBUG[0mAllocated 52 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[36mDEBUG[0mSize of marshaled data is 1277 bytes.
+[36mDEBUG[0mAllocated 1277 bytes of memory.
+[32mINFO [0m[relying party] Verifier 1: Attestation successful!
+[32mINFO [0m[relying party] Verifier 2: Attestation successful!
+[32mINFO [0m[relying party] Verifier 3: Attestation successful!
+[32mINFO [0m[relying party] Verifier 4: Attestation successful!
+[32mINFO [0m[relying party] Verifier 5: Attestation successful!
+[32mINFO [0m[relying party] Attestation successful by majority vote!
