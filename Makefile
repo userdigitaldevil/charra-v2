@@ -131,7 +131,7 @@ OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/util/, cbor_util charra_util co
 TARGETS = $(addprefix $(BINDIR)/, attester verifier verifier_old relying_party trust_manager)
 
 .PHONY: all attester verifier verifier_old relying_party trust_manager \
-        test test_event_log test_synthetic_log test_sdk test_rp_qualification clean
+        test test_event_log test_synthetic_log test_sdk test_rp_qualification test_marshaling_bounds clean
 
 all: $(TARGETS)
 attester: $(BINDIR)/attester
@@ -143,13 +143,15 @@ test_event_log: $(BINDIR)/test_event_log
 test_synthetic_log: $(BINDIR)/test_synthetic_log
 test_sdk: $(BINDIR)/test_sdk
 test_rp_qualification: $(BINDIR)/test_rp_qualification
+test_marshaling_bounds: $(BINDIR)/test_marshaling_bounds
 
 ## run the test suite
-test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log $(BINDIR)/test_sdk $(BINDIR)/test_rp_qualification
+test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log $(BINDIR)/test_sdk $(BINDIR)/test_rp_qualification $(BINDIR)/test_marshaling_bounds
 	./$(BINDIR)/test_event_log
 	./$(BINDIR)/test_synthetic_log
 	./$(BINDIR)/test_sdk
 	./$(BINDIR)/test_rp_qualification
+	./$(BINDIR)/test_marshaling_bounds
 
 
 # ------------------------------------------------------------------------------
@@ -203,6 +205,10 @@ $(BINDIR)/test_sdk: tests/test_sdk.c $(OBJECTS)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
 $(BINDIR)/test_rp_qualification: tests/test_rp_qualification.c $(OBJECTS)
+	@mkdir -p $(@D)
+	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
+
+$(BINDIR)/test_marshaling_bounds: tests/test_marshaling_bounds.c $(OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
