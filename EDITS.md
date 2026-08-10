@@ -27,6 +27,8 @@ source file (`src/`, `tests/`, `Makefile`) has been touched.
 | 3 | `docker/build.sh` | — | file mode `100644` → `100755` | script had no exec bit in the checkout |
 | 4 | `docker/run.sh` | — | file mode `100644` → `100755` | same |
 | 5 | `start_verifiers.sh` | — | file mode `100644` → `100755` | same |
+| 6 | `src/relying_party.c` | 7 (include), 155–161 | 1 include + 7 lines added | RP ignored `LOG_LEVEL_CHARRA` and always logged at TRACE |
+| 7 | `src/relying_party.c` | 29 | `10` → `2` | 50 attestations per run was unusably slow under emulation |
 
 ---
 
@@ -143,6 +145,85 @@ chmod +x docker/build.sh docker/run.sh start_verifiers.sh
 `./docker/build.sh` would fail with "permission denied". Git tracks the
 exec bit, so this shows up as a real (mode-only) modification in
 `git status`.
+
+---
+
+### Edit 6 — `src/relying_party.c`, honour `LOG_LEVEL_CHARRA`
+
+**Location:** `src/relying_party.c` — one line added to the include block,
+seven lines (3 comment + 4 code) added inside `main()` right after
+`signal(SIGINT, handle_sigint);`.
+
+**Trigger:** running `LOG_LEVEL_CHARRA=DEBUG bin/relying_party` still emitted
+`TRACE<ENTER> charra_marshal_*` lines, producing thousands of lines per run.
+Setting the variable had no effect at all.
+
+**Root cause:** the Relying Party declares
+`charra_log_t charra_log_level = CHARRA_LOG_INFO;` (line 36) but — unlike
+`attester.c` and `verifier.c`, which both call `charra_log_level_from_str()`
++ `charra_log_set_level()` in their `main()` — it never reads the environment
+variable and never pushes the level into the log module. The log module's
+state lives in a `static struct { ... } L;` in `src/common/charra_log.c:27`,
+which is zero-initialized, so `L.level == 0 == CHARRA_LOG_TRACE`. The RP
+therefore always logged at TRACE regardless of the environment.
+
+**Added** (include block, after `#include <stdio.h>`) — needed for `getenv`:
+
+```c
+#include <stdlib.h>
+```
+
+**Added** (in `main()`, after the `signal()` call):
+
+```c
+    /* apply log level from environment (the other binaries do this in their
+     * own main(); without it the log module keeps its zero-initialized
+     * default of CHARRA_LOG_TRACE and LOG_LEVEL_CHARRA is ignored) */
+    charra_log_level_from_str(
+            (const char*)getenv("LOG_LEVEL_CHARRA"), &charra_log_level);
+    charra_log_set_level(charra_log_level);
+```
+
+**Nothing removed or reordered.** Both functions were already declared in
+`src/common/charra_log.h` (lines 70 and 91); no header change was needed.
+
+**Effect:** `LOG_LEVEL_CHARRA=INFO bin/relying_party` now suppresses the
+TRACE/DEBUG marshaling output. An unset or unrecognised value leaves
+`charra_log_level` at its `CHARRA_LOG_INFO` initializer —
+`charra_log_level_from_str()` returns `-1` without writing through the
+pointer — so the default is now INFO rather than the previous accidental
+TRACE. Its return value is deliberately ignored, matching how `attester.c`
+and `verifier.c` call it.
+
+**Deliberately not done:** `coap_log_level` (line 35) is likewise never
+passed to `coap_set_log_level()` in the RP, so `LOG_LEVEL_COAP` is still
+ignored there. Left alone to keep this edit minimal.
+
+---
+
+### Edit 7 — `src/relying_party.c`, shorten the benchmark sweep
+
+**Location:** `src/relying_party.c` line 28 (now 29).
+
+**Before:** `#define NUM_RUNS 10`
+**After:** `#define NUM_RUNS 2`
+
+**Exact delta:** the single character `10` → `2`.
+
+**Why:** `main()` doubles as a benchmark harness, looping
+`for (num_verifiers = 1; num_verifiers <= 5; ...)` × `NUM_RUNS`. At 10 that
+is **50 complete attestations**, each with a real TPM quote against the
+software TPM under x86-on-arm64 emulation — many minutes of runtime that
+looks indistinguishable from a hang. At 2 it is 10 attestations.
+
+**Consequence:** the standard deviations written to
+`timings_RP_multi_verifiers.txt` are computed over 2 samples instead of 10
+and are statistically meaningless. They were already meaningless under
+emulation. **Restore this to 10 before collecting any real measurements**,
+and ideally run those on native x86 Linux.
+
+The sweep bound itself (`num_verifiers <= 5`, line ~160) was **not** changed,
+so all five verifier instances are still exercised.
 
 ---
 

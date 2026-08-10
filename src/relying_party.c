@@ -4,6 +4,7 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <tss2/tss2_tctildr.h>
 #include <tss2/tss2_tpm2_types.h>
@@ -25,7 +26,7 @@
 #include "util/tpm2_util.h"
 
 /* measurement config */
-#define NUM_RUNS 10
+#define NUM_RUNS 2
 
 /* logging and coap config */ 
 #define CHARRA_UNUSED __attribute__((unused))
@@ -150,6 +151,13 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
     }
 
     signal(SIGINT, handle_sigint);
+
+    /* apply log level from environment (the other binaries do this in their
+     * own main(); without it the log module keeps its zero-initialized
+     * default of CHARRA_LOG_TRACE and LOG_LEVEL_CHARRA is ignored) */
+    charra_log_level_from_str(
+            (const char*)getenv("LOG_LEVEL_CHARRA"), &charra_log_level);
+    charra_log_set_level(charra_log_level);
 
     double verifier_durations[NUM_RUNS];
     double evidence_durations[NUM_RUNS];
