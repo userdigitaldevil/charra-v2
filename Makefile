@@ -125,13 +125,13 @@ SOURCES = $(shell find $(SRCDIR) -name '*.c')
 INCLUDE = -I$(INCDIR)
 
 OBJECTS =  $(addsuffix .o, $(addprefix $(OBJDIR)/common/, charra_log))
-OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log charra_synthetic_log))
+OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log charra_synthetic_log charra_sdk))
 OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/util/, cbor_util charra_util coap_util crypto_util io_util tpm2_util cli_util parser_util))
 
 TARGETS = $(addprefix $(BINDIR)/, attester verifier verifier_old relying_party trust_manager)
 
 .PHONY: all attester verifier verifier_old relying_party trust_manager \
-        test test_event_log test_synthetic_log clean
+        test test_event_log test_synthetic_log test_sdk clean
 
 all: $(TARGETS)
 attester: $(BINDIR)/attester
@@ -141,11 +141,13 @@ relying_party: $(BINDIR)/relying_party
 trust_manager: $(BINDIR)/trust_manager
 test_event_log: $(BINDIR)/test_event_log
 test_synthetic_log: $(BINDIR)/test_synthetic_log
+test_sdk: $(BINDIR)/test_sdk
 
 ## run the test suite
-test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log
+test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log $(BINDIR)/test_sdk
 	./$(BINDIR)/test_event_log
 	./$(BINDIR)/test_synthetic_log
+	./$(BINDIR)/test_sdk
 
 
 # ------------------------------------------------------------------------------
@@ -191,6 +193,10 @@ $(BINDIR)/test_event_log: tests/test_event_log.c $(OBJECTS)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
 $(BINDIR)/test_synthetic_log: tests/test_synthetic_log.c $(OBJECTS)
+	@mkdir -p $(@D)
+	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
+
+$(BINDIR)/test_sdk: tests/test_sdk.c $(OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
