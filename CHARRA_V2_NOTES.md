@@ -505,25 +505,153 @@ practice (Verifier generates synthetic data, then redacts it to compute the
 - Raw vs. redacted log (different paths, 153 vs 140 bytes) replay to the
   same PCR10, confirming redaction of `template_data` does not disturb the
   chain.
-- **Not yet compiled** against real TSS2/libcoap/QCBOR headers — none
-  available on this dev machine (macOS, no local TSS2/mbedTLS install).
-  Needs a first `make` in the Docker/Linux build to confirm.
+- **Now compiled and run against real TSS2/libcoap/QCBOR/mbedTLS** in the
+  project's own Docker dev-env image (`fraunhofer-sit/charra-dev-env:1.9.0`,
+  linux/amd64 under emulation on this arm64 dev machine) — a prior session
+  only had macOS stub headers available. `make` builds all five binaries
+  and all five standalone test suites (94 assertions, `make test`) cleanly,
+  no warnings. See "Live end-to-end verification" below for a real
+  Attester→Trust Manager→Verifier→Relying Party run against the container's
+  TPM simulator, not just unit tests.
+
+### `charra_rp_qualification.h`/`.c` — RP qualification handshake logic (built)
+
+The `rp_qualification_state` struct + comparison function this list used to
+call "not yet built" now exist (`src/core/charra_rp_qualification.h`/`.c`,
+`tests/test_rp_qualification.c`, 27 assertions). `charra_rp_qualification_generate()`
+fabricates a synthetic log, redacts it locally, and precomputes the golden
+answer (golden log + golden PCR); `charra_rp_qualification_check()` compares
+an RP's submission against it and sets `qualified`/`expires_at`;
+`charra_rp_qualification_is_valid()` is the gate a future
+`coap_appraise_handler`-style caller would apply. Deliberately still stubs
+Quote_R itself down to a raw `pcrDigest` byte-compare — see
+`charra_verify_tpm2_quote()` below for the piece that would replace that
+stub with a real signature check.
+
+### Quote verification factored into small `static` helpers in `verifier.c` (built, then redirected)
+
+First attempt: extracted the load-key / TPM-verify / mbedTLS-verify /
+unmarshal sequence into a standalone reusable `charra_verify_tpm2_quote()`
+in `src/util/charra_util.h`/`.c`, generic over who produced the quote
+(Attester or RP). Verified live against the container's TPM simulator
+(9/9 assertions: genuine quote accepted, tampered signature rejected,
+corrupted public key rejected, bad arguments rejected) — the logic itself
+was sound.
+
+**Reverted**, on the grounds that a cross-module reusable function would
+have swallowed the fine-grained `clock()`-bracketed timing instrumentation
+`coap_appraise_handler` writes to `durations_verifier.txt` per sub-step
+(load/verify/nonce/PCR each measured separately) into one opaque call,
+trading that away for reuse that has no second caller yet anyway. Decision:
+keep verification logic local to `verifier.c` and decompose by *readability*
+instead of by *reuse* — small `static` helper functions callable from
+`coap_appraise_handler`, not shared across files.
+
+**What's actually built**, in `verifier.c`: `verify_quote_signature_with_tpm()`
+and `verify_quote_signature_mbedtls()`, both `static`, defined right above
+`coap_appraise_handler()`. Together they replace what used to be ~55 lines
+of inline `{ }`-scoped blocks with two named calls, while every `clock()`
+bracket stays exactly where it was in the handler (wrapping the calls, not
+hidden inside them) — so per-step timing survives the refactor. Both
+helpers assign the file-scope `attestation_rc` global as a side effect,
+matching exactly what the inline code did before extraction (this file
+already leans on module-level globals for this kind of state, e.g.
+`last_request` — matching that existing style rather than introducing a
+new convention). `verify_quote_signature_mbedtls()` preserves the original
+two-tier failure handling: a hard RSA-conversion failure returns `false`
+(caller does `goto cleanup`, same as the original inline `goto`), while a
+mismatched signature is soft — recorded via an `out_valid` out-param, not
+fatal, so the handler can still fold it into the combined
+`attestation_result` alongside the TPM-based check, the nonce check, and
+the PCR check.
+
+Verified live end to end afterward (11 successful attestation cycles
+against the container's TPM simulator) — log output for both signature
+checks (`"TPM Quote signature is valid!"`, twice, once per check) is
+byte-identical to before the refactor, confirming it's purely a
+readability change with no behavior difference.
+
+### The real RP→Verifier message shape (clarified, not yet built)
+
+Confirmed the architecture: the RP sends the Verifier one bundle containing
+`(Quote_a, EK_a/AK_a, Quote_r, log_r, EK_r/AK_r)` — the Attester's own
+quote + identity, the RP's own quote + identity, and the redacted log.
+Mapped against the Verifier-side RP-appraisal checklist:
+
+- `Quote_a` + `EK_a`/`AK_a` → proves the Attester is genuine and had some
+  real (unredacted) PCR state. `coap_appraise_handler` already does the
+  quote-verification half of this for the existing 2-party shape; EK/AK
+  chain validation is still wholly unbuilt (see below).
+- `Quote_r` + `EK_r`/`AK_r` → proves the RP is genuine and is the one
+  vouching for `log_r`. Verification machinery for this half exists (the
+  two `static` helpers above, reusable in spirit even if not literally
+  shared) but isn't wired to any handler that receives an RP's Quote_r.
+- `log_r` → what the per-line hash check, per-line PCR replay, and
+  file-hash policy check (checklist items 4/5/6) all operate on.
+
+Important structural point worth remembering: because redaction
+deliberately changes `template_digest` per entry, replaying `log_r` will
+*never* reproduce the PCR value `Quote_a` attests to — that's intentional
+(see "Consequences of recomputing template_digest" earlier in this doc).
+So `Quote_r`'s PCR is not meant to be cross-checked against `Quote_a`'s PCR;
+`Quote_r` functions as the RP's own non-repudiation signature over "this is
+genuinely what I processed," the same trust mechanism the qualification
+handshake already uses on fabricated data, just now applied to real
+evidence.
+
+No handler receiving this 5-field bundle exists yet. Still genuinely new
+work, not just wiring.
+
+### Live end-to-end verification (Docker, real TPM simulator)
+
+Ran the actual quartet — `trust_manager` + `attester` + `verifier` +
+`relying_party` — against the dev-env container's TPM simulator, no mocks,
+to confirm the bug fixes below introduced no regressions against genuine
+TPM operations. 11 full attestation cycles succeeded end to end
+(`ATTESTATION SUCCESSFUL`), with both the TPM-based and the
+now-actually-gated mbedTLS-based signature checks (bug 4) agreeing `valid!`
+on every single run.
+
+Found and worked around one **environment** bug along the way, unrelated to
+CHARRA's own code: the container's own `/usr/local/bin/tpm-reset` helper
+calls `tpm2_startup --clear` with a stale `TPM2TOOLS_TCTI_NAME=socket` /
+`TPM2TOOLS_SOCKET_*` env-var scheme that this image's `tpm2-tools` 5.6
+doesn't honor, so `TPM2_Startup` was silently never executing (the script
+doesn't check its exit code). Every TPM operation then fails with "TPM not
+initialized." Worked around by calling
+`tpm2_startup -c -T "mssim:host=127.0.0.1,port=2321"` directly. Also
+learned the hard way: `pkill -f`/`pgrep -f` match the *full command line*,
+including the invoking shell's own script text if it happens to contain the
+same substring (e.g. `pkill -f 'bin/verifier'` inside a `bash -c "..."` that
+itself contains that string self-matches and kills its own shell) — use
+`pkill`/`pgrep` without `-f` (matches process name only) or exact PIDs
+instead.
 
 ### Not yet built (tracked here so nothing gets lost between sessions)
 
 - The two new CoAP endpoints for the qualification handshake
   (`/qualify`-style request, `/qualify/submit`-style response) — the SDK
-  (`charra_sdk_redact_ima_log()`) and the synthetic data
-  (`charra_synth_generate_ima_log()`) it would send exist and are tested;
-  nothing sends them over the wire yet
-- `rp_qualification_state` struct + the comparison function (golden Log +
-  golden `pcrDigest`/`extraData`, compared against what RP submits)
+  (`charra_sdk_redact_ima_log()`), the synthetic data
+  (`charra_synth_generate_ima_log()`), and the qualification state/compare
+  logic (`charra_rp_qualification.c`) it would send/use all exist and are
+  tested; nothing sends them over the wire yet
 - The gate added to `coap_appraise_handler` (`qualified && !expired`)
+- A CoAP endpoint (and DTO/marshaling) for the RP to submit the real
+  `(Quote_a, EK_a/AK_a, Quote_r, log_r, EK_r/AK_r)` bundle — doesn't exist
+  at all yet. `verify_quote_signature_with_tpm()` /
+  `verify_quote_signature_mbedtls()` in `verifier.c` are the verification
+  logic this handler would call (twice — once per quote), but the handler
+  itself is unbuilt.
 - RP-side: EK/AK validation of the Attester, real redaction (would call
   `charra_sdk_redact_ima_log()`), Quote_R generation — all per the Part 2
   design, none of it started
-- Verifier-side: EK/AK validation of the RP, Quote_R verification,
-  file_hash whitelist/blacklist pass
+- Verifier-side, for the real-evidence-appraisal flow: EK/AK validation of
+  the RP, per-line redacted-log hash consistency check (`SHA256(template_data)
+  == template_digest`, not implemented anywhere, golden or real), file_hash
+  whitelist/blacklist pass (blocked on top of being unbuilt: the current
+  redaction rule discards the file-content digest entirely, so there is
+  nothing to check against a policy post-redaction without revisiting that
+  rule first)
 - Real AK provisioning for both Attester and RP (currently: neither has one)
 - Manufacturer root CA trust store
 
