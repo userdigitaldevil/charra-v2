@@ -571,7 +571,7 @@ checks (`"TPM Quote signature is valid!"`, twice, once per check) is
 byte-identical to before the refactor, confirming it's purely a
 readability change with no behavior difference.
 
-### The real RP→Verifier message shape (clarified, not yet built)
+### The real RP→Verifier message shape — interface built, split with RP-side work
 
 Confirmed the architecture: the RP sends the Verifier one bundle containing
 `(Quote_a, EK_a/AK_a, Quote_r, log_r, EK_r/AK_r)` — the Attester's own
@@ -579,15 +579,15 @@ quote + identity, the RP's own quote + identity, and the redacted log.
 Mapped against the Verifier-side RP-appraisal checklist:
 
 - `Quote_a` + `EK_a`/`AK_a` → proves the Attester is genuine and had some
-  real (unredacted) PCR state. `coap_appraise_handler` already does the
-  quote-verification half of this for the existing 2-party shape; EK/AK
-  chain validation is still wholly unbuilt (see below).
+  real (unredacted) PCR state. `coap_appraise_handler` does the
+  quote-verification half of this; EK/AK chain validation is still wholly
+  unbuilt (see below).
 - `Quote_r` + `EK_r`/`AK_r` → proves the RP is genuine and is the one
-  vouching for `log_r`. Verification machinery for this half exists (the
-  two `static` helpers above, reusable in spirit even if not literally
-  shared) but isn't wired to any handler that receives an RP's Quote_r.
-- `log_r` → what the per-line hash check, per-line PCR replay, and
-  file-hash policy check (checklist items 4/5/6) all operate on.
+  vouching for `log_r`. Quote_r verification is now wired into
+  `coap_appraise_handler` (see below); EK/AK, same as Attester's, unbuilt.
+- `log_r` → what the per-line hash check, per-line PCR replay (items 4/5,
+  now implemented, see below), and file-hash policy check (item 6, still
+  not implemented) all operate on.
 
 Important structural point worth remembering: because redaction
 deliberately changes `template_digest` per entry, replaying `log_r` will
@@ -599,8 +599,116 @@ genuinely what I processed," the same trust mechanism the qualification
 handshake already uses on fabricated data, just now applied to real
 evidence.
 
-No handler receiving this 5-field bundle exists yet. Still genuinely new
-work, not just wiring.
+**Why `Quote_r` needs its own public key + signature on the wire, not just
+identity metadata**: signature verification fundamentally requires three
+things — the signed data, the signature, and the public key — and there is
+no persistent key registry or EK/AK-pinning anywhere yet (not even in
+`rp_qualification_state`, which stores `qualified`/`expires_at` but doesn't
+bind that trust decision to a *specific* RP key). So `Quote_r`'s key has to
+travel in the message, exactly the same unauthenticated-at-the-transport-level
+situation `Quote_a`'s key is already in today.
+
+**What's actually built** (verifier-side wiring; the `msg_rp_appraisal_dto`
+struct itself and the marshal/unmarshal *bodies* are owned and pushed by
+the other intern working the RP side — division of labor, not a design
+gap. `verifier.c` below is written against the struct shape agreed on, but
+doesn't define it, so it won't even *compile* — not just fail to link —
+until that lands):
+
+- `msg_rp_appraisal_dto` (`charra_dto.h`, **not included in this work** —
+  added separately by the other intern) — the RP→Verifier struct.
+  Deliberately **not** a bigger `msg_attestation_response_dto`: that struct
+  is Attester's own Attester→RP message and stays untouched, since bolting
+  RP-only fields onto it would mean Attester's own marshal call sends
+  meaningless zeroed copies of fields that aren't its to define. Agreed
+  shape: six fixed-size fields (Quote_a's three, Quote_r's three —
+  mirroring shape exactly) plus `event_log`, whose *meaning* changes from
+  "Attester's raw log" to `log_r` ("RP's redacted log") without changing
+  its type.
+- `charra_marshal_rp_appraisal()` / `charra_unmarshal_rp_appraisal()`
+  (`charra_marshaling.h`) — **signatures only**, no bodies yet. The
+  docstring on the unmarshal declaration spells out the bounds-check
+  requirement explicitly (`attestation_data_len <= sizeof(TPMS_ATTEST)`
+  etc., for all six fixed-size fields, all three new `_rp` ones included)
+  so whoever implements it doesn't reintroduce bug #1's class of overflow.
+- `verifier.c`'s `coap_appraise_handler` — now unmarshals via
+  `charra_unmarshal_rp_appraisal()`, re-validates bounds on all six
+  fixed-size fields independently of the unmarshaler (defense in depth,
+  same style as the rest of the function), and verifies `Quote_r` with the
+  *same* `verify_quote_signature_with_tpm()`/`verify_quote_signature_mbedtls()`
+  helpers used for `Quote_a` — separate `ESYS_TR sig_key_handle_rp` and
+  `TPMT_TK_VERIFIED* validation_rp`, both flushed/freed in `cleanup:`. Both
+  RP results (`attestation_result_signature_rp`,
+  `attestation_result_signature_rp_mbedtls`) fold into the final
+  `attestation_result`. A **nonce** check against `Quote_r` is still
+  deliberately NOT added (open question: what nonce should Quote_r be
+  checked against — unresolved). The **PCR** check against `Quote_r` *is*
+  now implemented (items 4/5, below) — that question turned out to be
+  answerable independently of the nonce one.
+
+**Items 4/5 — `log_r` checks against `Quote_r`, now implemented**, as two
+new `static` helpers in `verifier.c`, same "small local functions, not a
+shared module" style as the quote-verification helpers:
+
+- `verify_log_r_entries_self_consistent()` (item 4) — walks every entry in
+  `log_r` via the already-public `charra_event_log_parse_entry()` and
+  checks `template_digest == SHA256(template_data)`, both fields as they
+  currently sit in the *redacted* log. **Important limitation, worth being
+  precise about**: this does NOT prove RP redacted faithfully against real
+  Attester evidence — the Verifier never sees the pre-redaction log to
+  compare against (it never leaves RP, by design), so this check is
+  structurally incapable of catching a dishonest RP that fabricates a
+  self-consistent but entirely fake `log_r`. It only catches internal
+  malformation (corruption, a redaction bug, a partially-tampered entry).
+  The actual "does RP redact honestly" question is what the qualification
+  handshake (`charra_rp_qualification`) is for — a fundamentally different
+  mechanism, because that's the only place the Verifier ever knows the
+  "before" to compare against.
+- `verify_log_r_matches_quote_r_pcr()` (item 5) — replays `log_r` via the
+  already-tested `charra_replay_ima_log()` (PCR10, `CHARRA_IMA_PCR_INDEX`),
+  then reuses the existing `compute_and_check_PCR_digest()` (`crypto_util.c`)
+  to check the replayed value against `attest_struct_rp`'s `pcrDigest`.
+  Proves `Quote_r` is genuinely about *this* `log_r`, independent of
+  freshness (the still-open nonce question).
+
+**Critical constraint this creates, coordination point with RP-side
+`Quote_r` generation**: `compute_and_check_PCR_digest()` doesn't inspect
+`Quote_r`'s actual PCR selection — it just hashes whatever `pcr_values`
+array the caller supplies and compares against `attest_struct_rp`'s
+`pcrDigest`. `verify_log_r_matches_quote_r_pcr()` passes a **single-element**
+array (just the replayed PCR10 value), which is only correct if `Quote_r`
+was produced over a PCR selection containing **PCR10 alone**. This is
+deliberately different from `Quote_a`: the Attester's quote covers
+*several* PCRs (the fixed `tpm_pcr_selection = {0,1,2,3,4,5,6,7,10}` global
+in `verifier.c`, boot PCRs plus IMA), matching `reference-pcrs.txt`'s
+multi-PCR reference sets. `Quote_r` is different in kind, not just in
+value: it's not attesting to a device boot state, it's RP's own
+non-repudiation signature over one specific thing (`log_r`), so a
+single-PCR selection is the right shape for it — but whoever implements
+RP's `tpm2_quote()` call needs to select PCR10 alone to match this
+assumption exactly, or the PCR check will incorrectly reject a genuinely
+valid `Quote_r`.
+
+**Build status**: this repo's own commits stop at the point where
+`verifier.c` was last verified compiling clean against a local (since
+reverted) copy of `msg_rp_appraisal_dto` — that struct isn't part of this
+work's commits, so as committed here, `verifier.c` won't even *compile*
+(unknown type `msg_rp_appraisal_dto`) until the other intern's struct
+lands, let alone link. `attester`/`verifier_old`/`relying_party`/`trust_manager`
+are unaffected (none of them touch the new functions) and build clean.
+All 94 assertions across the 5 existing test suites still pass; nothing
+there regressed. The two new `log_r` helpers are built on already-tested
+primitives (`charra_event_log_parse_entry`, `charra_replay_ima_log`,
+`compute_and_check_PCR_digest`, `hash_sha256`) and were confirmed compiling
+correctly against the struct before it was pulled out of this work's
+commits — but haven't been exercised live, and can't be until both the
+struct and the marshal/unmarshal bodies land.
+
+Still genuinely unbuilt: the marshal/unmarshal bodies themselves (RP-side
+work, in progress separately), anything in `attester.c` or the sending half
+of `relying_party.c` (RP producing a real `Quote_r` — which per the above
+must select PCR10 only), EK/AK for either party, and checklist item 6
+(file-hash policy) against `log_r`.
 
 ### Live end-to-end verification (Docker, real TPM simulator)
 
@@ -635,23 +743,29 @@ instead.
   (`charra_synth_generate_ima_log()`), and the qualification state/compare
   logic (`charra_rp_qualification.c`) it would send/use all exist and are
   tested; nothing sends them over the wire yet
-- The gate added to `coap_appraise_handler` (`qualified && !expired`)
-- A CoAP endpoint (and DTO/marshaling) for the RP to submit the real
-  `(Quote_a, EK_a/AK_a, Quote_r, log_r, EK_r/AK_r)` bundle — doesn't exist
-  at all yet. `verify_quote_signature_with_tpm()` /
-  `verify_quote_signature_mbedtls()` in `verifier.c` are the verification
-  logic this handler would call (twice — once per quote), but the handler
-  itself is unbuilt.
+- The gate added to `coap_appraise_handler` (`qualified && !expired`) — and
+  per a scoping decision, deliberately deferred: assume RP is trusted for
+  now, build out the real-evidence-appraisal workflow first, wire the
+  qualification gate in at the end. (It also can't usefully be wired in
+  today anyway -- nothing populates `rp_qualification_state` yet either,
+  since the `/qualify` endpoints below don't exist.)
+- `charra_marshal_rp_appraisal()` / `charra_unmarshal_rp_appraisal()`
+  **bodies** (`charra_marshaling.c`) — signatures exist in
+  `charra_marshaling.h` (see above), `verifier.c` already calls the
+  unmarshal one, `bin/verifier` fails to link until this lands. Bounds-check
+  requirements are spelled out in the header docstring.
 - RP-side: EK/AK validation of the Attester, real redaction (would call
-  `charra_sdk_redact_ima_log()`), Quote_R generation — all per the Part 2
-  design, none of it started
+  `charra_sdk_redact_ima_log()`), Quote_r generation — all per the Part 2
+  design, none of it started. This is also where `charra_marshal_rp_appraisal()`
+  would get called from (mirroring how `attester.c` calls
+  `charra_marshal_attestation_response()` today).
 - Verifier-side, for the real-evidence-appraisal flow: EK/AK validation of
-  the RP, per-line redacted-log hash consistency check (`SHA256(template_data)
-  == template_digest`, not implemented anywhere, golden or real), file_hash
-  whitelist/blacklist pass (blocked on top of being unbuilt: the current
-  redaction rule discards the file-content digest entirely, so there is
-  nothing to check against a policy post-redaction without revisiting that
-  rule first)
+  the RP, nonce check against `Quote_r` specifically (open design question
+  -- see above; the PCR half of this is now implemented, see above), and
+  file_hash whitelist/blacklist pass (blocked on top of being unbuilt: the
+  current redaction rule discards the file-content digest entirely, so
+  there is nothing to check against a policy post-redaction without
+  revisiting that rule first)
 - Real AK provisioning for both Attester and RP (currently: neither has one)
 - Manufacturer root CA trust store
 
