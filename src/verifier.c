@@ -13,6 +13,7 @@
 #include "common/charra_log.h"
 #include "common/charra_macro.h"
 #include "core/charra_dto.h"
+#include "core/charra_event_log.h"
 #include "core/charra_helper.h"
 #include "core/charra_key_mgr.h"
 #include "core/charra_marshaling.h"
@@ -343,6 +344,95 @@ static bool verify_quote_signature_mbedtls(TPM2B_PUBLIC* tpm2_public_key,
     return true;
 }
 
+/**
+ * @brief Per-entry self-consistency check on log_r: does every entry's
+ * template_digest equal SHA256(template_data), both fields as they
+ * currently appear in the redacted log?
+ *
+ * This is NOT a check that redaction was done faithfully against real
+ * Attester evidence -- that question needs the separate qualification
+ * handshake (charra_rp_qualification.h), since the Verifier never sees the
+ * pre-redaction log to compare against. This only catches a log_r that is
+ * internally malformed: corruption in transit, a redaction bug, or a
+ * tampered field that no longer matches its neighbor within the same
+ * entry.
+ */
+static bool verify_log_r_entries_self_consistent(
+        const uint8_t* log, uint32_t log_len) {
+    if (log_len == 0) {
+        /* an empty log has no entries to be inconsistent */
+        return true;
+    }
+
+    uint16_t digest_len = 0;
+    if (charra_event_log_ima_detect_digest_len(log, log_len, &digest_len) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] log_r: could not detect digest size.");
+        return false;
+    }
+
+    uint32_t offset = 0;
+    uint32_t entry_num = 0;
+    while (offset < log_len) {
+        charra_event_log_entry entry = {0};
+        if (charra_event_log_parse_entry(
+                    log, log_len, &offset, digest_len, &entry) !=
+                CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] log_r: entry %u failed to parse.",
+                    entry_num);
+            return false;
+        }
+
+        uint8_t computed_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
+        if (hash_sha256(entry.template_data_len, entry.template_data,
+                    computed_digest) != CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] log_r: hashing entry %u failed.",
+                    entry_num);
+            return false;
+        }
+        if (entry.template_digest_len != TPM2_SHA256_DIGEST_SIZE ||
+                memcmp(computed_digest, entry.template_digest,
+                        TPM2_SHA256_DIGEST_SIZE) != 0) {
+            charra_log_error(
+                    "[" LOG_NAME "] log_r: entry %u's template_digest does "
+                    "NOT match SHA256(template_data).",
+                    entry_num);
+            return false;
+        }
+        entry_num++;
+    }
+    return true;
+}
+
+/**
+ * @brief Replay log_r into a PCR value and check it against Quote_r's own
+ * pcrDigest -- proves Quote_r genuinely quotes over this exact log_r,
+ * independent of the (still open) question of what freshness/nonce Quote_r
+ * should be checked against.
+ */
+static bool verify_log_r_matches_quote_r_pcr(
+        const uint8_t* log, uint32_t log_len, TPMS_ATTEST* attest_struct_rp) {
+    uint8_t replayed_pcr[TPM2_SHA256_DIGEST_SIZE] = {0};
+    if (charra_replay_ima_log(log, log_len, CHARRA_IMA_PCR_INDEX,
+                replayed_pcr) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] log_r: replay failed.");
+        return false;
+    }
+
+    uint8_t* pcr_values[1] = {replayed_pcr};
+    if (compute_and_check_PCR_digest(pcr_values, 1, attest_struct_rp) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] log_r: replayed PCR does NOT match Quote_r's "
+                "pcrDigest.");
+        return false;
+    }
+    return true;
+}
+
 static void coap_appraise_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
                                 const struct coap_pdu_t* request,
@@ -353,6 +443,11 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
 
     ESYS_TR sig_key_handle = ESYS_TR_NONE;
     TPMT_TK_VERIFIED* validation = NULL;
+    /* Same pair, for Quote_r -- a separate TPM key load / verification
+     * ticket from Quote_a's, since it's a different key and a different
+     * signature. */
+    ESYS_TR sig_key_handle_rp = ESYS_TR_NONE;
+    TPMT_TK_VERIFIED* validation_rp = NULL;
     /* Declared here (rather than right before first use, further down) and
      * initialized to NULL so that every earlier 'goto cleanup' -- including
      * the fopen() failure right below -- leaves cleanup able to safely check
@@ -396,8 +491,11 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     double unmarshal_duration;
     start_unmarshal = clock();
     charra_log_info("[" LOG_NAME "] Parsing received CBOR data.");
-    msg_attestation_response_dto res = {0};
-    if ((attestation_rc = charra_unmarshal_attestation_response(
+    /* Quote_a (Attester's evidence, forwarded) + Quote_r (RP's own quote) +
+     * log_r (RP's redacted log, not Attester's raw one) -- see
+     * msg_rp_appraisal_dto in charra_dto.h. */
+    msg_rp_appraisal_dto res = {0};
+    if ((attestation_rc = charra_unmarshal_rp_appraisal(
                  data_len, data, &res)) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not parse CBOR data.");
         goto cleanup;
@@ -423,6 +521,23 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     if (res.tpm2_signature_len > sizeof(TPMT_SIGNATURE)) {
         charra_log_error("[" LOG_NAME
                          "] Length of signature exceeds maximum allowed size.");
+        attestation_rc = CHARRA_RC_ERROR;
+        goto cleanup;
+    }
+    /* Same checks, same reasoning, for Quote_r -- these three fields are
+     * exactly as attacker-reachable as the Quote_a ones above. Re-checked
+     * here independently of whatever bounds charra_unmarshal_rp_appraisal()
+     * itself applies, same defense-in-depth style as the rest of this
+     * function. */
+    if (res.attestation_data_rp_len > sizeof(TPMS_ATTEST)) {
+        charra_log_error("[" LOG_NAME "] Length of RP attestation data "
+                         "exceeds maximum allowed size.");
+        attestation_rc = CHARRA_RC_ERROR;
+        goto cleanup;
+    }
+    if (res.tpm2_signature_rp_len > sizeof(TPMT_SIGNATURE)) {
+        charra_log_error("[" LOG_NAME "] Length of RP signature exceeds "
+                         "maximum allowed size.");
         attestation_rc = CHARRA_RC_ERROR;
         goto cleanup;
     }
@@ -494,6 +609,77 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
         goto cleanup;
     }
 
+    /* --- verify Quote_r (RP's own quote) --- */
+    /* Same load-key / TPM-verify / mbedTLS-verify sequence as Quote_a above,
+     * applied to RP's fields instead -- the verification logic doesn't care
+     * whose quote it is. Nonce and PCR checks against Quote_r happen further
+     * down, alongside Quote_a's -- see "verify Quote_r's nonce" below. */
+    TPM2B_PUBLIC* tpm2_public_key_rp = (TPM2B_PUBLIC*)res.tpm2_public_key_rp;
+    charra_log_info("[" LOG_NAME "] Loading RP TPM key.");
+    if ((attestation_rc = charra_load_external_public_key(esys_ctx,
+                 tpm2_public_key_rp, &sig_key_handle_rp)) != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Loading external RP public key failed.");
+        goto cleanup;
+    }
+    charra_log_info("[" LOG_NAME "] External RP public key loaded.");
+
+    TPM2B_ATTEST attest_rp = {0};
+    attest_rp.size = res.attestation_data_rp_len;
+    memcpy(attest_rp.attestationData, res.attestation_data_rp,
+            res.attestation_data_rp_len);
+    TPMT_SIGNATURE signature_rp = {0};
+    memcpy(&signature_rp, res.tpm2_signature_rp, res.tpm2_signature_rp_len);
+
+    bool attestation_result_signature_rp = verify_quote_signature_with_tpm(
+            esys_ctx, sig_key_handle_rp, &attest_rp, &signature_rp,
+            &validation_rp);
+
+    bool attestation_result_signature_rp_mbedtls = false;
+    if (!verify_quote_signature_mbedtls(tpm2_public_key_rp,
+                res.attestation_data_rp, res.attestation_data_rp_len,
+                &signature_rp, &attestation_result_signature_rp_mbedtls)) {
+        goto cleanup;
+    }
+
+    /* unmarshal Quote_r's attestation data -- needed to get at its
+     * pcrDigest for the log_r checks right below */
+    TPMS_ATTEST attest_struct_rp = {0};
+    attestation_rc = charra_unmarshal_tpm2_quote(res.attestation_data_rp_len,
+            res.attestation_data_rp, &attest_struct_rp);
+    if (attestation_rc != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Error while unmarshaling RP TPM2 Quote.");
+        goto cleanup;
+    }
+
+    /* --- verify log_r: per-entry self-consistency + PCR replay --- */
+    clock_t start_verify_log_r, end_verify_log_r;
+    double verify_log_r_duration;
+    start_verify_log_r = clock();
+    charra_log_info("[" LOG_NAME "] Verifying log_r ...");
+    bool attestation_result_log_r_entries = verify_log_r_entries_self_consistent(
+            res.event_log, res.event_log_len);
+    if (attestation_result_log_r_entries) {
+        charra_log_info(
+                "[" LOG_NAME "]     => log_r entries are self-consistent!");
+    } else {
+        charra_log_error("[" LOG_NAME
+                         "]     => log_r entries are NOT self-consistent!");
+    }
+    bool attestation_result_log_r_pcr = verify_log_r_matches_quote_r_pcr(
+            res.event_log, res.event_log_len, &attest_struct_rp);
+    if (attestation_result_log_r_pcr) {
+        charra_log_info(
+                "[" LOG_NAME "]     => log_r matches Quote_r's pcrDigest!");
+    } else {
+        charra_log_error("[" LOG_NAME "]     => log_r does NOT match "
+                         "Quote_r's pcrDigest!");
+    }
+    end_verify_log_r = clock();
+    verify_log_r_duration = ((double) (end_verify_log_r - start_verify_log_r)) / CLOCKS_PER_SEC;
+    fprintf(p_file, "verify log_r took %f seconds to execute \n", verify_log_r_duration);
+
     /* unmarshal attestation data */
     TPMS_ATTEST attest_struct = {0};
     attestation_rc = charra_unmarshal_tpm2_quote(
@@ -521,6 +707,30 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
             charra_log_error("[" LOG_NAME
                              "]     => Nonce in TPM Quote is NOT valid! (does "
                              "not match the one sent)");
+        }
+    }
+    /* --- verify Quote_r's nonce --- */
+    /* Same nonce as Quote_a's, on purpose: RP forwards both quotes in one
+     * message, in one attestation session, so Quote_r including the same
+     * session nonce as its own extraData proves "I'm responding within
+     * THIS session," not replaying an old Quote_r. Reuses the exact
+     * mechanism Quote_a's nonce check already uses -- same
+     * charra_verify_tpm2_quote_qualifying_data() call, same
+     * last_request.nonce global. (That global is the known cross-session
+     * fragility tracked as bug #6 -- now read for two purposes instead of
+     * one, unchanged risk, not made worse by this.) */
+    bool attestation_result_nonce_rp = false;
+    {
+        charra_log_info("[" LOG_NAME "] Verifying RP nonce ...");
+        attestation_result_nonce_rp = charra_verify_tpm2_quote_qualifying_data(
+                last_request.nonce_len, last_request.nonce, &attest_struct_rp);
+        if (attestation_result_nonce_rp == true) {
+            charra_log_info("[" LOG_NAME "]     => Nonce in RP TPM Quote is "
+                            "valid! (matches the one sent)");
+        } else {
+            charra_log_error("[" LOG_NAME
+                             "]     => Nonce in RP TPM Quote is NOT valid! "
+                             "(does not match the one sent)");
         }
     }
     end_verifiy_nonce = clock();
@@ -561,47 +771,26 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     end_verifiy_pcr = clock();
     verify_pcr_duration = ((double) (end_verifiy_pcr - start_verifiy_pcr)) / CLOCKS_PER_SEC;
     fprintf(p_file, "verify pcr took %f seconds to execute \n", verify_pcr_duration);
-    /* verify event log */
-    // TODO(any): Implement real verification.
-    bool attestation_event_log = true;
-    if (use_ima_event_log) {
-        charra_log_info("[" LOG_NAME "] Verifying event log ...");
-        if (res.event_log_len == 0) {
-            charra_log_error("[" LOG_NAME "] Received no event log altough IMA "
-                             "event log verification is on.");
-            attestation_event_log = false;
-        } else {
-            charra_log_info(
-                    "[" LOG_NAME "]     <<< This is to be implemented. >>>");
-            charra_log_info("[" LOG_NAME
-                            "]     IMA Event Log size is %d bytes.",
-                    res.event_log_len);
-            charra_log_debug("[" LOG_NAME "]     IMA Event Log:");
-
-            if (res.event_log_len > 20) {
-                charra_print_hex(CHARRA_LOG_DEBUG, 10, res.event_log,
-                        "                                                  0x",
-                        "...", false);
-                charra_print_hex(CHARRA_LOG_DEBUG, 10,
-                        (res.event_log + res.event_log_len - 10), "", "\n",
-                        false);
-            } else if ((res.event_log_len > 0)) {
-                charra_print_hex(CHARRA_LOG_DEBUG, res.event_log_len,
-                        res.event_log,
-                        "                                                  0x",
-                        "\n", false);
-            } else {
-                charra_log_debug("[" LOG_NAME "]     <none>");
-            }
-        }
-    }
+    /* The old placeholder "verify event log" block that used to sit here --
+     * gated on use_ima_event_log, hex-dumped res.event_log, always passed
+     * except on a missing log, and was explicitly marked
+     * "TODO(any): Implement real verification" -- is gone. It was a stand-in
+     * for exactly what verify_log_r_entries_self_consistent() and
+     * verify_log_r_matches_quote_r_pcr() now do for real, unconditionally,
+     * above. Keeping both would mean a fake check sitting next to the real
+     * one. */
 
     /* --- output result --- */
 
     bool attestation_result = attestation_result_signature &&
                               attestation_result_signature_mbedtls &&
+                              attestation_result_signature_rp &&
+                              attestation_result_signature_rp_mbedtls &&
+                              attestation_result_log_r_entries &&
+                              attestation_result_log_r_pcr &&
                               attestation_result_nonce &&
-                              attestation_result_pcrs && attestation_event_log;
+                              attestation_result_nonce_rp &&
+                              attestation_result_pcrs;
 
 
     const char* message;
@@ -625,7 +814,7 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
 
 
     fprintf(p_file, "appraising took %f seconds to execute \n", appraise_duration);
-    double total_measured = unmarshal_duration + init_duration + load_duration + verify_nonce_duration + verify_signature_duration + verify_pcr_duration;
+    double total_measured = unmarshal_duration + init_duration + load_duration + verify_nonce_duration + verify_signature_duration + verify_pcr_duration + verify_log_r_duration;
     fprintf(p_file, "total measured %f  \n", total_measured);
 
     if ((coap_r = coap_add_data_large_response(resource, session, request, response,
@@ -649,14 +838,23 @@ cleanup:
                     "[" LOG_NAME "] TSS cleanup sig_key_handle failed.");
         }
     }
+    if (sig_key_handle_rp != ESYS_TR_NONE) {
+        if (Esys_FlushContext(esys_ctx, sig_key_handle_rp) != TSS2_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] TSS cleanup sig_key_handle_rp failed.");
+        }
+    }
 
-    /* free event log */
-    // TODO(any): Provide function charra_free_msg_attestation_response_dto().
+    /* free event log (log_r) */
+    // TODO(any): Provide function charra_free_msg_rp_appraisal_dto().
     charra_free_if_not_null(res.event_log);
 
     /* free ESAPI objects */
     if (validation != NULL) {
         Esys_Free(validation);
+    }
+    if (validation_rp != NULL) {
+        Esys_Free(validation_rp);
     }
 
     /* finalize ESAPI & TCTI */
