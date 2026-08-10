@@ -281,6 +281,68 @@ finish:
 
 static void handle_sigint(int signum CHARRA_UNUSED) { quit = true; }
 
+/**
+ * @brief Verify a TPM Quote's signature with the TPM itself. Sets the
+ * file-scope attestation_rc as a side effect, same as this logic did when
+ * it was inlined in coap_appraise_handler().
+ */
+static bool verify_quote_signature_with_tpm(ESYS_CONTEXT* esys_ctx,
+        ESYS_TR sig_key_handle, const TPM2B_ATTEST* attest,
+        TPMT_SIGNATURE* signature, TPMT_TK_VERIFIED** validation) {
+    charra_log_info(
+            "[" LOG_NAME "] Verifying TPM Quote signature with TPM ...");
+    if ((attestation_rc = charra_verify_tpm2_quote_signature_with_tpm(
+                 esys_ctx, sig_key_handle, TPM2_ALG_SHA256, attest, signature,
+                 validation)) == CHARRA_RC_SUCCESS) {
+        charra_log_info("[" LOG_NAME "]     => TPM Quote signature is valid!");
+        return true;
+    }
+    charra_log_error("[" LOG_NAME "]     => TPM Quote signature is NOT valid!");
+    return false;
+}
+
+/**
+ * @brief Verify a TPM Quote's signature with mbedTLS (defense in depth,
+ * independent of the TPM-based check above).
+ *
+ * Two different failure modes, matching what this logic did before being
+ * pulled out of coap_appraise_handler(): converting the TPM public key to
+ * an mbedTLS key is a hard error the caller should abort on (returns
+ * false, same as the original inline code's 'goto cleanup'); the signature
+ * itself not matching is not fatal to the handler, just recorded via
+ * *out_valid so the caller can fold it into the overall attestation result.
+ */
+static bool verify_quote_signature_mbedtls(TPM2B_PUBLIC* tpm2_public_key,
+        const uint8_t* attestation_data, uint32_t attestation_data_len,
+        TPMT_SIGNATURE* signature, bool* out_valid) {
+    *out_valid = false;
+
+    charra_log_info("[" LOG_NAME
+                    "] Converting TPM public key to mbedTLS public key ...");
+    mbedtls_rsa_context mbedtls_rsa_pub_key = {0};
+    if ((attestation_rc = charra_crypto_tpm_pub_key_to_mbedtls_pub_key(
+                 tpm2_public_key, &mbedtls_rsa_pub_key)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] mbedTLS RSA error");
+        return false;
+    }
+
+    charra_log_info(
+            "[" LOG_NAME "] Verifying TPM Quote signature with mbedTLS ...");
+    if ((attestation_rc = charra_crypto_rsa_verify_signature(
+                 &mbedtls_rsa_pub_key, MBEDTLS_MD_SHA256, attestation_data,
+                 (size_t)attestation_data_len,
+                 signature->signature.rsapss.sig.buffer)) ==
+            CHARRA_RC_SUCCESS) {
+        charra_log_info("[" LOG_NAME "]     => TPM Quote signature is valid!");
+        *out_valid = true;
+    } else {
+        charra_log_error(
+                "[" LOG_NAME "]     => TPM Quote signature is NOT valid!");
+    }
+    mbedtls_rsa_free(&mbedtls_rsa_pub_key);
+    return true;
+}
+
 static void coap_appraise_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
                                 const struct coap_pdu_t* request,
@@ -419,56 +481,17 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     memcpy(&signature, res.tpm2_signature, res.tpm2_signature_len);
 
     /* --- verify attestation signature --- */
-    bool attestation_result_signature = false;
-    {
-        charra_log_info(
-                "[" LOG_NAME "] Verifying TPM Quote signature with TPM ...");
-        /* verify attestation signature with TPM */
-        if ((attestation_rc = charra_verify_tpm2_quote_signature_with_tpm(
-                     esys_ctx, sig_key_handle, TPM2_ALG_SHA256, &attest,
-                     &signature, &validation)) == CHARRA_RC_SUCCESS) {
-            charra_log_info(
-                    "[" LOG_NAME "]     => TPM Quote signature is valid!");
-            attestation_result_signature = true;
-        } else {
-            charra_log_error(
-                    "[" LOG_NAME "]     => TPM Quote signature is NOT valid!");
-        }
-    }
+    bool attestation_result_signature = verify_quote_signature_with_tpm(
+            esys_ctx, sig_key_handle, &attest, &signature, &validation);
     end_verifiy_signature = clock();
     verify_signature_duration = ((double) (end_verifiy_signature - start_verifiy_signature)) / CLOCKS_PER_SEC;
     fprintf(p_file, "verify signature took %f seconds to execute \n", verify_signature_duration);
     /* --- verify attestation signature (defense in depth, mbedTLS) --- */
     bool attestation_result_signature_mbedtls = false;
-    {
-        /* convert TPM public key to mbedTLS public key */
-        charra_log_info(
-                "[" LOG_NAME
-                "] Converting TPM public key to mbedTLS public key ...");
-        mbedtls_rsa_context mbedtls_rsa_pub_key = {0};
-        if ((attestation_rc = charra_crypto_tpm_pub_key_to_mbedtls_pub_key(
-                     tpm2_public_key, &mbedtls_rsa_pub_key)) !=
-                CHARRA_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME "] mbedTLS RSA error");
-            goto cleanup;
-        }
-
-        /* verify attestation signature with mbedTLS */
-        charra_log_info("[" LOG_NAME
-                        "] Verifying TPM Quote signature with mbedTLS ...");
-        if ((attestation_rc = charra_crypto_rsa_verify_signature(
-                     &mbedtls_rsa_pub_key, MBEDTLS_MD_SHA256,
-                     res.attestation_data, (size_t)res.attestation_data_len,
-                     signature.signature.rsapss.sig.buffer)) ==
-                CHARRA_RC_SUCCESS) {
-            charra_log_info(
-                    "[" LOG_NAME "]     => TPM Quote signature is valid!");
-            attestation_result_signature_mbedtls = true;
-        } else {
-            charra_log_error(
-                    "[" LOG_NAME "]     => TPM Quote signature is NOT valid!");
-        }
-        mbedtls_rsa_free(&mbedtls_rsa_pub_key);
+    if (!verify_quote_signature_mbedtls(tpm2_public_key, res.attestation_data,
+                res.attestation_data_len, &signature,
+                &attestation_result_signature_mbedtls)) {
+        goto cleanup;
     }
 
     /* unmarshal attestation data */

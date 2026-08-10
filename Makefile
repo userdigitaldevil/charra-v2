@@ -131,7 +131,8 @@ OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/util/, cbor_util charra_util co
 TARGETS = $(addprefix $(BINDIR)/, attester verifier verifier_old relying_party trust_manager)
 
 .PHONY: all attester verifier verifier_old relying_party trust_manager \
-        test test_event_log test_synthetic_log test_sdk test_rp_qualification test_marshaling_bounds clean
+        test test_event_log test_synthetic_log test_sdk test_rp_qualification \
+        test_marshaling_bounds clean
 
 all: $(TARGETS)
 attester: $(BINDIR)/attester
