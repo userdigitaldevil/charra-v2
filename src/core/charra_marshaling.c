@@ -409,6 +409,11 @@ CHARRA_RC charra_unmarshal_attestation_response(
         const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
         msg_attestation_response_dto* attestation_response) {
     msg_attestation_response_dto res = {0};
+    /* Declared here, initialized to NULL, so every 'goto cbor_parse_error'
+     * below -- including ones added before this point used to sit -- can
+     * safely charra_free_if_not_null() it without reading an
+     * uninitialized/indeterminate pointer. */
+    uint8_t* event_log = NULL;
 
     QCBORError cborerr = QCBOR_SUCCESS;
     UsefulBufC marshaled_data_buf = {marshaled_data, marshaled_data_len};
@@ -425,6 +430,11 @@ CHARRA_RC charra_unmarshal_attestation_response(
     if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
         goto cbor_parse_error;
     res.attestation_data_len = item.val.string.len;
+    if (res.attestation_data_len > sizeof(res.attestation_data)) {
+        charra_log_error(
+                "CBOR parser: attestation data exceeds maximum allowed size.");
+        goto cbor_parse_error;
+    }
     memcpy(&(res.attestation_data), item.val.string.ptr,
             res.attestation_data_len);
 
@@ -432,12 +442,22 @@ CHARRA_RC charra_unmarshal_attestation_response(
     if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
         goto cbor_parse_error;
     res.tpm2_signature_len = item.val.string.len;
+    if (res.tpm2_signature_len > sizeof(res.tpm2_signature)) {
+        charra_log_error(
+                "CBOR parser: TPM2 signature exceeds maximum allowed size.");
+        goto cbor_parse_error;
+    }
     memcpy(&(res.tpm2_signature), item.val.string.ptr, res.tpm2_signature_len);
 
     /* parse "tpm2_public_key" (bytes) */
     if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
         goto cbor_parse_error;
     res.tpm2_public_key_len = item.val.string.len;
+    if (res.tpm2_public_key_len > sizeof(res.tpm2_public_key)) {
+        charra_log_error(
+                "CBOR parser: TPM2 public key exceeds maximum allowed size.");
+        goto cbor_parse_error;
+    }
     memcpy(&(res.tpm2_public_key), item.val.string.ptr,
             res.tpm2_public_key_len);
 
@@ -445,7 +465,7 @@ CHARRA_RC charra_unmarshal_attestation_response(
     if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
         goto cbor_parse_error;
     res.event_log_len = item.val.string.len;
-    uint8_t* event_log = (uint8_t*)malloc(res.event_log_len);
+    event_log = (uint8_t*)malloc(res.event_log_len);
     if (event_log == NULL) {
         goto cbor_parse_error;
     } else {
