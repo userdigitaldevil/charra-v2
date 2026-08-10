@@ -604,7 +604,6 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     fprintf(p_file, "appraising took %f seconds to execute \n", appraise_duration);
     double total_measured = unmarshal_duration + init_duration + load_duration + verify_nonce_duration + verify_signature_duration + verify_pcr_duration;
     fprintf(p_file, "total measured %f  \n", total_measured);
-    fclose(p_file);
 
     if ((coap_r = coap_add_data_large_response(resource, session, request, response,
                 query, COAP_MEDIATYPE_TEXT_PLAIN, -1, 0,
@@ -614,6 +613,12 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
         //goto error;
     }
 cleanup:
+    /* close duration log file -- every path through this function reaches
+     * here exactly once, so this is the only fclose() needed */
+    if (p_file != NULL) {
+        fclose(p_file);
+    }
+
     /* flush handles */
     if (sig_key_handle != ESYS_TR_NONE) {
         if (Esys_FlushContext(esys_ctx, sig_key_handle) != TSS2_RC_SUCCESS) {
