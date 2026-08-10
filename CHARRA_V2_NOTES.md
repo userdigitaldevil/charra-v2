@@ -337,19 +337,45 @@ Decisions made (via AskUserQuestion):
   for now." Closing this later needs RP's own IMA to measure the SDK binary
   specifically — real, larger scope.
 
-#### Redaction rule for the SDK: blank `template_data` entirely (very simple, current choice)
+#### Redaction rule for the SDK: hash the path (implemented — supersedes an earlier "blank everything" plan)
 
-No `ima-ng` sub-structure parsing (algorithm prefix / file hash / path
-split) — the whole field becomes empty (`template_data_len = 0`, already a
-tested, supported case per `test_empty_template_data`), then
-`template_digest` is recomputed as `SHA256("")`.
+An earlier draft of this section planned blanking `template_data` entirely
+(`template_data_len = 0`, digest = `SHA256("")`). Superseded before being
+built: it made every redacted entry share the identical recomputed digest,
+which is a weaker qualification test than necessary — the Verifier's "golden
+answer" comparison would still work, but it can't distinguish "RP correctly
+redacted N different paths" from "RP redacted nothing and just zeroed
+everything," since both produce the same output.
 
-Consequence worth being deliberate about: every redacted entry gets the
-**same** recomputed digest, since they all hash identical (empty) content.
-Fine for proving the mechanical pipeline (parse → transform → recompute →
-re-serialize → replay) works end-to-end; not realistic, and the first thing
-to revisit if this needs to look like genuine per-entry redaction later (e.g.
-keep the file-hash portion, once appraisal is confirmed in scope).
+**What's actually implemented** (`src/core/charra_sdk.h`/`.c`,
+`charra_sdk_redact_ima_log()`): per entry, locate the path inside
+`template_data` (skip the `"sha256:"`/`"sha1:"` + file-digest + NUL prefix —
+the exact layout `charra_synth_generate_ima_log()` produces, and the layout a
+real `ima-ng` entry uses), hash *the path itself* with SHA-256, and replace
+`template_data` with nothing but that hash — 32 raw bytes, no prefix, no
+separator. `template_digest` is then recomputed as `SHA256(new template_data)`,
+per the design's requirement. Every field except `template_data`/
+`template_digest` (`pcr_index`, `template_name`) is copied through unchanged.
+
+Consequence, now the *good* kind: different original paths hash to different
+values, so redacted entries are distinguishable from each other again —
+proven by `test_different_entries_redact_differently` in `tests/test_sdk.c`.
+The file-content digest portion is still discarded (not preserved for future
+appraisal, as an even-more-careful design might do) — simple on purpose,
+appraisal isn't in scope. `test_sdk.c` also confirms: redacted logs stay
+valid `charra_replay_ima_log()` input; redaction is deterministic (same input
+→ identical output); and — expected, given "Consequences of recomputing
+template_digest" above — the redacted log's replayed PCR is *different* from
+the raw log's, since the digests genuinely changed. 15 assertions, 0
+failures; 29 + 13 + 15 = 57 tests total across all three suites.
+
+Known limitation: assumes the `"sha256:"`/`"sha1:"` + digest + NUL + path
+layout specifically (derived from the detected digest size, so it handles
+both). A real IMA log's `ima-ng` template technically nests its own
+length-prefixed sub-fields rather than this flat prefix — untested against
+that shape. Fine for now since this is paired with
+`charra_synth_generate_ima_log()`, which produces exactly the assumed layout;
+worth revisiting once real Attester logs are in the picture.
 
 ---
 
@@ -368,6 +394,8 @@ redacted log) — same function, different bytes in.
 | `charra_event_log_ima_detect_digest_len` | `CHARRA_RC charra_event_log_ima_detect_digest_len(const uint8_t* log, uint32_t log_len, uint16_t* digest_len_out)` | Recovers whether template digests are 20 (SHA-1) or 32 (SHA-256) bytes by trial-parsing, since the format doesn't record it (boot-time kernel choice, `ima_hash=`). |
 | `charra_replay_ima_log` | `CHARRA_RC charra_replay_ima_log(const uint8_t* log, uint32_t log_len, uint32_t target_pcr_index, uint8_t pcr_out[TPM2_SHA256_DIGEST_SIZE])` | **The public entry point.** Parses every entry, extends the ones matching `target_pcr_index`, returns the resulting PCR value. Peeks at the first entry to guess digest size, tries the other size as fallback if wrong — never a false rejection of a well-formed log, worst case a second pass. Logs a warning (not an error) if a non-empty log has zero matching entries. |
 | `charra_event_log_parse_entry` | `CHARRA_RC charra_event_log_parse_entry(const uint8_t* log, uint32_t log_len, uint32_t* offset, uint16_t digest_len, charra_event_log_entry* out)` | Parses one TLV entry, advances `*offset`. Every length check written as `need > log_len - offset` (not `offset + need > log_len`) so a hostile length field can't overflow past the check. Rejects the legacy `"ima"` template outright rather than guessing its unprefixed layout. **Public** (not static) — exposed deliberately since the RP qualification work needs a second, genuine consumer of the same bounds-checked parser; reusing it beats writing a second one. |
+| `charra_event_log_append_u32` | `void charra_event_log_append_u32(uint8_t* buf, uint32_t* offset, uint32_t value)` | Writes a `uint32` at `buf[*offset]` in the same byte order `charra_event_log_parse_entry`/`read_u32` read, advances `*offset`. **Public** — the write-side counterpart of `read_u32`, kept in the same file so the byte-order convention can't drift between reader and writer. Originally duplicated (byte-for-byte identical) in both `charra_synthetic_log.c` and `charra_sdk.c`; factored here once that duplication was spotted. |
+| `charra_event_log_append_bytes` | `void charra_event_log_append_bytes(uint8_t* buf, uint32_t* offset, const void* data, uint32_t len)` | Copies `len` bytes to `buf[*offset]`, advances `*offset`. Same factoring history as above. |
 | `read_u32` *(static)* | `uint32_t read_u32(const uint8_t* p)` | Reads a little-endian `uint32` byte-wise — avoids relying on host cast/alignment behavior. |
 | `log_parses_at` *(static)* | `bool log_parses_at(const uint8_t* log, uint32_t log_len, uint16_t digest_len)` | Whole-log trial parse: true iff every entry is well-formed and the last one ends exactly at `log_len`. Backs digest-length detection. |
 | `replay_at` *(static)* | `bool replay_at(...)` | Combined parse+extend in one pass — what `charra_replay_ima_log` actually calls per candidate digest size, so a successful trial doesn't need to be re-walked to replay it. |
@@ -417,7 +445,7 @@ order-sensitivity, dropped entries, `pcr_index` filtering (mixed-PCR logs),
 `template_data`, SHA-1 zero-padding, malformed/truncated logs, hostile length
 fields (no overflow), legacy `ima` template rejection, bad arguments.
 
-### New: `tests/test_synth_log.c` — 13 assertions
+### New: `tests/test_synthetic_log.c` — 13 assertions
 
 Strongest check: feeds the generator's own output straight into
 `charra_replay_ima_log()` and confirms it succeeds — cross-validating
@@ -426,17 +454,51 @@ itself. Also: determinism (same seed → same bytes), different seeds diverge,
 fabricated sensitive paths are actually present in the raw output, bad
 arguments rejected.
 
-**Both suites: 42/42 passing.** Run with `make test`.
+### New: `src/core/charra_sdk.h` / `.c`
+
+The Verifier's "desensitization and cleaning module (SDK)" — see "Redaction
+rule for the SDK" above for the full design rationale. First real, genuine
+second consumer of `charra_event_log_parse_entry()`, which is exactly why
+that function was made public rather than staying `static`.
+
+| Function | Signature | Purpose |
+|---|---|---|
+| `charra_sdk_redact_ima_log` | `CHARRA_RC charra_sdk_redact_ima_log(const uint8_t* raw_log, uint32_t raw_log_len, uint8_t** redacted_log_out, uint32_t* redacted_log_len_out)` | Per entry: extract the path from `template_data`, replace `template_data` with `SHA256(path)` (32 raw bytes, nothing else), recompute `template_digest` from that. `pcr_index`/`template_name` copied through unchanged. Two-pass: count entries first (output size can't be derived from input size alone, since a short original `template_data` can *expand* after redaction to a fixed 32-byte hash), then build. Caller `free()`s the returned buffer. |
+| `extract_path` *(static)* | — | Skips the `"sha256:"`/`"sha1:"` + digest + NUL prefix inside `template_data` to isolate the path. Prefix choice derived from the detected digest length, not hardcoded. Treats an over-short `template_data` as an empty path rather than reading out of bounds. |
+
+Uses `charra_event_log_append_u32`/`charra_event_log_append_bytes` from
+`charra_event_log.c` for serialization — originally duplicated locally (an
+earlier version of this note called that duplication a deliberate choice,
+"not worth the coupling"; on inspection the two copies were byte-for-byte
+identical, so that call was wrong and got corrected by factoring them out).
+
+Tested in `tests/test_sdk.c` (15 assertions), built directly on top of
+`charra_synth_generate_ima_log()` — generates a synthetic log, redacts it,
+and checks: still valid replay input; replayed PCR *differs* from the raw
+log's (expected, since digests were recomputed); deterministic; different
+entries redact to different digests (not collapsed to one constant); empty
+log handled; bad arguments and malformed input rejected.
+
+### New: `tests/test_sdk.c` — 15 assertions
+
+See above — exercises `charra_sdk_redact_ima_log()` together with
+`charra_synth_generate_ima_log()`, the way they're meant to be used in
+practice (Verifier generates synthetic data, then redacts it to compute the
+"golden answer" — see the qualification check design).
+
+**All three suites: 57/57 passing.** Run with `make test`.
 
 ### Modified: `Makefile`
 
-- `charra_event_log`, `charra_synthetic_log` added to the `core` object list.
-- `test`, `test_event_log`, `test_synth_log` targets added.
+- `charra_event_log`, `charra_synthetic_log`, `charra_sdk` added to the
+  `core` object list.
+- `test`, `test_event_log`, `test_synthetic_log`, `test_sdk` targets added.
 
 ### Verified so far
 
-- `charra_event_log.c` and `charra_synthetic_log.c` compiled standalone (stub
-  TSS2/mbedTLS headers, real SHA-256 via CommonCrypto); all 42 tests pass.
+- `charra_event_log.c`, `charra_synthetic_log.c`, and `charra_sdk.c` compiled
+  standalone (stub TSS2/mbedTLS headers, real SHA-256 via CommonCrypto); all
+  57 tests pass.
 - Cross-checked `charra_replay_ima_log` against an independent Python
   re-implementation on a 423-byte 4-entry log: both produce
   `0269fe49...2b49efd` for PCR10, byte for byte.
@@ -449,15 +511,17 @@ arguments rejected.
 
 ### Not yet built (tracked here so nothing gets lost between sessions)
 
-- The SDK's actual redaction step as real code (rule is decided — blank
-  `template_data`, recompute digest — but not yet implemented as a callable
-  function)
 - The two new CoAP endpoints for the qualification handshake
-  (`/qualify`-style request, `/qualify/submit`-style response)
-- `rp_qualification_state` struct + the comparison function
+  (`/qualify`-style request, `/qualify/submit`-style response) — the SDK
+  (`charra_sdk_redact_ima_log()`) and the synthetic data
+  (`charra_synth_generate_ima_log()`) it would send exist and are tested;
+  nothing sends them over the wire yet
+- `rp_qualification_state` struct + the comparison function (golden Log +
+  golden `pcrDigest`/`extraData`, compared against what RP submits)
 - The gate added to `coap_appraise_handler` (`qualified && !expired`)
-- RP-side: EK/AK validation of the Attester, real redaction, Quote_R
-  generation — all per the Part 2 design, none of it started
+- RP-side: EK/AK validation of the Attester, real redaction (would call
+  `charra_sdk_redact_ima_log()`), Quote_R generation — all per the Part 2
+  design, none of it started
 - Verifier-side: EK/AK validation of the RP, Quote_R verification,
   file_hash whitelist/blacklist pass
 - Real AK provisioning for both Attester and RP (currently: neither has one)
