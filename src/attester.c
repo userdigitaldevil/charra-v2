@@ -65,6 +65,10 @@ char* ima_event_log_path =
 bool use_dtls_psk = false;
 char* dtls_psk_key = "Charra DTLS Key";
 char* dtls_psk_hint = "Charra Attester";
+/* ASCII IMA measurement log replayed into the TPM's PCRs before the first
+ * TPM Quote, so that PCR 10 reflects a non-trivial measurement history
+ * instead of staying all-zero. */
+char* ima_test_log_path = "ima_test_logs.txt";
 // TODO(any): Allocate memory for CBOR buffer with malloc() as logs can be huge.
 
 // for DTLS-RPK
@@ -89,6 +93,16 @@ static void coap_attest_handler(struct coap_resource_t* resource,
                                 const struct coap_pdu_t* request,
                                 const struct coap_string_t* query,
                                 struct coap_pdu_t* response);
+
+/**
+ * @brief Extends every entry of the ASCII IMA measurement log at
+ * ima_test_log_path into the TPM's PCRs.
+ *
+ * @param esys_ctx[in,out] The ESAPI context.
+ * @return CHARRA_RC_SUCCESS on success (including when the log file does not
+ * exist, which is only warned about), otherwise CHARRA_RC_ERROR.
+ */
+static CHARRA_RC charra_extend_pcrs_from_ima_log(ESYS_CONTEXT* esys_ctx);
 
 /* --- main --------------------------------------------------------------- */
 
@@ -281,6 +295,135 @@ static void release_data(
     charra_free_and_null(app_ptr);
 }
 
+/**
+ * @brief Converts one ASCII hex character to its value, or -1 if it is not a
+ * hex digit.
+ */
+static int hex_nibble(const char c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+/**
+ * @brief Decodes hex_len ASCII hex characters into out_len bytes.
+ *
+ * @return true on success, false if the lengths disagree or a non-hex
+ * character is encountered.
+ */
+static bool hex_str_to_bytes(const char* hex, const size_t hex_len,
+        uint8_t* out, const size_t out_len) {
+    if (hex == NULL || out == NULL || hex_len != out_len * 2) {
+        return false;
+    }
+    for (size_t i = 0; i < out_len; ++i) {
+        const int hi = hex_nibble(hex[2 * i]);
+        const int lo = hex_nibble(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0) {
+            return false;
+        }
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return true;
+}
+
+static CHARRA_RC charra_extend_pcrs_from_ima_log(ESYS_CONTEXT* esys_ctx) {
+    if (esys_ctx == NULL) {
+        charra_log_error("[" LOG_NAME "] Bad ESAPI context.");
+        return CHARRA_RC_ERROR;
+    }
+
+    FILE* file = fopen(ima_test_log_path, "r");
+    if (file == NULL) {
+        charra_log_warn("[" LOG_NAME "] IMA log \"%s\" not found; leaving PCRs "
+                        "unextended.",
+                ima_test_log_path);
+        return CHARRA_RC_SUCCESS;
+    }
+    charra_log_info(
+            "[" LOG_NAME "] Extending PCRs from IMA log \"%s\".",
+            ima_test_log_path);
+
+    CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
+    uint32_t line_no = 0;
+    uint32_t extended = 0;
+    /* long enough for the longest path an ima-ng entry can carry */
+    char line[4096] = {0};
+
+    while (fgets(line, sizeof(line), file) != NULL) {
+        ++line_no;
+
+        /* Entries look like
+         *     PCR <index> <template-digest> ima-ng <alg>:<file-hash> <path>
+         * Accept the same line without the leading "PCR" token too, since
+         * the kernel's own ascii_runtime_measurements omits it. */
+        char tag[16] = {0};
+        char digest_hex[TPM2_SHA256_DIGEST_SIZE * 2 + 1] = {0};
+        unsigned int pcr_idx = 0;
+        if (sscanf(line, "%15s %u %64s", tag, &pcr_idx, digest_hex) != 3 ||
+                strcmp(tag, "PCR") != 0) {
+            if (sscanf(line, "%u %64s", &pcr_idx, digest_hex) != 2) {
+                continue; /* blank line or comment */
+            }
+        }
+
+        /* A SHA-1 (20 byte) template digest is zero-padded into the SHA-256
+         * bank, matching what charra_pcr_extend() does when replaying the
+         * log in software -- the replayed value must equal what the TPM
+         * holds, or appraisal can never match. */
+        const size_t hex_len = strlen(digest_hex);
+        if (hex_len != TPM2_SHA1_DIGEST_SIZE * 2 &&
+                hex_len != TPM2_SHA256_DIGEST_SIZE * 2) {
+            charra_log_warn("[" LOG_NAME "] Skipping line %u: template digest "
+                            "is neither 20 nor 32 bytes.",
+                    line_no);
+            continue;
+        }
+        uint8_t digest[TPM2_SHA256_DIGEST_SIZE] = {0};
+        if (!hex_str_to_bytes(digest_hex, hex_len, digest, hex_len / 2)) {
+            charra_log_warn("[" LOG_NAME "] Skipping line %u: template digest "
+                            "is not valid hex.",
+                    line_no);
+            continue;
+        }
+
+        /* clang-format off */
+        TPML_DIGEST_VALUES digests = {
+            .count = 1,
+            .digests = {{
+                .hashAlg = TPM2_ALG_SHA256,
+            }},
+        };
+        /* clang-format on */
+        memcpy(digests.digests[0].digest.sha256, digest,
+                TPM2_SHA256_DIGEST_SIZE);
+
+        TSS2_RC tss_r = tpm2_pcr_extend(esys_ctx, pcr_idx, &digests);
+        if (tss_r != TSS2_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Could not extend PCR %u with "
+                             "entry on line %u.",
+                    pcr_idx, line_no);
+            charra_r = CHARRA_RC_ERROR;
+            goto cleanup;
+        }
+        ++extended;
+    }
+
+    charra_log_info("[" LOG_NAME "] Extended %u IMA log entries into the PCRs.",
+            extended);
+
+cleanup:
+    fclose(file);
+    return charra_r;
+}
+
 static void coap_attest_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
                                 const struct coap_pdu_t* request,
@@ -364,6 +507,21 @@ static void coap_attest_handler(struct coap_resource_t* resource,
             TSS2_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Esys_Initialize.");
         goto error;
+    }
+
+    /* Extend the IMA log into the PCRs, once per process: PCRs 0-15 cannot
+     * be reset without a reboot, so replaying the log on every request would
+     * keep growing PCR 10 and no single replay of the log could reproduce
+     * it. */
+    static bool ima_log_extended = false;
+    if (!ima_log_extended) {
+        if ((charra_r = charra_extend_pcrs_from_ima_log(esys_ctx)) !=
+                CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] Could not extend PCRs from IMA log.");
+            goto error;
+        }
+        ima_log_extended = true;
     }
 
     /* load TPM key */

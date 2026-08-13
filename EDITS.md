@@ -29,6 +29,7 @@ source file (`src/`, `tests/`, `Makefile`) has been touched.
 | 5 | `start_verifiers.sh` | — | file mode `100644` → `100755` | same |
 | 6 | `src/relying_party.c` | 7 (include), 155–161 | 1 include + 7 lines added | RP ignored `LOG_LEVEL_CHARRA` and always logged at TRACE |
 | 7 | `src/relying_party.c` | 29 | `10` → `2` | 50 attestations per run was unusably slow under emulation |
+| 8 | `src/attester.c` | 68–71, 97–105, 298–430, 512–525 | 158 lines added | extend PCRs from `ima_test_logs.txt` before loading the TPM key |
 
 ---
 
@@ -224,6 +225,96 @@ and ideally run those on native x86 Linux.
 
 The sweep bound itself (`num_verifiers <= 5`, line ~160) was **not** changed,
 so all five verifier instances are still exercised.
+
+---
+
+### Edit 8 — `src/attester.c`, extend PCRs from `ima_test_logs.txt` before the quote
+
+**Requested:** before loading the TPM key, the Attester should update its PCRs
+according to the entries parsed from `ima_test_logs.txt`.
+
+**Location:** `src/attester.c` — 158 lines added across four places, no lines
+removed or modified.
+
+| Where | Lines | What |
+|---|---|---|
+| config block | 68–71 | new `char* ima_test_log_path = "ima_test_logs.txt";` + 3 comment lines |
+| forward declarations | 97–105 | doc comment + `static CHARRA_RC charra_extend_pcrs_from_ima_log(ESYS_CONTEXT*);` |
+| function definitions | 298–430 | `hex_nibble()`, `hex_str_to_bytes()`, `charra_extend_pcrs_from_ima_log()` |
+| `coap_attest_handler()` | 512–525 | the call, guarded by a `static bool`, immediately before `Loading TPM key` |
+
+**Input format.** `ima_test_logs.txt` is 32 lines of ASCII IMA measurements:
+
+```
+PCR 10 f889b3f33bc93d44a66a2567055c9214de4f11d3 ima-ng     sha256:61cee3…d541 /usr/lib/systemd/systemd
+```
+
+Only fields 2 and 3 are used — the PCR index and the **template digest**. The
+`ima-ng` name, the file hash and the path are ignored: the template digest is
+by definition the value the kernel extended, so re-deriving it from the other
+fields would be redundant and would have to replicate the exact template
+serialisation.
+
+The parser accepts the line with or without the leading `PCR` token, since
+the kernel's own `ascii_runtime_measurements` omits it.
+
+**New helpers:**
+
+| Function | Purpose |
+|---|---|
+| `hex_nibble(char)` *(static)* | One ASCII hex character → value, `-1` if not hex. |
+| `hex_str_to_bytes(hex, hex_len, out, out_len)` *(static)* | Decodes hex to bytes; rejects a length mismatch or any non-hex character rather than producing garbage. |
+| `charra_extend_pcrs_from_ima_log(esys_ctx)` *(static)* | Opens the log, parses each line, calls the **existing** `tpm2_pcr_extend()` from `src/util/tpm2_util.c:167` per entry. |
+
+**Decision: SHA-256 bank only, with zero-padding.** The template digests in
+this file are 40 hex characters — 20-byte SHA-1. They are zero-padded to 32
+bytes and extended into the **SHA-256** bank only. Two reasons:
+
+1. It matches `charra_pcr_extend()` in `src/core/charra_event_log.c`, which
+   zero-pads short digests when replaying a log in software. The replayed
+   value and the value in the TPM must agree or appraisal can never match.
+2. The Relying Party requests `TPM2_ALG_SHA256` for PCRs {0-7, 10}
+   (`src/relying_party.c:284`), so the SHA-256 bank is the only one the quote
+   covers.
+
+Extending the SHA-1 bank as well was considered and rejected: it would fail
+outright if that bank is not allocated in the simulator, for no benefit to
+the quote actually being requested. A 64-hex-character (SHA-256) template
+digest is also accepted and used unpadded, so a SHA-256 log works unchanged.
+
+**Decision: once per process, not once per request.** The call is guarded by
+a function-local `static bool ima_log_extended`. PCRs 0-15 cannot be reset
+without a reboot, so extending on every attestation request would keep
+growing PCR 10 — after the Relying Party's 10 benchmark runs it would hold
+the log folded in ten times, and no single replay of the log could ever
+reproduce it. This is a deliberate deviation from a literal reading of
+"before loading the TPM key" (which sits inside the per-request handler);
+the guard is one line to remove if per-request extension is actually wanted.
+
+**Error handling:**
+
+- Log file missing → `charra_log_warn` and return `CHARRA_RC_SUCCESS`. The
+  Attester still attests, just with unextended PCRs, rather than refusing to
+  start.
+- A line with a bad-length or non-hex digest → warned with its line number
+  and skipped; parsing continues.
+- `tpm2_pcr_extend()` failing → `CHARRA_RC_ERROR`, which aborts the
+  attestation via the handler's existing `goto error`. A half-extended PCR is
+  not something to continue from.
+- The `FILE*` is closed on every path via a `cleanup:` label.
+
+**Consequence — appraisal will now fail on the PCR check.** PCR 10 is no
+longer all-zero, so the quote's composite `pcrDigest` changes and
+`reference-pcrs.txt` no longer describes this Attester. That is inherent to
+the request, not a defect in it: the point of extending the PCRs is that PCR
+10 must be *derived* by replaying the log, which is the Verifier-side work
+described in Part 2 of `CHARRA_V2_NOTES.md` and not yet built. Appraisal was
+already failing for an unrelated reason (see the note below on the nine-way
+AND in `verifier.c`).
+
+**Not compiled.** No TSS2/libcoap headers exist on the macOS host, so this
+was written against the headers and not built. Needs a `make` inside the
+container to confirm.
 
 ---
 
