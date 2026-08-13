@@ -209,6 +209,26 @@ CHARRA_RC charra_crypto_verify_cert_public_key_matches_tpm_public_key(
         const mbedtls_x509_crt* cert, const TPM2B_PUBLIC* tpm_pub_key);
 
 /**
+ * @brief Same purpose as
+ * charra_crypto_verify_cert_public_key_matches_tpm_public_key() above, for
+ * a signer key presented as a DER-encoded RSA public key instead of a
+ * TPM2B_PUBLIC -- the shape msg_rp_evidence_dto's rp_public_key travels in
+ * (RP's Quote_r-signing AK is TPM-resident, but its public half is
+ * exported and marshaled as plain DER, the same convention
+ * charra_crypto_rsa_public_key_to_der() already uses elsewhere, rather
+ * than as a raw TPM2B_PUBLIC).
+ *
+ * @param[in] der_pub_key DER-encoded RSA public key (e.g. rp_public_key)
+ * @param[in] der_pub_key_len length of der_pub_key
+ * @returns CHARRA_RC_SUCCESS if the keys match, CHARRA_RC_VERIFICATION_FAILED
+ * if they don't (or either key isn't RSA), CHARRA_RC_CRYPTO_ERROR /
+ * CHARRA_RC_BAD_ARGUMENT on error.
+ */
+CHARRA_RC charra_crypto_verify_cert_public_key_matches_der_key(
+        const mbedtls_x509_crt* cert, const uint8_t* der_pub_key,
+        size_t der_pub_key_len);
+
+/**
  * @brief Validate an AK certificate for a "validate EK/AK certificate"
  * check (DRA-TLS spec Step 2a/3a/3b item 1): the certificate chains to
  * trusted_ca_der, and its embedded public key matches the key that
@@ -240,6 +260,12 @@ CHARRA_RC charra_crypto_verify_cert_public_key_matches_tpm_public_key(
  * @param[in] trusted_ca_der_len length of trusted_ca_der
  * @param[in] tpm2_public_key the key that actually signed the
  * corresponding quote
+ * @param[out] serial_out if non-NULL, receives the certificate's 16-byte
+ * serial number (same format as charra_crypto_sign_ak_certificate()'s
+ * serial_out) whenever the chain check succeeds -- lets the caller cross-
+ * check the serial against charra_ak_state.h's issuance/revocation record
+ * for it. Left untouched if the chain check itself fails, since there is
+ * then no trustworthy serial to report.
  * @returns CHARRA_RC_SUCCESS if the certificate chains to trusted_ca_der
  * and its key matches tpm2_public_key, CHARRA_RC_VERIFICATION_FAILED if
  * either check fails, CHARRA_RC_BAD_ARGUMENT / CHARRA_RC_CRYPTO_ERROR on
@@ -247,7 +273,8 @@ CHARRA_RC charra_crypto_verify_cert_public_key_matches_tpm_public_key(
  */
 CHARRA_RC charra_crypto_verify_ekak_certificate(const uint8_t* ak_cert_der,
         uint32_t ak_cert_der_len, const uint8_t* trusted_ca_der,
-        size_t trusted_ca_der_len, TPM2B_PUBLIC* tpm2_public_key);
+        size_t trusted_ca_der_len, TPM2B_PUBLIC* tpm2_public_key,
+        uint8_t serial_out[16]);
 
 /**
  * @brief Reconstruct the standard TCG RSA-2048 EK TPM2B_PUBLIC (the fixed

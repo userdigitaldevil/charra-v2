@@ -143,6 +143,35 @@ error:
     return r;
 }
 
+CHARRA_RC charra_io_write_file(
+        const char* filename, const uint8_t* data, size_t data_len) {
+    if (filename == NULL || data == NULL) {
+        return CHARRA_RC_BAD_ARGUMENT;
+    }
+
+    FILE* fp = NULL;
+    if ((fp = fopen(filename, "wb")) == NULL) {
+        charra_log_error("Cannot open file '%s' for writing.", filename);
+        return CHARRA_RC_ERROR;
+    }
+
+    CHARRA_RC r = CHARRA_RC_SUCCESS;
+    size_t written = fwrite(data, sizeof(*data), data_len, fp);
+    if (written < data_len) {
+        charra_log_error("Error while writing file '%s', expected size %zu, "
+                         "wrote size %zu.",
+                filename, data_len, written);
+        r = CHARRA_RC_ERROR;
+    }
+
+    if (fclose(fp) != 0) {
+        charra_log_error("Error closing file '%s'.", filename);
+        r = CHARRA_RC_ERROR;
+    }
+
+    return r;
+}
+
 void charra_io_free_file_buffer(char** const file_content) {
     charra_free_if_not_null(*file_content);
 }

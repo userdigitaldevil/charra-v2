@@ -494,7 +494,7 @@ cbor_parse_error:
     /* clean up */
     charra_free_if_not_null(event_log);
 
-
+    return CHARRA_RC_MARSHALING_ERROR;
 }
 
 /* --- RP evidence (RP -> Verifier) ---------------------------------------- */
@@ -536,6 +536,11 @@ static CHARRA_RC charra_marshal_rp_evidence_internal(
             (UsefulBufC){.ptr = rp_evidence->rp_public_key,
                     .len = rp_evidence->rp_public_key_len});
 
+    /* RP's own AK certificate (Step 3a item 1) */
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->ak_certificate_rp,
+                    .len = rp_evidence->ak_certificate_rp_len});
+
     /* nonce the RP sent to the Attester */
     QCBOREncode_AddBytes(&ec,
             (UsefulBufC){.ptr = rp_evidence->attester_nonce,
@@ -551,6 +556,11 @@ static CHARRA_RC charra_marshal_rp_evidence_internal(
     QCBOREncode_AddBytes(&ec,
             (UsefulBufC){.ptr = rp_evidence->tpm2_public_key,
                     .len = rp_evidence->tpm2_public_key_len});
+
+    /* Attester's AK certificate, forwarded by RP (Step 3b item 1) */
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->ak_certificate,
+                    .len = rp_evidence->ak_certificate_len});
 
     /* log_r */
     QCBOREncode_AddBytes(&ec,
@@ -660,6 +670,12 @@ CHARRA_RC charra_unmarshal_rp_evidence(const uint32_t marshaled_data_len,
     }
     memcpy(res.rp_public_key, item.val.string.ptr, res.rp_public_key_len);
 
+    /* RP's own AK certificate -- borrowed, same as log_r below */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.ak_certificate_rp_len = item.val.string.len;
+    res.ak_certificate_rp = (uint8_t*)item.val.string.ptr;
+
     /* nonce the RP sent to the Attester */
     if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
         goto cbor_parse_error;
@@ -699,6 +715,13 @@ CHARRA_RC charra_unmarshal_rp_evidence(const uint32_t marshaled_data_len,
         goto cbor_parse_error;
     }
     memcpy(res.tpm2_public_key, item.val.string.ptr, res.tpm2_public_key_len);
+
+    /* Attester's AK certificate, forwarded by RP -- borrowed, same as
+     * log_r below */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.ak_certificate_len = item.val.string.len;
+    res.ak_certificate = (uint8_t*)item.val.string.ptr;
 
     /* log_r -- borrowed from the caller's buffer, never freed here */
     if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))

@@ -351,7 +351,12 @@ CHARRA_RC compute_and_check_PCR_digest(uint8_t** pcr_values,
             attest_struct, pcr_composite_digest, TPM2_SHA256_DIGEST_SIZE);
     charra_print_hex(CHARRA_LOG_DEBUG, sizeof(pcr_composite_digest),
             pcr_composite_digest,
-
+            "                                              0x", "\n", false);
+    if (matching) {
+        return CHARRA_RC_SUCCESS;
+    } else {
+        return CHARRA_RC_NO_MATCH;
+    }
 }
 
 /* --- software RSA keypair ----------------------------------------------- */
@@ -468,12 +473,6 @@ CHARRA_RC charra_crypto_rsa_sign(mbedtls_pk_context* key,
     mbedtls_ctr_drbg_free(&drbg);
     mbedtls_entropy_free(&entropy);
     return charra_r;
-}
-
-        return CHARRA_RC_SUCCESS;
-    } else {
-        return CHARRA_RC_NO_MATCH;
-    }
 }
 
 /* --- EK/AK certificate chain verification (Step 3a/3b item 1) ---------- */
@@ -619,9 +618,79 @@ CHARRA_RC charra_crypto_verify_cert_public_key_matches_tpm_public_key(
     return keys_match ? CHARRA_RC_SUCCESS : CHARRA_RC_VERIFICATION_FAILED;
 }
 
+CHARRA_RC charra_crypto_verify_cert_public_key_matches_der_key(
+        const mbedtls_x509_crt* cert, const uint8_t* der_pub_key,
+        size_t der_pub_key_len) {
+    if (cert == NULL || der_pub_key == NULL || der_pub_key_len == 0) {
+        return CHARRA_RC_BAD_ARGUMENT;
+    }
+
+    if (mbedtls_pk_get_type(&cert->pk) != MBEDTLS_PK_RSA) {
+        charra_log_error(
+                "charra_crypto_verify_cert_public_key_matches_der_key: "
+                "certificate's public key is not RSA");
+        return CHARRA_RC_VERIFICATION_FAILED;
+    }
+
+    mbedtls_pk_context der_key;
+    mbedtls_pk_init(&der_key);
+    if (mbedtls_pk_parse_public_key(&der_key, der_pub_key, der_pub_key_len) !=
+            0) {
+        charra_log_error(
+                "charra_crypto_verify_cert_public_key_matches_der_key: "
+                "mbedtls_pk_parse_public_key failed");
+        mbedtls_pk_free(&der_key);
+        return CHARRA_RC_CRYPTO_ERROR;
+    }
+    if (mbedtls_pk_get_type(&der_key) != MBEDTLS_PK_RSA) {
+        charra_log_error(
+                "charra_crypto_verify_cert_public_key_matches_der_key: "
+                "der_pub_key is not RSA");
+        mbedtls_pk_free(&der_key);
+        return CHARRA_RC_VERIFICATION_FAILED;
+    }
+
+    CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
+    mbedtls_rsa_context* cert_rsa_pub_key = mbedtls_pk_rsa(cert->pk);
+    mbedtls_rsa_context* der_rsa_pub_key = mbedtls_pk_rsa(der_key);
+
+    mbedtls_mpi cert_modulus = {0}, cert_exponent = {0};
+    mbedtls_mpi der_modulus = {0}, der_exponent = {0};
+    mbedtls_mpi_init(&cert_modulus);
+    mbedtls_mpi_init(&cert_exponent);
+    mbedtls_mpi_init(&der_modulus);
+    mbedtls_mpi_init(&der_exponent);
+
+    bool keys_match = false;
+    if (mbedtls_rsa_export(cert_rsa_pub_key, &cert_modulus, NULL, NULL, NULL,
+                &cert_exponent) == 0 &&
+            mbedtls_rsa_export(der_rsa_pub_key, &der_modulus, NULL, NULL,
+                    NULL, &der_exponent) == 0) {
+        keys_match = (mbedtls_mpi_cmp_mpi(&cert_modulus, &der_modulus) == 0) &&
+                (mbedtls_mpi_cmp_mpi(&cert_exponent, &der_exponent) == 0);
+    } else {
+        charra_log_error(
+                "charra_crypto_verify_cert_public_key_matches_der_key: "
+                "mbedtls_rsa_export failed");
+        charra_r = CHARRA_RC_CRYPTO_ERROR;
+    }
+
+    mbedtls_mpi_free(&cert_modulus);
+    mbedtls_mpi_free(&cert_exponent);
+    mbedtls_mpi_free(&der_modulus);
+    mbedtls_mpi_free(&der_exponent);
+    mbedtls_pk_free(&der_key);
+
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        return charra_r;
+    }
+    return keys_match ? CHARRA_RC_SUCCESS : CHARRA_RC_VERIFICATION_FAILED;
+}
+
 CHARRA_RC charra_crypto_verify_ekak_certificate(const uint8_t* ak_cert_der,
         uint32_t ak_cert_der_len, const uint8_t* trusted_ca_der,
-        size_t trusted_ca_der_len, TPM2B_PUBLIC* tpm2_public_key) {
+        size_t trusted_ca_der_len, TPM2B_PUBLIC* tpm2_public_key,
+        uint8_t serial_out[16]) {
     if (ak_cert_der == NULL || trusted_ca_der == NULL ||
             tpm2_public_key == NULL) {
         return CHARRA_RC_BAD_ARGUMENT;
@@ -633,6 +702,17 @@ CHARRA_RC charra_crypto_verify_ekak_certificate(const uint8_t* ak_cert_der,
             &ak_cert_leaf);
     if (charra_r != CHARRA_RC_SUCCESS) {
         return charra_r;
+    }
+
+    if (serial_out != NULL) {
+        if (ak_cert_leaf.serial.len == 16) {
+            memcpy(serial_out, ak_cert_leaf.serial.p, 16);
+        } else {
+            /* not a serial charra_crypto_sign_ak_certificate() could have
+             * issued -- zero it out rather than leave a stale/garbage
+             * value a caller might mistake for a real lookup key */
+            memset(serial_out, 0, 16);
+        }
     }
 
     charra_r = charra_crypto_verify_cert_public_key_matches_tpm_public_key(

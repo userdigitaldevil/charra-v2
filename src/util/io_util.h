@@ -99,6 +99,20 @@ CHARRA_RC charra_io_read_file(const char* filename, char** const file_content,
         size_t* const file_content_len);
 
 /**
+ * @brief Write a buffer to a file, creating it if it does not exist and
+ * truncating it if it does (fopen mode "wb").
+ *
+ * @param[in] filename the path of the file to write
+ * @param[in] data the buffer to write
+ * @param[in] data_len length of data
+ * @return CHARRA_RC_SUCCESS on success, CHARRA_RC_BAD_ARGUMENT on NULL
+ * filename/data, CHARRA_RC_ERROR if the file could not be opened or the
+ * full buffer could not be written
+ */
+CHARRA_RC charra_io_write_file(
+        const char* filename, const uint8_t* data, size_t data_len);
+
+/**
  * @brief free buffer holding the file content. Alternatively
  * free(*file_content) can be called directly.
  *
