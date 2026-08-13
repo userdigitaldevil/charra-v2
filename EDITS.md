@@ -37,6 +37,12 @@ source file (`src/`, `tests/`, `Makefile`) has been touched.
 | 9e | `src/relying_party.c` | — | `charra_rp_appraise_evidence()` | the five-step RP-side appraisal |
 | 9f | `src/relying_party.c` | 73 | `use_ima_test_log_path` → `ima_test_log_path` | undeclared identifier; did not compile |
 | 9g | `src/verifier.c` | — | *(reverted — not modified)* | comment-only rename touch-up, reverted on request |
+| 10a | `src/core/charra_sdk.{h,c}` | — | rewritten | old code assumed the synthetic layout, not real ima-ng; path now salted |
+| 10b | `src/util/crypto_util.{h,c}` | — | +3 functions | RP needs a keypair and a signature for Quote_r |
+| 10c | `src/core/charra_dto.h` | — | new `msg_rp_evidence_dto` | the RP→Verifier message |
+| 10d | `src/core/charra_marshaling.{h,c}` | — | +2 functions | marshal/unmarshal for it |
+| 10e | `src/relying_party.c` | — | privacy-cleaning flow | nonce, redact, PCR_r, Quote_r, send |
+| 11 | `src/attester.c`, `src/util/tpm2_util.{h,c}` | — | *(reverted — not modified)* | each run should start from a freshly booted TPM instead |
 
 ---
 
@@ -500,6 +506,166 @@ against `tpm2_pcrread sha256:0,1,2,3,4,5,6,7,10` inside the container — every
 one must match, and whichever differs points at the cause (a PCR extended by
 something other than this log, or a replay that disagrees with what the
 Attester extended).
+
+---
+
+### Edit 10 — RP privacy cleaning, Quote_r, and the RP -> Verifier message
+
+**Requested:** after appraisal the RP requests a nonce from the Verifier,
+redacts every log entry's path into log_r, replays log_r into PCR_r, signs
+(PCR_r, nonce) with a freshly generated keypair to form Quote_r, and sends a
+new DTO carrying Quote_r, the RP public key, log_r, the nonce sent to the
+Attester, and the Attester's evidence minus its event log. `verifier.c` not
+to be touched.
+
+| Sub | File | What |
+|---|---|---|
+| 10a | `src/core/charra_sdk.{h,c}` | rewritten: salted path-only redaction |
+| 10b | `src/util/crypto_util.{h,c}` | RSA keygen, DER export, RSA-PSS signing |
+| 10c | `src/core/charra_dto.h` | new `msg_rp_evidence_dto` |
+| 10d | `src/core/charra_marshaling.{h,c}` | `charra_{,un}marshal_rp_evidence()` |
+| 10e | `src/relying_party.c` | the flow, and removal of the old forwarding |
+
+#### 10a — `charra_sdk.{h,c}` rewritten
+
+The previous implementation was **wrong for real ima-ng logs**. It assumed
+template_data was `"sha256:" + digest + NUL + path` — the layout
+`charra_synth_generate_ima_log()` produces — and replaced the whole field
+with a fixed 71-byte blob. Real ima-ng template_data (which the Attester now
+emits) is two length-prefixed fields, so the old code would have mis-parsed
+every entry.
+
+Now: the d-ng field (algorithm name + file-content digest) is copied through
+**byte for byte**, and only the n-ng field's contents are replaced with
+`SHA256(path || salt)` using a fresh 32-byte random salt per entry.
+`pcr_index` and `template_name` are untouched; `template_digest` is
+recomputed as SHA256 of the new template_data.
+
+**The salt is per entry and never transmitted.** That is what the request
+asked for, and it is stronger than the unsalted `SHA256(path)` it replaces —
+irreversible against a dictionary of guessed paths, and identical paths no
+longer redact to identical values.
+
+**Consequence — this breaks two existing things**, deliberately and
+visibly:
+- `tests/test_sdk.c` asserts that redacting the same log twice produces
+  identical bytes. It cannot, now, by design. That test needs rewriting to
+  assert structure rather than equality.
+- `src/core/charra_rp_qualification.c` compares the RP's redaction output
+  byte-for-byte against a locally computed "golden" answer. Salting makes
+  that comparison impossible. The qualification check needs a different
+  shape (compare everything except the path hashes, or have the Verifier
+  supply the salt).
+
+Neither was changed here — flagging rather than silently reworking someone
+else's design.
+
+#### 10b — `crypto_util.{h,c}`
+
+`charra_crypto_rsa_generate_keypair()` (RSA-2048, PSS/SHA-256 padding),
+`charra_crypto_rsa_public_key_to_der()`, `charra_crypto_rsa_sign()`. Plus
+`CHARRA_RSA_SIGNATURE_LEN` / `CHARRA_RSA_PUB_KEY_DER_MAX`, and
+`<mbedtls/pk.h>`, `<mbedtls/entropy.h>`, `<mbedtls/ctr_drbg.h>`,
+`<string.h>` includes.
+
+Signing is RSA-PSS/SHA-256 so the Verifier can check it with the existing
+`charra_crypto_rsa_verify_signature()` once it has parsed the DER key. Note
+PSS salts are random: two signings over identical data never match
+byte-for-byte, so a verifier must compare signed *values*, never raw
+signature bytes.
+
+#### 10c/10d — the new DTO and its wire format
+
+`msg_rp_evidence_dto` carries, in this wire order: `pcr_r` (32 bytes),
+`verifier_nonce`, `rp_signature`, `rp_public_key` (DER), `attester_nonce`,
+`attestation_data`, `tpm2_signature`, `tpm2_public_key`, `log_r`. A plain
+positional CBOR array, matching the rest of the protocol — **field order is
+load-bearing**, and the marshal and unmarshal functions must never diverge.
+
+Every length is bounds-checked against its fixed-size destination before the
+copy. `log_r` borrows into the caller's buffer on unmarshal and must not be
+freed.
+
+The old `msg_rp_appraisal_dto` is left in place, untouched: `verifier.c`
+still refers to it and that file is off-limits.
+
+**Quote_r is not a TPM quote.** PCR_r is computed in software and signed
+with a software keypair, so it proves "whoever holds rp_public_key produced
+this PCR_r for this nonce" and nothing about the RP's own platform state.
+The design in `CHARRA_V2_NOTES.md` Part 2 calls for a real `TPM2_Quote`
+under a certified AK; this is the software stand-in.
+
+#### 10e — `relying_party.c`
+
+`charra_rp_prepare_evidence()` runs **once per attestation**, before any
+verifier thread starts: redact -> log_r, replay log_r into the same PCR
+selection -> PCR_r, generate the keypair. Once, not per thread, because the
+redaction is randomised — per-thread redaction would hand each Verifier a
+different log_r for the same attestation.
+
+Per verifier thread: request a nonce (empty-payload FETCH to `nonce`), wait
+for it via the new `coap_verifier_handler_nonce()`, sign
+`(PCR_r || nonce)`, marshal `msg_rp_evidence_dto`, FETCH `appraise` with it.
+
+**Removed:** the RP no longer marshals `last_request` and POSTs it as a
+nonce *to* the Verifier, and no longer sends the Attester's
+`msg_attestation_response_dto` — including the raw event log — for
+appraisal. Both were what the request asked to remove; forwarding the raw
+log would have defeated the redaction entirely.
+
+#### Blocked on `verifier.c`, which was not to be touched
+
+`coap_nonce_handler()` in `verifier.c` currently **receives and stores** a
+nonce from the RP; it neither generates one nor puts anything in its
+response. So step 1 cannot complete until that endpoint is inverted to
+generate a nonce and return it. The RP side is written and will work
+unchanged once it is; until then each thread logs "Verifier n did not supply
+a nonce" and gives up before sending anything.
+
+The wire contract the RP expects: FETCH `nonce` with an empty payload, and
+the Verifier replies with the raw nonce bytes as the response payload
+(1..`sizeof(TPMU_HA)` bytes, not CBOR-wrapped).
+
+#### Not compiled
+
+No TSS2/libcoap/mbedTLS headers on the macOS host. Also still true from
+before: `bin/verifier` does not link, because
+`charra_unmarshal_rp_appraisal()` is declared in `charra_marshaling.h` and
+called from `verifier.c` but never defined.
+
+---
+
+### Edit 11 — **reverted, nothing changed**
+
+Briefly, the Attester was made to read every selected PCR from the TPM before
+extending, and to skip or refuse rather than extend on top of a non-zero
+value; `tpm2_pcr_read()` was added to `src/util/tpm2_util.{h,c}` to support
+it.
+
+**Reverted in full on request.** The intended model is that each CHARRA run
+starts as if the Attester's machine had just booted, so its PCRs are always
+all-zero to begin with. Under that model the Attester does not need to
+inspect PCR state at all — the once-per-process guard from edit 8 is correct,
+and keeping the PCRs zero is the operator's job (restart `tpm_server`, not
+just re-issue `tpm2_startup`).
+
+`src/attester.c` is back to its committed state and
+`src/util/tpm2_util.{h,c}` are untouched by this session.
+
+**What still holds, and is worth remembering:** `tpm2_startup --clear` does
+NOT reset PCRs on a TPM that is already running — only `_TPM_Init`, i.e.
+restarting the simulator, does. So a run must begin with:
+
+```
+pkill -9 -f '^bin/'; pkill tpm_server
+cd /tmp && rm -f NVChip && (tpm_server > /tmp/tpm_server.log 2>&1 &) && \
+  sleep 3 && tpm2_startup --clear
+tpm2_pcrread sha256:0,1,2,3,4,5,6,7,10   # must be all zeros
+```
+
+Skipping the simulator restart is what caused PCR 10 to accumulate the log
+once per Attester process, and every RP PCR check after the first run to fail
+against an unchanged replayed value.
 
 ---
 

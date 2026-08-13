@@ -18,6 +18,7 @@
 #include "core/charra_event_log.h"
 #include "core/charra_key_mgr.h"
 #include "core/charra_marshaling.h"
+#include "core/charra_sdk.h"
 #include "core/charra_rim_mgr.h"
 #include "util/charra_util.h"
 #include "util/cli_util.h"
@@ -75,6 +76,26 @@ char* ima_test_log_path = "ima_test_logs.txt";  // path to the IMA test log file
 
 /* RP appraisal config */
 char* blacklist_hashes_path = "blacklist-hashes.txt";
+
+/* --- privacy-cleaning state, produced once per attestation -------------- */
+/* log_r: the redacted log, and PCR_r: the composite digest over a replay of
+ * it. Shared by every verifier thread -- the redaction is randomised, so
+ * redacting once per verifier would hand each of them a different log_r for
+ * the same attestation. */
+static uint8_t* rp_log_r = NULL;
+static uint32_t rp_log_r_len = 0;
+static uint8_t rp_pcr_r[TPM2_SHA256_DIGEST_SIZE] = {0};
+/* The RP's signing key. Regenerated per attestation: it is a software key
+ * with no certified identity, so there is nothing to be gained by
+ * persisting it, and a fresh one limits how long any single key is used. */
+static mbedtls_pk_context rp_key;
+static bool rp_key_valid = false;
+static uint8_t rp_public_key_der[CHARRA_RSA_PUB_KEY_DER_MAX] = {0};
+static uint32_t rp_public_key_der_len = 0;
+/* Nonces received from each Verifier, indexed by verifier slot. */
+static uint8_t verifier_nonces[MAX_VERIFIERS][sizeof(TPMU_HA)] = {{0}};
+static uint32_t verifier_nonce_lens[MAX_VERIFIERS] = {0};
+static bool processing_nonce_response = false;
 char attester_host[16] = "127.0.0.1";      // 15 characters for IPv4 plus \0
 unsigned int attester_port = 5683;         // default port
 
@@ -132,6 +153,21 @@ static coap_response_t coap_trust_manager_handler(coap_session_t* session,
  * @return true if every check passed.
  */
 static bool charra_rp_appraise_evidence(const msg_attestation_response_dto* res);
+
+/**
+ * @brief Privacy-clean the Attester's evidence: redact the log into log_r,
+ * replay log_r into PCR_r, and generate the keypair Quote_r is signed with.
+ *
+ * Run once per attestation, before any verifier thread starts.
+ */
+static CHARRA_RC charra_rp_prepare_evidence(void);
+
+/** @brief Frees what charra_rp_prepare_evidence() allocated. */
+static void charra_rp_release_evidence(void);
+
+static coap_response_t coap_verifier_handler_nonce(coap_session_t* session,
+        const coap_pdu_t* sent CHARRA_UNUSED, const coap_pdu_t* received,
+        const coap_mid_t mid CHARRA_UNUSED);
 
 CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers);
 
@@ -475,6 +511,167 @@ done:;
     }
     charra_log_info("[" LOG_NAME "] +----------------------------+");
     return appraisal_ok;
+}
+
+static CHARRA_RC charra_rp_prepare_evidence(void) {
+    charra_rp_release_evidence();
+
+    charra_log_info("[" LOG_NAME
+            "]  +------------ RP Privacy Cleaning --------------+");
+
+    /* --- redact: only the path of each entry is replaced --------------- */
+    CHARRA_RC charra_r = charra_sdk_redact_ima_log(last_response.event_log,
+            last_response.event_log_len, &rp_log_r, &rp_log_r_len);
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Redaction of the event log failed.");
+        return charra_r;
+    }
+    charra_log_info("[" LOG_NAME "] log_r is %u bytes (raw log was %u).",
+            rp_log_r_len, last_response.event_log_len);
+
+    /* --- replay log_r into the same PCR selection, then composite ------ */
+    charra_pcr_accumulator replayed[TPM2_MAX_PCRS] = {{{0}}};
+    charra_r = charra_replay_ima_log_pcrs(rp_log_r, rp_log_r_len,
+            tpm_pcr_selection, tpm_pcr_selection_len, replayed);
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Replay of log_r failed.");
+        return charra_r;
+    }
+    uint8_t* pcr_values[TPM2_MAX_PCRS] = {NULL};
+    for (uint32_t i = 0; i < tpm_pcr_selection_len; i++) {
+        pcr_values[i] = replayed[i].value;
+    }
+    if (hash_sha256_array(pcr_values, tpm_pcr_selection_len, rp_pcr_r) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not compute PCR_r.");
+        return CHARRA_RC_CRYPTO_ERROR;
+    }
+    charra_print_hex(CHARRA_LOG_INFO, sizeof(rp_pcr_r), rp_pcr_r,
+            "                        PCR_r: 0x", "\n", false);
+
+    /* --- keypair Quote_r is signed under ------------------------------- */
+    charra_r = charra_crypto_rsa_generate_keypair(&rp_key);
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not generate the RP keypair.");
+        return charra_r;
+    }
+    rp_key_valid = true;
+    charra_r = charra_crypto_rsa_public_key_to_der(&rp_key, rp_public_key_der,
+            sizeof(rp_public_key_der), &rp_public_key_der_len);
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not export the RP public key.");
+        return charra_r;
+    }
+    charra_log_info("[" LOG_NAME "] RP keypair ready (public key %u bytes).",
+            rp_public_key_der_len);
+    return CHARRA_RC_SUCCESS;
+}
+
+static void charra_rp_release_evidence(void) {
+    charra_free_if_not_null(rp_log_r);
+    rp_log_r = NULL;
+    rp_log_r_len = 0;
+    if (rp_key_valid) {
+        mbedtls_pk_free(&rp_key);
+        rp_key_valid = false;
+    }
+    rp_public_key_der_len = 0;
+}
+
+/**
+ * @brief Builds Quote_r for one Verifier and marshals the whole RP evidence
+ * message for it.
+ *
+ * Quote_r's signature covers (PCR_r || that Verifier's nonce), so each
+ * Verifier gets a signature bound to the challenge it issued -- which is
+ * what makes the exchange fresh from the Verifier's point of view.
+ */
+static CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
+        uint32_t* marshaled_len, uint8_t** marshaled) {
+    if (!rp_key_valid) {
+        charra_log_error("[" LOG_NAME "] No RP key; evidence not prepared.");
+        return CHARRA_RC_ERROR;
+    }
+
+    msg_rp_evidence_dto ev = {0};
+    memcpy(ev.pcr_r, rp_pcr_r, sizeof(ev.pcr_r));
+
+    ev.verifier_nonce_len = verifier_nonce_lens[verifier_index];
+    if (ev.verifier_nonce_len > sizeof(ev.verifier_nonce)) {
+        charra_log_error("[" LOG_NAME "] Verifier nonce too long.");
+        return CHARRA_RC_ERROR;
+    }
+    memcpy(ev.verifier_nonce, verifier_nonces[verifier_index],
+            ev.verifier_nonce_len);
+
+    /* sign (PCR_r || nonce) */
+    uint8_t signed_data[sizeof(ev.pcr_r) + sizeof(ev.verifier_nonce)] = {0};
+    memcpy(signed_data, ev.pcr_r, sizeof(ev.pcr_r));
+    memcpy(signed_data + sizeof(ev.pcr_r), ev.verifier_nonce,
+            ev.verifier_nonce_len);
+    CHARRA_RC charra_r = charra_crypto_rsa_sign(&rp_key, signed_data,
+            sizeof(ev.pcr_r) + ev.verifier_nonce_len, ev.rp_signature);
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not sign Quote_r.");
+        return charra_r;
+    }
+    ev.rp_signature_len = CHARRA_RSA_SIGNATURE_LEN;
+
+    ev.rp_public_key_len = rp_public_key_der_len;
+    memcpy(ev.rp_public_key, rp_public_key_der, rp_public_key_der_len);
+
+    /* the nonce the RP itself sent to the Attester */
+    ev.attester_nonce_len = (uint32_t)last_request.nonce_len;
+    memcpy(ev.attester_nonce, last_request.nonce, last_request.nonce_len);
+
+    /* the Attester's evidence, minus its event log */
+    ev.attestation_data_len = last_response.attestation_data_len;
+    memcpy(ev.attestation_data, last_response.attestation_data,
+            last_response.attestation_data_len);
+    ev.tpm2_signature_len = last_response.tpm2_signature_len;
+    memcpy(ev.tpm2_signature, last_response.tpm2_signature,
+            last_response.tpm2_signature_len);
+    ev.tpm2_public_key_len = last_response.tpm2_public_key_len;
+    memcpy(ev.tpm2_public_key, last_response.tpm2_public_key,
+            last_response.tpm2_public_key_len);
+
+    ev.log_r = rp_log_r;
+    ev.log_r_len = rp_log_r_len;
+
+    return charra_marshal_rp_evidence(&ev, marshaled_len, marshaled);
+}
+
+static coap_response_t coap_verifier_handler_nonce(coap_session_t* session,
+        const coap_pdu_t* sent CHARRA_UNUSED, const coap_pdu_t* received,
+        const coap_mid_t mid CHARRA_UNUSED) {
+    int* index = coap_session_get_app_data(session);
+
+    size_t data_len = 0;
+    const uint8_t* data = NULL;
+    size_t data_offset = 0;
+    size_t data_total_len = 0;
+    if (coap_get_data_large(received, &data_len, &data, &data_offset,
+                &data_total_len) == 0) {
+        charra_log_error("[" LOG_NAME "] Verifier returned no nonce.");
+        goto cleanup;
+    }
+    if (index == NULL || data_len == 0 ||
+            data_len > sizeof(verifier_nonces[0])) {
+        charra_log_error("[" LOG_NAME "] Verifier nonce has an unusable "
+                         "length (%zu bytes).",
+                data_len);
+        goto cleanup;
+    }
+
+    memcpy(verifier_nonces[*index], data, data_len);
+    verifier_nonce_lens[*index] = (uint32_t)data_len;
+    charra_log_info("[" LOG_NAME "] Received nonce of %zu bytes from Verifier "
+                    "n\u00b0 %d.",
+            data_len, *index + 1);
+
+cleanup:
+    processing_nonce_response = false;
+    return COAP_RESPONSE_OK;
 }
 
 static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
@@ -1005,14 +1202,15 @@ void* get_attestation_results_thread(void *arg) {
         goto cleanup;
     }
 
-    /* marshal response */
-    uint32_t nonce_buf_len = 0;
-    uint8_t* nonce_buf = NULL;
-    if ((charra_r = charra_marshal_attestation_request(
-                 &last_request, &nonce_buf_len, &nonce_buf)) != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Error marshaling data.");
-        goto error;
-    }
+    /* Ask the Verifier for a nonce. The request carries no payload -- the
+     * Verifier contributes the challenge, which is the whole point: a nonce
+     * the RP generated could never prove freshness TO the Verifier. */
+    coap_session_set_app_data(coap_session, (void*)&current_thread_index);
+    coap_register_response_handler(coap_context, coap_verifier_handler_nonce);
+    verifier_nonce_lens[current_thread_index] = 0;
+    processing_nonce_response = true;
+    charra_log_info("[" LOG_NAME "] Requesting a nonce from Verifier n\u00b0 %d ...",
+            current_thread_index + 1);
 
 
     /* CoAP options */
@@ -1033,7 +1231,7 @@ void* get_attestation_results_thread(void *arg) {
     }
 
     if ((pdu_n = charra_coap_new_request(coap_session, COAP_MESSAGE_TYPE_CON, COAP_REQUEST_FETCH,
-                 &coap_options, nonce_buf, nonce_buf_len)) ==
+                 &coap_options, NULL, 0)) ==
             NULL) {
         charra_log_error("[" LOG_NAME "] Cannot create request PDU.");
         result = CHARRA_RC_ERROR;
@@ -1050,8 +1248,8 @@ void* get_attestation_results_thread(void *arg) {
     }
 
 
-    uint16_t response_wait_time_n = 0;  
-    while (!processing_appraisal_response && coap_io_pending(coap_context)) {
+    uint16_t response_wait_time_n = 0;
+    while (processing_nonce_response && coap_io_pending(coap_context)) {
         /* process CoAP I/O */
         if ((coap_io_process_time_n = coap_io_process(
                      coap_context, COAP_IO_PROCESS_TIME_MS)) == -1) {
@@ -1074,7 +1272,15 @@ void* get_attestation_results_thread(void *arg) {
         }
     }
 
-    /* --- Interaction with the Verifier (forwarding the evidence for appraisal) * ---------------------------------------------------------------*/
+    if (verifier_nonce_lens[current_thread_index] == 0) {
+        charra_log_error("[" LOG_NAME "] Verifier n\u00b0 %d did not supply a "
+                         "nonce; cannot build Quote_r.",
+                current_thread_index + 1);
+        result = CHARRA_RC_ERROR;
+        goto cleanup;
+    }
+
+    /* --- Interaction with the Verifier (sending Quote_r and log_r) * ---------------------------------------------------------------*/
     /* set varaibles here such that they are valid in case of an 'goto cleanup'
      */
     coap_context_t* coap_context_verifier_appraisal = NULL;
@@ -1165,7 +1371,6 @@ void* get_attestation_results_thread(void *arg) {
     coap_mid_t mid_v = COAP_INVALID_MID;
     int coap_io_process_time_v = -1;
 
-    msg_attestation_response_dto res = last_response;
     
     /* create CoAP option for content type */
     uint8_t coap_mediatype_cbor_buf_v[4] = {0};
@@ -1179,15 +1384,20 @@ void* get_attestation_results_thread(void *arg) {
         goto cleanup;
     }
 
-    /* marshal response */
-    //charra_log_info("[" LOG_NAME "] Marshaling response to CBOR.");
+    /* Build and marshal the RP evidence message: Quote_r bound to this
+     * Verifier's nonce, the RP public key, log_r, the nonce the RP sent to
+     * the Attester, and the Attester's evidence minus its raw event log. */
     uint32_t res_buf_len = 0;
     uint8_t* res_buf = NULL;
-    if ((charra_r = charra_marshal_attestation_response(
-                 &res, &res_buf_len, &res_buf)) != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Error marshaling data.");
+    if ((charra_r = charra_rp_build_evidence_message(
+                 current_thread_index, &res_buf_len, &res_buf)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Error building RP evidence message.");
         goto error;
     }
+    charra_log_info("[" LOG_NAME "] Sending %u bytes of RP evidence to "
+                    "Verifier n\u00b0 %d.",
+            res_buf_len, current_thread_index + 1);
     //charra_log_info("[" LOG_NAME "] Size of marshaled response is %d bytes.",res_buf_len);
 
     /* CoAP options */
@@ -1281,6 +1491,14 @@ cleanup:
 }
 
 CHARRA_RC get_attestation_results(int num_verifiers) {
+    /* Privacy-clean once, before any verifier thread starts: the redaction
+     * is randomised, so doing it per thread would give each Verifier a
+     * different log_r for the same attestation. */
+    if (charra_rp_prepare_evidence() != CHARRA_RC_SUCCESS) {
+        charra_rp_release_evidence();
+        return CHARRA_RC_ERROR;
+    }
+
     CHARRA_RC result = EXIT_FAILURE;
 
     charra_log_info("[" LOG_NAME "]  +------------ Interaction with the Verifiers --------------+");
@@ -1323,6 +1541,7 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
 
 
 error:
+    charra_rp_release_evidence();
     return result;
 
 }

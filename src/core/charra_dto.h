@@ -23,6 +23,8 @@
 #include <stddef.h>
 #include <tss2/tss2_tpm2_types.h>
 
+#include "../util/crypto_util.h"
+
 #ifndef CHARRA_DTO_H
 #define CHARRA_DTO_H
 
@@ -118,5 +120,52 @@ typedef struct {
     uint32_t event_log_len;
     uint8_t* event_log;
 } msg_rp_appraisal_dto;
+
+/**
+ * @brief RP -> Verifier message: the redacted log plus everything needed to
+ * check who produced it.
+ *
+ * Quote_r is NOT a TPM quote. PCR_r is computed in software by replaying
+ * log_r, and it is signed with an ordinary RSA keypair the RP generates,
+ * not with a TPM-resident AK. It therefore proves "the holder of
+ * rp_public_key produced this PCR_r in response to this nonce" and nothing
+ * about the RP's own platform state. Replacing it with a real TPM2_Quote
+ * under a certified AK is tracked in CHARRA_V2_NOTES.md.
+ *
+ * The Attester's raw event log is deliberately absent: log_r replaces it,
+ * and forwarding the raw one would defeat the redaction entirely.
+ */
+typedef struct {
+    /* --- Quote_r: the signed (PCR_r, nonce) pair --- */
+    /** PCR composite digest over a replay of log_r. */
+    uint8_t pcr_r[TPM2_SHA256_DIGEST_SIZE];
+    /** Nonce the Verifier issued, proving freshness to the Verifier. */
+    uint32_t verifier_nonce_len;
+    uint8_t verifier_nonce[sizeof(TPMU_HA)];
+    /** RSA-PSS/SHA-256 over (pcr_r || verifier_nonce). */
+    uint32_t rp_signature_len;
+    uint8_t rp_signature[CHARRA_RSA_SIGNATURE_LEN];
+
+    /* --- the key that signature verifies under --- */
+    uint32_t rp_public_key_len;
+    uint8_t rp_public_key[CHARRA_RSA_PUB_KEY_DER_MAX];
+
+    /* --- the nonce the RP sent to the Attester --- */
+    /** Lets the Verifier see which challenge the Attester's quote answers. */
+    uint32_t attester_nonce_len;
+    uint8_t attester_nonce[sizeof(TPMU_HA)];
+
+    /* --- Attester's evidence, forwarded verbatim minus the event log --- */
+    uint32_t attestation_data_len;
+    uint8_t attestation_data[sizeof(TPM2B_ATTEST)];
+    uint32_t tpm2_signature_len;
+    uint8_t tpm2_signature[sizeof(TPMT_SIGNATURE)];
+    uint32_t tpm2_public_key_len;
+    uint8_t tpm2_public_key[sizeof(TPM2B_PUBLIC)];
+
+    /* --- log_r itself --- */
+    uint32_t log_r_len;
+    uint8_t* log_r;
+} msg_rp_evidence_dto;
 
 #endif /* CHARRA_DTO_H */

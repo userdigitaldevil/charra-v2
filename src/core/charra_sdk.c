@@ -1,6 +1,6 @@
 /**
  * @file charra_sdk.c
- * @brief The Verifier's redaction "SDK". See charra_sdk.h.
+ * @brief IMA event log redaction. See charra_sdk.h.
  */
 
 #include "charra_sdk.h"
@@ -10,53 +10,88 @@
 
 #include <tss2/tss2_tpm2_types.h>
 
+#include "../common/charra_log.h"
+#include "../util/charra_util.h"
 #include "../util/crypto_util.h"
 #include "charra_event_log.h"
 
-/** Literal prefix the redacted template_data always starts with -- see
- * charra_sdk.h's "known limitation" for why this is hardcoded rather than
- * carrying the original algorithm name through. */
-static const char REDACTED_PREFIX[] = "sha256:";
-#define REDACTED_PREFIX_LEN (sizeof(REDACTED_PREFIX) - 1 /* no NUL */)
-#define REDACTED_TEMPLATE_DATA_LEN                                           \
-    (REDACTED_PREFIX_LEN + TPM2_SHA256_DIGEST_SIZE + TPM2_SHA256_DIGEST_SIZE)
+#define LOG_NAME "sdk"
 
 /**
- * @brief Locate the file-content digest and the path inside template_data
- * (the "sha256:" / "sha1:" + file digest + NUL + path layout).
+ * @brief Split an ima-ng template_data into its two length-prefixed fields.
  *
- * The prefix length depends on which algorithm produced the file digest --
- * derived from digest_len rather than hardcoded, so this handles either
- * template_data shape produced by charra_synth_generate_ima_log() (always
- * "sha256:") or a genuine SHA-1-shaped ima-ng entry (used only to correctly
- * skip past it; see the caller for what happens with a SHA-1 digest).
+ * The d-ng field is returned including its own u32 length prefix, since it
+ * is copied through verbatim and re-emitted exactly as it arrived. The n-ng
+ * field is returned as its contents only -- the path -- because only the
+ * contents are replaced.
  *
- * file_digest_out and path_out are set independently: an entry can be too
- * short to contain a path but still long enough to contain the digest
- * (nothing after it), or too short for either. Both cases return NULL for
- * the piece that isn't there rather than reading out of bounds -- this can
- * legitimately happen on an already-redacted or synthetic-with-no-data
- * entry.
+ * @returns false if template_data is not a well-formed pair of
+ * length-prefixed fields.
  */
-static void extract_file_digest_and_path(const charra_event_log_entry* entry,
-        uint16_t digest_len, const uint8_t** file_digest_out,
+static bool split_ima_ng_fields(const charra_event_log_entry* entry,
+        const uint8_t** d_field_out, uint32_t* d_field_len_out,
         const uint8_t** path_out, uint32_t* path_len_out) {
-    const char* prefix =
-            (digest_len == TPM2_SHA256_DIGEST_SIZE) ? "sha256:" : "sha1:";
-    uint32_t prefix_len = (uint32_t)strlen(prefix);
+    const uint8_t* data = entry->template_data;
+    const uint32_t len = entry->template_data_len;
 
-    *file_digest_out = (entry->template_data_len >= prefix_len + digest_len)
-            ? entry->template_data + prefix_len
-            : NULL;
-
-    uint32_t skip = prefix_len + digest_len + 1 /* NUL */;
-    if (entry->template_data_len > skip) {
-        *path_out = entry->template_data + skip;
-        *path_len_out = entry->template_data_len - skip;
-    } else {
-        *path_out = NULL;
-        *path_len_out = 0;
+    if (data == NULL || len < sizeof(uint32_t)) {
+        return false;
     }
+    /* d-ng: u32 length prefix followed by that many bytes */
+    uint32_t d_len = (uint32_t)data[0] | ((uint32_t)data[1] << 8) |
+                     ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+    if (d_len > len - sizeof(uint32_t)) {
+        return false;
+    }
+    const uint32_t d_field_len = sizeof(uint32_t) + d_len;
+
+    /* n-ng: u32 length prefix followed by the path */
+    if (len - d_field_len < sizeof(uint32_t)) {
+        return false;
+    }
+    const uint8_t* n = data + d_field_len;
+    uint32_t n_len = (uint32_t)n[0] | ((uint32_t)n[1] << 8) |
+                     ((uint32_t)n[2] << 16) | ((uint32_t)n[3] << 24);
+    if (n_len > len - d_field_len - sizeof(uint32_t)) {
+        return false;
+    }
+
+    *d_field_out = data;
+    *d_field_len_out = d_field_len;
+    *path_out = n + sizeof(uint32_t);
+    *path_len_out = n_len;
+    return true;
+}
+
+/**
+ * @brief redacted_path = SHA256(path || salt), with a fresh random salt.
+ *
+ * The salt is discarded: it exists to make the hash both irreversible
+ * against guessed paths and non-correlatable across entries, neither of
+ * which requires anyone to be able to recompute it.
+ */
+static CHARRA_RC hash_path_salted(const uint8_t* path, uint32_t path_len,
+        uint8_t out[CHARRA_SDK_REDACTED_PATH_LEN]) {
+    uint8_t salt[CHARRA_SDK_PATH_SALT_LEN] = {0};
+    if (charra_random_bytes(CHARRA_SDK_PATH_SALT_LEN, salt) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not generate a path salt.");
+        return CHARRA_RC_CRYPTO_ERROR;
+    }
+
+    uint8_t* buf = malloc((size_t)path_len + sizeof(salt));
+    if (buf == NULL) {
+        return CHARRA_RC_ERROR;
+    }
+    if (path_len > 0) {
+        memcpy(buf, path, path_len);
+    }
+    memcpy(buf + path_len, salt, sizeof(salt));
+
+    CHARRA_RC charra_r = hash_sha256((size_t)path_len + sizeof(salt), buf, out);
+    free(buf);
+    return (charra_r == CHARRA_RC_SUCCESS) ? CHARRA_RC_SUCCESS
+                                           : CHARRA_RC_CRYPTO_ERROR;
 }
 
 CHARRA_RC charra_sdk_redact_ima_log(const uint8_t* raw_log,
@@ -69,125 +104,120 @@ CHARRA_RC charra_sdk_redact_ima_log(const uint8_t* raw_log,
         return CHARRA_RC_BAD_ARGUMENT;
     }
 
+    *redacted_log_out = NULL;
+    *redacted_log_len_out = 0;
     if (raw_log_len == 0) {
-        *redacted_log_out = NULL;
-        *redacted_log_len_out = 0;
         return CHARRA_RC_SUCCESS;
     }
 
     uint16_t digest_len = 0;
-    CHARRA_RC rc = charra_event_log_ima_detect_digest_len(
+    CHARRA_RC charra_r = charra_event_log_ima_detect_digest_len(
             raw_log, raw_log_len, &digest_len);
-    if (rc != CHARRA_RC_SUCCESS) {
-        return rc;
-    }
-    /* Known limitation (see charra_sdk.h): the redacted prefix is hardcoded
-     * to "sha256:" and the preserved file-content digest is assumed to
-     * already be 32 bytes. Reject rather than mishandle a SHA-1 log. */
-    if (digest_len != TPM2_SHA256_DIGEST_SIZE) {
-        return CHARRA_RC_MARSHALING_ERROR;
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        return charra_r;
     }
 
-    /* First pass: count entries only, to size the output buffer. Redacted
-     * template_data is always exactly REDACTED_TEMPLATE_DATA_LEN bytes,
-     * independent of how large the ORIGINAL template_data was, so this
-     * bound cannot be derived from raw_log_len alone -- an entry with a
-     * very short original template_data could still expand after
-     * redaction. */
+    /* A redacted entry is never larger than its original: the d-ng field is
+     * copied verbatim, and the n-ng field shrinks to a fixed 32 bytes unless
+     * the original path was shorter than that. Size for the worst case --
+     * every path shorter than its hash -- plus the digest possibly growing
+     * from SHA-1 to SHA-256. */
     uint32_t num_entries = 0;
     {
         uint32_t offset = 0;
         while (offset < raw_log_len) {
             charra_event_log_entry entry = {0};
-            rc = charra_event_log_parse_entry(
+            charra_r = charra_event_log_parse_entry(
                     raw_log, raw_log_len, &offset, digest_len, &entry);
-            if (rc != CHARRA_RC_SUCCESS) {
-                return rc;
+            if (charra_r != CHARRA_RC_SUCCESS) {
+                return charra_r;
             }
             num_entries++;
         }
     }
-
-    uint32_t max_entry_len = sizeof(uint32_t)      /* pcr_index */
-            + TPM2_SHA256_DIGEST_SIZE               /* template_digest */
-            + sizeof(uint32_t) + CHARRA_IMA_TEMPLATE_NAME_MAX /* name */
-            + sizeof(uint32_t) + REDACTED_TEMPLATE_DATA_LEN;  /* data */
-
-    uint8_t* buf = malloc((size_t)max_entry_len * num_entries);
+    const size_t slack = (size_t)num_entries *
+                         (CHARRA_SDK_REDACTED_PATH_LEN + TPM2_SHA256_DIGEST_SIZE);
+    uint8_t* buf = malloc((size_t)raw_log_len + slack);
     if (buf == NULL) {
         return CHARRA_RC_ERROR;
     }
 
     uint32_t out_offset = 0;
     uint32_t offset = 0;
+    uint32_t entry_num = 0;
     while (offset < raw_log_len) {
         charra_event_log_entry entry = {0};
-        rc = charra_event_log_parse_entry(
+        charra_r = charra_event_log_parse_entry(
                 raw_log, raw_log_len, &offset, digest_len, &entry);
-        if (rc != CHARRA_RC_SUCCESS) {
-            free(buf);
-            return rc;
+        if (charra_r != CHARRA_RC_SUCCESS) {
+            goto error;
         }
 
-        const uint8_t* file_digest = NULL;
+        const uint8_t* d_field = NULL;
+        uint32_t d_field_len = 0;
         const uint8_t* path = NULL;
         uint32_t path_len = 0;
-        extract_file_digest_and_path(
-                &entry, digest_len, &file_digest, &path, &path_len);
-
-        /* Path is sensitive -- only its hash survives. File-content digest
-         * is not -- it's preserved as-is. A missing file_digest (template_data
-         * too short to contain it -- an already-redacted or
-         * synthetic-with-no-data entry, same tolerance the old code had for
-         * a missing path) falls back to an all-zero digest rather than
-         * failing the whole log. */
-        static const uint8_t empty_buf[1] = {0};
-        static const uint8_t zero_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
-        uint8_t path_hash[TPM2_SHA256_DIGEST_SIZE] = {0};
-        rc = hash_sha256(
-                path_len, (path != NULL) ? path : empty_buf, path_hash);
-        if (rc != CHARRA_RC_SUCCESS) {
-            free(buf);
-            return rc;
+        if (!split_ima_ng_fields(
+                    &entry, &d_field, &d_field_len, &path, &path_len)) {
+            charra_log_error("[" LOG_NAME "] Entry %u's template_data is not "
+                             "a well-formed ima-ng field pair.",
+                    entry_num);
+            charra_r = CHARRA_RC_MARSHALING_ERROR;
+            goto error;
         }
 
-        uint8_t new_template_data[REDACTED_TEMPLATE_DATA_LEN];
-        uint32_t td_offset = 0;
-        charra_event_log_append_bytes(new_template_data, &td_offset,
-                REDACTED_PREFIX, REDACTED_PREFIX_LEN);
-        charra_event_log_append_bytes(new_template_data, &td_offset,
-                (file_digest != NULL) ? file_digest : zero_digest,
-                TPM2_SHA256_DIGEST_SIZE);
-        charra_event_log_append_bytes(
-                new_template_data, &td_offset, path_hash, sizeof(path_hash));
+        uint8_t redacted_path[CHARRA_SDK_REDACTED_PATH_LEN] = {0};
+        charra_r = hash_path_salted(path, path_len, redacted_path);
+        if (charra_r != CHARRA_RC_SUCCESS) {
+            goto error;
+        }
 
-        /* template_digest = SHA256(new template_data) -- recomputed, per
-         * the design's requirement, from the REDACTED content, not copied
-         * from the original entry. */
+        /* new template_data = d-ng verbatim || u32(32) || redacted path */
+        const uint32_t new_td_len =
+                d_field_len + sizeof(uint32_t) + CHARRA_SDK_REDACTED_PATH_LEN;
+        uint8_t* new_template_data = malloc(new_td_len);
+        if (new_template_data == NULL) {
+            charra_r = CHARRA_RC_ERROR;
+            goto error;
+        }
+        uint32_t td_offset = 0;
+        charra_event_log_append_bytes(
+                new_template_data, &td_offset, d_field, d_field_len);
+        charra_event_log_append_u32(
+                new_template_data, &td_offset, CHARRA_SDK_REDACTED_PATH_LEN);
+        charra_event_log_append_bytes(new_template_data, &td_offset,
+                redacted_path, CHARRA_SDK_REDACTED_PATH_LEN);
+
+        /* template_digest = SHA256(new template_data), recomputed from the
+         * REDACTED content -- never copied from the original entry. */
         uint8_t new_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
-        rc = hash_sha256(sizeof(new_template_data), new_template_data,
-                new_digest);
-        if (rc != CHARRA_RC_SUCCESS) {
-            free(buf);
-            return rc;
+        charra_r = hash_sha256(new_td_len, new_template_data, new_digest);
+        if (charra_r != CHARRA_RC_SUCCESS) {
+            free(new_template_data);
+            charra_r = CHARRA_RC_CRYPTO_ERROR;
+            goto error;
         }
 
         charra_event_log_append_u32(buf, &out_offset, entry.pcr_index);
         charra_event_log_append_bytes(
                 buf, &out_offset, new_digest, sizeof(new_digest));
-        charra_event_log_append_u32(
-                buf, &out_offset, entry.template_name_len);
+        charra_event_log_append_u32(buf, &out_offset, entry.template_name_len);
         charra_event_log_append_bytes(buf, &out_offset, entry.template_name,
                 entry.template_name_len);
-        charra_event_log_append_u32(
-                buf, &out_offset, sizeof(new_template_data));
-        charra_event_log_append_bytes(buf, &out_offset, new_template_data,
-                sizeof(new_template_data));
+        charra_event_log_append_u32(buf, &out_offset, new_td_len);
+        charra_event_log_append_bytes(
+                buf, &out_offset, new_template_data, new_td_len);
+        free(new_template_data);
+        entry_num++;
     }
 
-    uint8_t* trimmed = realloc(buf, out_offset);
-    *redacted_log_out = (trimmed != NULL) ? trimmed : buf;
+    *redacted_log_out = buf;
     *redacted_log_len_out = out_offset;
-
+    charra_log_info("[" LOG_NAME "] Redacted %u entries (%u bytes in, %u out).",
+            entry_num, raw_log_len, out_offset);
     return CHARRA_RC_SUCCESS;
+
+error:
+    free(buf);
+    return charra_r;
 }

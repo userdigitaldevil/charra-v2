@@ -26,6 +26,7 @@
 
 #include <tss2/tss2_tpm2_types.h>
 
+#include <mbedtls/pk.h>
 #include <mbedtls/rsa.h>
 
 #include "../common/charra_error.h"
@@ -78,6 +79,51 @@ CHARRA_RC charra_crypto_rsa_verify_signature(
         mbedtls_rsa_context* mbedtls_rsa_pub_key, mbedtls_md_type_t hash_algo,
         const unsigned char* data, size_t data_len,
         const unsigned char* signature);
+
+/* --- software RSA keypair (no TPM involved) ------------------------------
+ *
+ * Used by the Relying Party to sign Quote_r. This is an ordinary software
+ * key, not a TPM-resident AK: it proves the same RP produced a given
+ * (PCR_r, nonce) pair, but carries no hardware-rooted identity. Replacing it
+ * with a certified AK is tracked in CHARRA_V2_NOTES.md.
+ */
+
+/** Size of the RP's RSA key. */
+#define CHARRA_RSA_KEY_BITS 2048
+/** Bytes an RSA-2048 signature occupies. */
+#define CHARRA_RSA_SIGNATURE_LEN (CHARRA_RSA_KEY_BITS / 8)
+/** Generous upper bound on the DER encoding of an RSA-2048 public key. */
+#define CHARRA_RSA_PUB_KEY_DER_MAX 512
+
+/**
+ * @brief Generate a fresh RSA keypair configured for RSA-PSS/SHA-256.
+ *
+ * @param[out] key an uninitialized context; on success it is initialized and
+ * holds the new keypair. Caller must mbedtls_pk_free() it.
+ */
+CHARRA_RC charra_crypto_rsa_generate_keypair(mbedtls_pk_context* key);
+
+/**
+ * @brief DER-encode a keypair's public half.
+ *
+ * @param[out] der_out buffer of at least CHARRA_RSA_PUB_KEY_DER_MAX bytes
+ * @param[out] der_len_out bytes written into der_out
+ */
+CHARRA_RC charra_crypto_rsa_public_key_to_der(mbedtls_pk_context* key,
+        uint8_t* der_out, size_t der_out_size, uint32_t* der_len_out);
+
+/**
+ * @brief Sign data with RSA-PSS over SHA-256.
+ *
+ * Matches what charra_crypto_rsa_verify_signature() expects, so a verifier
+ * can check it with the existing helper once it has parsed the public key.
+ *
+ * @param[out] signature_out buffer of at least CHARRA_RSA_SIGNATURE_LEN
+ * bytes
+ */
+CHARRA_RC charra_crypto_rsa_sign(mbedtls_pk_context* key,
+        const unsigned char* data, size_t data_len,
+        unsigned char* signature_out);
 
 /**
  * @brief Compute PCR composite digest from PCR values and check if it matches

@@ -113,6 +113,35 @@ CHARRA_RC charra_marshal_rp_appraisal(
  * @return CHARRA_RC_SUCCESS on success.
  * @return CHARRA_RC_BAD_ARGUMENT / CHARRA_RC_MARSHALING_ERROR on bad input.
  */
+/**
+ * @brief Marshals an RP evidence DTO (the RP->Verifier message carrying
+ * Quote_r and the redacted log -- see msg_rp_evidence_dto in charra_dto.h).
+ *
+ * @param rp_evidence[in] The RP evidence DTO.
+ * @param marshaled_data_len[out] The length of the marshaled data.
+ * @param marshaled_data[out] The marshaled data; caller must free() it.
+ * @return CHARRA_RC_SUCCESS on success, otherwise
+ * CHARRA_RC_MARSHALING_ERROR.
+ */
+CHARRA_RC charra_marshal_rp_evidence(const msg_rp_evidence_dto* rp_evidence,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data);
+
+/**
+ * @brief Unmarshals an RP evidence DTO.
+ *
+ * log_r points into the caller's marshaled_data buffer and must not be
+ * freed; it stays valid only as long as that buffer does. Every other field
+ * is copied into the DTO.
+ *
+ * @param marshaled_data_len[in] The length of the marshaled data.
+ * @param marshaled_data[in] The marshaled data.
+ * @param rp_evidence[out] The RP evidence DTO.
+ * @return CHARRA_RC_SUCCESS on success, otherwise
+ * CHARRA_RC_MARSHALING_ERROR.
+ */
+CHARRA_RC charra_unmarshal_rp_evidence(const uint32_t marshaled_data_len,
+        const uint8_t* marshaled_data, msg_rp_evidence_dto* rp_evidence);
+
 CHARRA_RC charra_unmarshal_rp_appraisal(
         const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
         msg_rp_appraisal_dto* rp_appraisal);

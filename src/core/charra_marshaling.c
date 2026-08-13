@@ -496,3 +496,225 @@ cbor_parse_error:
 
     return CHARRA_RC_MARSHALING_ERROR;
 }
+
+/* --- RP evidence (RP -> Verifier) ---------------------------------------- */
+
+/**
+ * @brief Encodes an RP evidence DTO into buf_in.
+ *
+ * Field order here is the wire format -- it is a plain positional array with
+ * no labels, so this order and charra_unmarshal_rp_evidence()'s must never
+ * diverge.
+ */
+static CHARRA_RC charra_marshal_rp_evidence_internal(
+        const msg_rp_evidence_dto* rp_evidence, UsefulBuf buf_in,
+        UsefulBufC* buf_out) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    assert(rp_evidence != NULL);
+    if (rp_evidence->log_r_len != 0) {
+        assert(rp_evidence->log_r != NULL);
+    }
+
+    QCBOREncodeContext ec = {0};
+    QCBOREncode_Init(&ec, buf_in);
+    QCBOREncode_OpenArray(&ec);
+
+    /* Quote_r */
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->pcr_r,
+                    .len = sizeof(rp_evidence->pcr_r)});
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->verifier_nonce,
+                    .len = rp_evidence->verifier_nonce_len});
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->rp_signature,
+                    .len = rp_evidence->rp_signature_len});
+
+    /* RP public key */
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->rp_public_key,
+                    .len = rp_evidence->rp_public_key_len});
+
+    /* nonce the RP sent to the Attester */
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->attester_nonce,
+                    .len = rp_evidence->attester_nonce_len});
+
+    /* Attester's evidence, minus its event log */
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->attestation_data,
+                    .len = rp_evidence->attestation_data_len});
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->tpm2_signature,
+                    .len = rp_evidence->tpm2_signature_len});
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->tpm2_public_key,
+                    .len = rp_evidence->tpm2_public_key_len});
+
+    /* log_r */
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->log_r,
+                    .len = rp_evidence->log_r_len});
+
+    QCBOREncode_CloseArray(&ec);
+
+    return (QCBOREncode_Finish(&ec, buf_out) == QCBOR_SUCCESS)
+                   ? CHARRA_RC_SUCCESS
+                   : CHARRA_RC_MARSHALING_ERROR;
+}
+
+CHARRA_RC charra_marshal_rp_evidence(const msg_rp_evidence_dto* rp_evidence,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
+    assert(rp_evidence != NULL);
+    assert(marshaled_data_len != NULL);
+    assert(marshaled_data != NULL);
+
+    /* a SIZE_MAX-length NULL buffer instructs QCBOR to size only, not encode */
+    UsefulBuf buf_in = {.len = 0, .ptr = NULL};
+    UsefulBufC buf_size = {.len = 0, .ptr = NULL};
+    if ((charra_r = charra_marshal_rp_evidence_internal(rp_evidence,
+                 (UsefulBuf){.len = SIZE_MAX, .ptr = NULL}, &buf_size)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("Could not compute size of marshaled RP evidence.");
+        return charra_r;
+    }
+    buf_in.len = buf_size.len;
+    charra_log_debug("Size of marshaled RP evidence is %zu bytes.", buf_in.len);
+
+    if ((buf_in.ptr = malloc(buf_in.len)) == NULL) {
+        charra_log_error("Allocating %zu bytes of memory failed.", buf_in.len);
+        return CHARRA_RC_MARSHALING_ERROR;
+    }
+
+    UsefulBufC buf_out = {.len = 0, .ptr = NULL};
+    if ((charra_r = charra_marshal_rp_evidence_internal(
+                 rp_evidence, buf_in, &buf_out)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("Could not marshal RP evidence.");
+        free(buf_in.ptr);
+        return charra_r;
+    }
+
+    *marshaled_data_len = buf_out.len;
+    *marshaled_data = (uint8_t*)buf_out.ptr;
+    return charra_r;
+}
+
+CHARRA_RC charra_unmarshal_rp_evidence(const uint32_t marshaled_data_len,
+        const uint8_t* marshaled_data, msg_rp_evidence_dto* rp_evidence) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    msg_rp_evidence_dto res = {0};
+    QCBORError cborerr = QCBOR_SUCCESS;
+    UsefulBufC marshaled_data_buf = {marshaled_data, marshaled_data_len};
+    QCBORDecodeContext dc = {0};
+    QCBORItem item = {0};
+
+    QCBORDecode_Init(&dc, marshaled_data_buf, QCBOR_DECODE_MODE_NORMAL);
+
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_ARRAY)))
+        goto cbor_parse_error;
+
+    /* Every length is checked against its destination before the copy: this
+     * is attacker-reachable input and the destinations are fixed-size. */
+
+    /* PCR_r */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    if (item.val.string.len != sizeof(res.pcr_r)) {
+        charra_log_error("CBOR parser: PCR_r has the wrong size.");
+        goto cbor_parse_error;
+    }
+    memcpy(res.pcr_r, item.val.string.ptr, sizeof(res.pcr_r));
+
+    /* Verifier's nonce */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.verifier_nonce_len = item.val.string.len;
+    if (res.verifier_nonce_len > sizeof(res.verifier_nonce)) {
+        charra_log_error("CBOR parser: verifier nonce exceeds maximum size.");
+        goto cbor_parse_error;
+    }
+    memcpy(res.verifier_nonce, item.val.string.ptr, res.verifier_nonce_len);
+
+    /* RP signature */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.rp_signature_len = item.val.string.len;
+    if (res.rp_signature_len > sizeof(res.rp_signature)) {
+        charra_log_error("CBOR parser: RP signature exceeds maximum size.");
+        goto cbor_parse_error;
+    }
+    memcpy(res.rp_signature, item.val.string.ptr, res.rp_signature_len);
+
+    /* RP public key */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.rp_public_key_len = item.val.string.len;
+    if (res.rp_public_key_len > sizeof(res.rp_public_key)) {
+        charra_log_error("CBOR parser: RP public key exceeds maximum size.");
+        goto cbor_parse_error;
+    }
+    memcpy(res.rp_public_key, item.val.string.ptr, res.rp_public_key_len);
+
+    /* nonce the RP sent to the Attester */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.attester_nonce_len = item.val.string.len;
+    if (res.attester_nonce_len > sizeof(res.attester_nonce)) {
+        charra_log_error("CBOR parser: attester nonce exceeds maximum size.");
+        goto cbor_parse_error;
+    }
+    memcpy(res.attester_nonce, item.val.string.ptr, res.attester_nonce_len);
+
+    /* Attester's attestation data */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.attestation_data_len = item.val.string.len;
+    if (res.attestation_data_len > sizeof(res.attestation_data)) {
+        charra_log_error("CBOR parser: attestation data exceeds maximum size.");
+        goto cbor_parse_error;
+    }
+    memcpy(res.attestation_data, item.val.string.ptr, res.attestation_data_len);
+
+    /* Attester's signature */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.tpm2_signature_len = item.val.string.len;
+    if (res.tpm2_signature_len > sizeof(res.tpm2_signature)) {
+        charra_log_error("CBOR parser: TPM2 signature exceeds maximum size.");
+        goto cbor_parse_error;
+    }
+    memcpy(res.tpm2_signature, item.val.string.ptr, res.tpm2_signature_len);
+
+    /* Attester's public key */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.tpm2_public_key_len = item.val.string.len;
+    if (res.tpm2_public_key_len > sizeof(res.tpm2_public_key)) {
+        charra_log_error("CBOR parser: TPM2 public key exceeds maximum size.");
+        goto cbor_parse_error;
+    }
+    memcpy(res.tpm2_public_key, item.val.string.ptr, res.tpm2_public_key_len);
+
+    /* log_r -- borrowed from the caller's buffer, never freed here */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.log_r_len = item.val.string.len;
+    res.log_r = (uint8_t*)item.val.string.ptr;
+
+    if ((cborerr = QCBORDecode_Finish(&dc))) {
+        goto cbor_parse_error;
+    }
+
+    *rp_evidence = res;
+    return CHARRA_RC_SUCCESS;
+
+cbor_parse_error:
+    charra_log_error("CBOR parser: %s", qcbor_err_to_str(cborerr));
+    charra_log_info("CBOR parser: skipping parsing.");
+    return CHARRA_RC_MARSHALING_ERROR;
+}
