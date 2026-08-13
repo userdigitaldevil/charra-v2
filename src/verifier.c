@@ -386,6 +386,12 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
      * them instead of reading indeterminate values. */
     ESYS_CONTEXT* esys_ctx = NULL;
     TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
+    /* Trust anchor for Step 3a/3b item 1 (EK_r/AK_r, EK_a/AK_a) -- both AK
+     * certificates are checked against the Verifier's own CA, since the
+     * Verifier is the sole issuer via /certify_ak. Declared here for the
+     * same reason as esys_ctx/tcti_ctx above. */
+    char* verifier_ca_cert_der = NULL;
+    size_t verifier_ca_cert_der_len = 0;
 
     FILE * p_file;
     p_file = fopen("durations_verifier.txt", "w");
@@ -497,6 +503,20 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     init_duration = ((double) (end_init - start_init)) / CLOCKS_PER_SEC;
     fprintf(p_file, "init took %f seconds to execute \n", init_duration);
 
+    /* Trust anchor for the EK/AK checks below: both EK_r/AK_r (Step 3a item
+     * 1) and EK_a/AK_a (Step 3b item 1) are AK certificates issued by this
+     * Verifier's own CA via /certify_ak -- the EK certificate itself was
+     * already validated once, during that earlier provisioning call, so
+     * only the already-issued AK certificate needs checking here, against
+     * the same CA coap_certify_ak_handler() signs with. */
+    if ((attestation_rc = charra_io_read_file(verifier_ca_cert_path,
+                 &verifier_ca_cert_der, &verifier_ca_cert_der_len)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not read Verifier CA "
+                         "certificate ('%s').",
+                verifier_ca_cert_path);
+        goto cleanup;
+    }
 
     /* =====================================================================
      * Step 3a -- New Evidence Verification (Evidence_r = Quote_r, log_r,
@@ -505,9 +525,24 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
      * is passed, proceed to Step 3b").
      * ===================================================================== */
 
-    /* Step 3a item 1: validate EK_r/AK_r certificate -- NOT YET IMPLEMENTED.
-     * See CHARRA_V2_NOTES.md ("Open / undecided" -- EK/AK provisioning) for
-     * what this needs: mbedx509 linked, chain validation, a trust store. */
+    /* Step 3a item 1: validate EK_r/AK_r certificate -- checks that RP's AK
+     * certificate (obtained via its own earlier /certify_ak call) chains to
+     * the Verifier's own CA, and that its embedded key matches the key that
+     * actually signed Quote_r below -- not some other, unrelated key. Same
+     * check as Step 3b item 1 further down, against the Attester's AK
+     * certificate -- see charra_crypto_verify_ekak_certificate(). */
+    bool attestation_result_ekak_rp =
+            charra_crypto_verify_ekak_certificate(res.ak_certificate_rp,
+                    res.ak_certificate_rp_len, (uint8_t*)verifier_ca_cert_der,
+                    verifier_ca_cert_der_len,
+                    (TPM2B_PUBLIC*)res.tpm2_public_key_rp) ==
+            CHARRA_RC_SUCCESS;
+    if (attestation_result_ekak_rp) {
+        charra_log_info("[" LOG_NAME "]     => RP's AK certificate is valid!");
+    } else {
+        charra_log_error("[" LOG_NAME "]     => RP's AK certificate did NOT "
+                         "verify (chain or key mismatch)!");
+    }
 
     /* Step 3a item 2: verify Quote_r signature */
     clock_t start_load, end_load;
@@ -605,10 +640,12 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
      * even looked at, matching the spec's early-exit wording exactly
      * (previously all six checks ran unconditionally and were only ANDed
      * together at the end; that no longer matches the spec's text). */
-    bool step_3a_passed = attestation_result_signature_rp &&
+    bool step_3a_passed = attestation_result_ekak_rp &&
+                          attestation_result_signature_rp &&
                           attestation_result_signature_rp_mbedtls &&
                           attestation_result_nonce_rp;
 
+    bool attestation_result_ekak = false;
     bool attestation_result_signature = false;
     bool attestation_result_signature_mbedtls = false;
     bool attestation_result_nonce = false;
@@ -626,8 +663,23 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
          * Verifier).
          * ================================================================= */
 
-        /* Step 3b item 1: validate EK_a/AK_a certificate -- NOT YET
-         * IMPLEMENTED. Same gap as Step 3a item 1 above. */
+        /* Step 3b item 1: validate EK_a/AK_a certificate -- same check as
+         * Step 3a item 1 above, against the Attester's AK certificate
+         * (obtained via its own earlier /certify_ak call, forwarded here by
+         * RP) and the key that actually signed Quote_a. */
+        attestation_result_ekak =
+                charra_crypto_verify_ekak_certificate(res.ak_certificate,
+                        res.ak_certificate_len, (uint8_t*)verifier_ca_cert_der,
+                        verifier_ca_cert_der_len,
+                        (TPM2B_PUBLIC*)res.tpm2_public_key) ==
+                CHARRA_RC_SUCCESS;
+        if (attestation_result_ekak) {
+            charra_log_info(
+                    "[" LOG_NAME "]     => Attester's AK certificate is valid!");
+        } else {
+            charra_log_error("[" LOG_NAME "]     => Attester's AK certificate "
+                             "did NOT verify (chain or key mismatch)!");
+        }
 
         /* Step 3b item 2: verify Quote_a signature */
         TPM2B_PUBLIC* tpm2_public_key = (TPM2B_PUBLIC*)res.tpm2_public_key;
@@ -684,12 +736,14 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
 
     /* --- output result --- */
     /* Order matches Step 3a then Step 3b, RP's evidence before Attester's.
-     * Equivalent to step_3a_passed && (Step 3b's three results), since
+     * Equivalent to step_3a_passed && (Step 3b's four results), since
      * Step 3b's results default to false whenever it was skipped. */
 
-    bool attestation_result = attestation_result_signature_rp &&
+    bool attestation_result = attestation_result_ekak_rp &&
+                              attestation_result_signature_rp &&
                               attestation_result_signature_rp_mbedtls &&
                               attestation_result_nonce_rp &&
+                              attestation_result_ekak &&
                               attestation_result_signature &&
                               attestation_result_signature_mbedtls &&
                               attestation_result_nonce;
@@ -747,9 +801,11 @@ cleanup:
         }
     }
 
-    /* free event log (log_r) */
+    /* free event log (log_r) and the two AK certificates */
     // TODO(any): Provide function charra_free_msg_rp_appraisal_dto().
     charra_free_if_not_null(res.event_log);
+    charra_free_if_not_null(res.ak_certificate);
+    charra_free_if_not_null(res.ak_certificate_rp);
 
     /* free ESAPI objects */
     if (validation != NULL) {
@@ -767,6 +823,8 @@ cleanup:
         Tss2_TctiLdr_Finalize(&tcti_ctx);
     }
 
+    /* free the Verifier CA certificate buffer read for Step 3a/3b item 1 */
+    charra_io_free_file_buffer(&verifier_ca_cert_der);
 }
 
 static void coap_nonce_handler(struct coap_resource_t* resource CHARRA_UNUSED,

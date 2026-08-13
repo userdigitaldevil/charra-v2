@@ -107,6 +107,12 @@ typedef struct {
     uint8_t tpm2_signature[sizeof(TPMT_SIGNATURE)];
     uint32_t tpm2_public_key_len;
     uint8_t tpm2_public_key[sizeof(TPM2B_PUBLIC)];
+    /* EK_a/AK_a: the AK certificate (DER) the Attester obtained via its own
+     * earlier /certify_ak call, forwarded by RP -- Step 3b item 1's input.
+     * No fixed upper bound (real certificates vary in size), heap-allocated
+     * on unmarshal, same as event_log below. */
+    uint32_t ak_certificate_len;
+    uint8_t* ak_certificate;
 
     /* RP's own quote, proving RP genuinely produced event_log below */
     uint32_t attestation_data_rp_len;
@@ -115,6 +121,11 @@ typedef struct {
     uint8_t tpm2_signature_rp[sizeof(TPMT_SIGNATURE)];
     uint32_t tpm2_public_key_rp_len;
     uint8_t tpm2_public_key_rp[sizeof(TPM2B_PUBLIC)];
+    /* EK_r/AK_r: RP's own AK certificate (DER), obtained via its own
+     * earlier /certify_ak call -- Step 3a item 1's input. Same
+     * no-fixed-bound reasoning as ak_certificate above. */
+    uint32_t ak_certificate_rp_len;
+    uint8_t* ak_certificate_rp;
 
     /* log_r -- RP's redacted log, not Attester's raw one */
     uint32_t event_log_len;

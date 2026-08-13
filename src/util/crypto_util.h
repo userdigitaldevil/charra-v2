@@ -209,6 +209,47 @@ CHARRA_RC charra_crypto_verify_cert_public_key_matches_tpm_public_key(
         const mbedtls_x509_crt* cert, const TPM2B_PUBLIC* tpm_pub_key);
 
 /**
+ * @brief Validate an AK certificate for a "validate EK/AK certificate"
+ * check (DRA-TLS spec Step 2a/3a/3b item 1): the certificate chains to
+ * trusted_ca_der, and its embedded public key matches the key that
+ * actually signed the corresponding quote -- not some other, unrelated
+ * key. Combines charra_crypto_verify_x509_cert_chain() and
+ * charra_crypto_verify_cert_public_key_matches_tpm_public_key(), the
+ * pairing every caller of this check needs.
+ *
+ * Only the AK certificate is checked here, not a separate EK certificate.
+ * In this project's design the EK is validated once, at AK-provisioning
+ * time (see /certify_ak, charra_crypto_build_ek_tpm2b_public_from_cert()),
+ * against the manufacturer root -- never re-sent or re-checked on every
+ * quote. The AK certificate chaining to the issuing CA is what stands in
+ * for that already-completed EK check from here on, which is why this
+ * function alone satisfies the spec's "EK/AK" item, not just the "AK"
+ * half of it.
+ *
+ * Deliberately generic over the caller: the Verifier uses this for both
+ * Evidence_r and Evidence_a' (Step 3a/3b item 1, against its own CA
+ * certificate as trusted_ca_der); the RP is expected to use the exact same
+ * function for its own Step 2a item 1, validating the Attester's AK
+ * certificate against that same CA certificate (which the RP would need
+ * distributed to it, same as any trust anchor). No caller-specific state.
+ *
+ * @param[in] ak_cert_der the AK certificate (DER) to validate
+ * @param[in] ak_cert_der_len length of ak_cert_der
+ * @param[in] trusted_ca_der the trusted CA certificate (DER) ak_cert_der is
+ * expected to chain to
+ * @param[in] trusted_ca_der_len length of trusted_ca_der
+ * @param[in] tpm2_public_key the key that actually signed the
+ * corresponding quote
+ * @returns CHARRA_RC_SUCCESS if the certificate chains to trusted_ca_der
+ * and its key matches tpm2_public_key, CHARRA_RC_VERIFICATION_FAILED if
+ * either check fails, CHARRA_RC_BAD_ARGUMENT / CHARRA_RC_CRYPTO_ERROR on
+ * error.
+ */
+CHARRA_RC charra_crypto_verify_ekak_certificate(const uint8_t* ak_cert_der,
+        uint32_t ak_cert_der_len, const uint8_t* trusted_ca_der,
+        size_t trusted_ca_der_len, TPM2B_PUBLIC* tpm2_public_key);
+
+/**
  * @brief Reconstruct the standard TCG RSA-2048 EK TPM2B_PUBLIC (the fixed
  * "low range" template real EK certificates are issued against) from an
  * already chain-verified EK certificate's embedded RSA public key.

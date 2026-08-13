@@ -80,11 +80,14 @@ CHARRA_RC charra_unmarshal_attestation_response(
         msg_attestation_response_dto* attestation_response);
 
 /**
- * @brief Marshals an RP appraisal DTO (Quote_a + Quote_r + log_r, the
- * RP->Verifier message -- see msg_rp_appraisal_dto in charra_dto.h).
+ * @brief Marshals an RP appraisal DTO (Quote_a + EK_a/AK_a + Quote_r +
+ * EK_r/AK_r + log_r, the RP->Verifier message -- see msg_rp_appraisal_dto in
+ * charra_dto.h).
  *
- * Implementation owned by RP-side work; declared here so verifier.c has a
- * stable signature to build and link against independently.
+ * msg_rp_appraisal_dto itself is the RP-side intern's assigned DTO; this
+ * implementation was written to unblock a real end-to-end build/test of the
+ * Verifier-side work (see CHARRA_V2_NOTES.md, "Live end-to-end CoAP
+ * verification").
  *
  * @param rp_appraisal[in] The RP appraisal DTO.
  * @param marshaled_data_len[out] The length of the marshaled data.
@@ -97,15 +100,16 @@ CHARRA_RC charra_marshal_rp_appraisal(
         uint32_t* marshaled_data_len, uint8_t** marshaled_data);
 
 /**
- * @brief Unmarshals an RP appraisal DTO (Quote_a + Quote_r + log_r, the
- * RP->Verifier message -- see msg_rp_appraisal_dto in charra_dto.h).
+ * @brief Unmarshals an RP appraisal DTO (Quote_a + EK_a/AK_a + Quote_r +
+ * EK_r/AK_r + log_r, the RP->Verifier message -- see msg_rp_appraisal_dto in
+ * charra_dto.h).
  *
- * Expected to apply the same bounds checks charra_unmarshal_attestation_response()
+ * Applies the same bounds checks charra_unmarshal_attestation_response()
  * does for its three fixed-size fields (attestation_data_len <=
  * sizeof(TPM2B_ATTEST) i.e. attestation_data's array bound, likewise for
- * tpm2_signature/tpm2_public_key) to all SIX fixed-size fields here --
- * including the three new _rp ones, which are exactly as attacker-reachable
- * as the originals were before that bug was fixed.
+ * tpm2_signature/tpm2_public_key) to all SIX fixed-size fields here.
+ * ak_certificate/ak_certificate_rp have no fixed upper bound (real
+ * certificates vary in size) and are heap-allocated, same as event_log.
  *
  * @param marshaled_data_len[in] The length of the marshaled data.
  * @param marshaled_data[in] The marshaled data.

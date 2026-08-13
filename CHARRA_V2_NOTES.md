@@ -791,11 +791,12 @@ situation `Quote_a`'s key is already in today.
   `attestation_result`, alongside a nonce check on `Quote_r`
   (`attestation_result_nonce_rp`, reusing `last_request.nonce` — same
   session nonce as `Quote_a`'s check, closes a "replay just RP's half"
-  attack). That's the **entire** current `attestation_result`: two
-  signature checks + one nonce check, per quote, four booleans total for
-  Quote_a and two more for Quote_r's mbedTLS/TPM pair — no PCR term, no
-  log_r term. Matches Step 3a/3b exactly, modulo the still-missing EK/AK
-  check.
+  attack). **`attestation_result` now also folds in the EK/AK check for
+  each evidence bundle** (`attestation_result_ekak_rp`,
+  `attestation_result_ekak` — see "Step 3a/3b item 1: EK/AK certificate
+  validation" below) — eight booleans total: EK/AK + two signature checks +
+  one nonce check, per quote. Still no PCR term, no log_r term — matches
+  Step 3a/3b exactly, spec-complete on the Verifier side.
 
 **Build status**: `msg_rp_appraisal_dto` and its marshal/unmarshal bodies
 both now exist, so `bin/verifier` compiles *and* links cleanly.
@@ -804,7 +805,9 @@ build clean. All 175 assertions across the existing test suites pass (8
 suites: `test_event_log` 29, `test_synthetic_log` 13, `test_sdk` 20,
 `test_rp_qualification` 27, `test_marshaling_bounds` 10,
 `test_x509_cert_chain` 17, `test_certify_ak_marshaling` 20, `test_ak_state`
-39).
+39) — none of these 8 suites cover the wire-format/Step 3a/3b item 1 work
+below yet; that was verified live only (see its own entry), not via a
+persisted unit test. Worth adding one.
 
 Still genuinely unbuilt:
 - Everything in `relying_party.c` for the actual Step 2a/2b flow: EK/AK
@@ -814,15 +817,71 @@ Still genuinely unbuilt:
   (`charra_sdk_redact_ima_log()` exists and is tested but uncalled), `Quote_r`
   generation (must select PCR10 only — see "Open / undecided" above), and
   calling `charra_marshal_rp_appraisal()` to send `Evidence_r` +
-  `Evidence_a'` onward.
-- Wiring EK/AK certificate validation into `coap_appraise_handler`'s Step
-  3a/3b item 1 checks. The underlying primitives now exist and are tested
-  (`charra_crypto_verify_x509_cert_chain()`,
-  `charra_crypto_verify_cert_public_key_matches_tpm_public_key()` — see the
-  `/certify_ak` entry in Part 3) but `coap_appraise_handler` itself does not
-  call them yet; its two "Step 3a/3b item 1 — NOT YET IMPLEMENTED" comments
-  are still accurate. Also blocked on the Attester/RP side actually having a
-  certified AK to present (see `/certify_ak` entry).
+  `Evidence_a'` onward. **`coap_appraise_handler` now hard-requires both AK
+  certificates to be present and valid** (see below) — until RP/Attester
+  actually provision and attach one, `/appraise` will always fail, even in
+  ad-hoc testing.
+
+### Step 3a/3b item 1: EK/AK certificate validation (built)
+
+Closes the last placeholder in `coap_appraise_handler` — both "Step 3a/3b
+item 1 — NOT YET IMPLEMENTED" comments are gone, replaced with real checks.
+The Verifier's spec-mandated scope (Step 3a/3b, both items 1-3) is now
+fully implemented; the gap that remains is entirely on the Attester/RP side
+(see "Still genuinely unbuilt" above).
+
+**Wire format**: `msg_rp_appraisal_dto` (`charra_dto.h`) gained two
+variable-length fields, heap-allocated on unmarshal like `event_log`:
+`ak_certificate`/`ak_certificate_len` (EK_a/AK_a — the Attester's AK
+certificate, forwarded by RP, positioned right after `tpm2_public_key` to
+group with `Quote_a`'s other fields) and `ak_certificate_rp`/
+`ak_certificate_rp_len` (EK_r/AK_r — RP's own, positioned after
+`tpm2_public_key_rp`). `charra_marshal_rp_appraisal()`/
+`charra_unmarshal_rp_appraisal()` (`charra_marshaling.c`) updated to match;
+the CBOR array grew from 7 to 9 elements. **Consequence**: `/appraise` now
+hard-requires both certificates — a request without them fails
+`charra_crypto_verify_x509_cert_chain()`'s zero-length check immediately,
+so nothing that doesn't yet attach a real AK certificate (which is
+everything today, see "Still genuinely unbuilt") can get a positive result
+anymore. This is intentional, matching the spec exactly, not a bug to
+work around.
+
+**Verifier-side check**: `charra_crypto_verify_ekak_certificate()`
+(`crypto_util.c`) — see its own table entry above. `coap_appraise_handler`
+calls it once for Step 3a item 1 (RP's `ak_certificate_rp` against
+`keys/verifier-ca.crt`, folded into `attestation_result_ekak_rp` →
+`step_3a_passed`) and once for Step 3b item 1 (the Attester's
+`ak_certificate`, only reached if Step 3a already passed, folded into
+`attestation_result_ekak` → the final `attestation_result`). Both call
+sites originally had this logic written inline, duplicated between them;
+factored into the shared `crypto_util.c` function instead — deliberately
+placed there rather than a new `core/` file (a real design discussion, not
+a default): the two functions it combines are genuinely generic crypto
+primitives, but the file/directory split was judged not worth fragmenting
+a single two-call combinator over. The trust anchor (`keys/verifier-ca.crt`)
+is read once, before Step 3a, and shared by both checks — the same CA
+`coap_certify_ak_handler` itself signs with, since the Verifier is the sole
+issuer for both parties.
+
+**Verified live** (not yet covered by a persisted unit test — see "Build
+status" above): a temporary, not-committed client minted two real AK
+certificates directly with the Verifier's own CA key (same shortcut
+`test_x509_cert_chain.c`'s own round-trip test uses, standing in for a
+genuine `/certify_ak` round trip that can't complete today — see
+`/certify_ak` entry below), built a genuine `msg_rp_appraisal_dto`, and sent
+it to a live `bin/verifier`. Confirmed: (a) with genuine certificates, both
+checks log "... AK certificate is valid!", Step 3a passes and proceeds to
+Step 3b, ending in `ATTESTATION SUCCESSFUL`; (b) with RP's certificate
+deliberately tampered (one byte flipped in the DER body), the chain check
+fails, `step_3a_passed` becomes false, Step 3b is skipped entirely (the
+early-exit gating still holds), ending in `ATTESTATION FAILED` — Quote_a
+never even inspected, matching the spec's early-exit wording. Re-run after
+the factoring above to confirm it changed no observable behavior — same
+log lines, same outcome, in both the pass and fail cases.
+
+**Reusable by RP**: see the "Reusable by RP for its own Step 2a item 1"
+note under the `/certify_ak` entry below — the same
+`charra_crypto_verify_ekak_certificate()` function, no new state needed.
 
 ### `/certify_ak` — Verifier-as-Privacy-CA AK issuance (built)
 
@@ -868,22 +927,25 @@ only oversized).
 |---|---|
 | `charra_crypto_seeded_rng_init`/`_free` | Reusable seeded `mbedtls_ctr_drbg_context`, needed by several of the below (key parsing, cert signing, AES-GCM nonce generation). |
 | `charra_crypto_verify_x509_cert_chain` | Single-root chain verification (leaf vs. one trusted root, no intermediate support — matches this project's two-tier PKI). Checks validity window as a side effect of `mbedtls_x509_crt_verify()`; no revocation check (see "Open/undecided"). |
-| `charra_crypto_verify_cert_public_key_matches_tpm_public_key` | Confirms a certificate's embedded RSA key is the same key as a `TPM2B_PUBLIC` — ties "this cert is valid" to "this cert vouches for the key that signed this specific quote." Not yet called from `coap_appraise_handler` (see "Not yet built"). |
+| `charra_crypto_verify_cert_public_key_matches_tpm_public_key` | Confirms a certificate's embedded RSA key is the same key as a `TPM2B_PUBLIC` — ties "this cert is valid" to "this cert vouches for the key that signed this specific quote." Called via `charra_crypto_verify_ekak_certificate()` below, from `coap_appraise_handler`'s Step 3a/3b item 1. |
+| `charra_crypto_verify_ekak_certificate` | Combines the two functions above: an AK certificate chains to a trusted CA *and* its key matches a quote's signing key. Deliberately generic over the caller — see "Step 3a/3b item 1" below and the "Reusable by RP" note further down. |
 | `charra_crypto_sign_ak_certificate` | Verifier-as-CA: signs a fresh AK certificate (`mbedtls_x509write_crt`) for a given `TPM2B_PUBLIC`, issued under the Verifier's own CA key. |
 | `charra_crypto_build_ek_tpm2b_public_from_cert` | Reconstructs the full TCG-standard RSA-2048 EK `TPM2B_PUBLIC` (fixed "low range" template — type/nameAlg/objectAttributes/authPolicy/parameters, only the modulus varies) from an already-verified EK certificate. Needed because `Esys_MakeCredential` requires the EK's whole public area, not just its bare RSA key — a real Privacy CA is expected to know this fixed template. **Template values confirmed empirically** against a real `tpm2_createek -G rsa` output on this project's TPM simulator (`objectAttributes` raw `0x300b2`, authPolicy digest `837197...69aa`), not just recalled from the TCG spec. |
 | `charra_crypto_aes256gcm_encrypt`/`_decrypt` | Wraps/unwraps the AK certificate under the MakeCredential secret. Decrypt is authenticated (`mbedtls_gcm_auth_decrypt`, not the non-verifying `mbedtls_gcm_crypt_and_tag`) — a tampered ciphertext or wrong key returns `CHARRA_RC_VERIFICATION_FAILED` with no plaintext output, not a silently-wrong decrypt. |
 
 **Reusable by RP for its own Step 2a item 1** (validate Attester's EK/AK
-certificate): `charra_crypto_verify_x509_cert_chain()` and
-`charra_crypto_verify_cert_public_key_matches_tpm_public_key()` take no
+certificate): `charra_crypto_verify_ekak_certificate()` takes no
 Verifier-specific state — no build change needed, since `crypto_util.o` is
 already in the shared `OBJECTS` list every binary links (`relying_party.c`
-already `#include`s `util/crypto_util.h`). RP would call the chain-verify
-function twice: once against `keys/manufacturer-root.crt` for the Attester's
-EK cert, once against `keys/verifier-ca.crt` for the Attester's AK cert
-(once the Attester has one via `/certify_ak`) — the same two trust anchors
-the Verifier itself uses for Step 3a/3b, just checked one hop earlier in the
-pipeline. The issuance-side functions
+already `#include`s `util/crypto_util.h`). RP would call it exactly the way
+`coap_appraise_handler` does for Step 3a/3b item 1 (see below): against the
+Attester's *already-issued* AK certificate (once the Attester has one via
+`/certify_ak`) and `keys/verifier-ca.crt` as the trusted CA — **not** a raw
+EK certificate check against `manufacturer-root.crt`. Under this project's
+resolved design the EK is validated exactly once, at `/certify_ak` time; it
+is not part of `Evidence_a` and RP's Step 2a item 1 does not re-check it
+either, symmetric with how the Verifier's own Step 3a/3b item 1 works. The
+issuance-side functions
 (`charra_crypto_build_ek_tpm2b_public_from_cert`,
 `charra_crypto_sign_ak_certificate`, `charra_tpm_make_credential_for_ak`,
 AES-GCM *encrypt*) stay Verifier-only, since only the Verifier acts as
@@ -1064,34 +1126,36 @@ instead.
   today anyway -- nothing populates `rp_qualification_state` yet either,
   since the `/qualify` endpoints below don't exist.)
 - RP-side (Step 2a + 2b of the DRA-TLS spec), nothing started: EK/AK
-  validation of the Attester; calling the relocated
+  validation of the Attester (can reuse `charra_crypto_verify_ekak_certificate()`
+  as-is — see "Step 3a/3b item 1" entry in Part 3); calling the relocated
   `verify_log_entries_self_consistent()` / `verify_log_matches_quote_r_pcr()`
   / `verify_log_file_hashes_against_policy()` (now in `charra_event_log.c`,
   see Part 3) against `log_a`; real redaction (`charra_sdk_redact_ima_log()`
   exists and is tested, just uncalled); `Quote_r` generation (PCR10-only
   selection — see "Open / undecided"); calling
   `charra_marshal_rp_appraisal()` to send `Evidence_r` + `Evidence_a'`
-  onward (mirroring how `attester.c` calls
-  `charra_marshal_attestation_response()` today).
-- Wiring EK/AK certificate validation into `coap_appraise_handler`'s Step
-  3a/3b item 1 — the primitives exist (`crypto_util.c`, see `/certify_ak`
-  entry in Part 3) but the handler doesn't call them yet. Quote signature
-  checks and nonce checks (Step 3a/3b items 2-3, both quotes) are already
-  done. No PCR or log check belongs here at all per the spec — see "Target
-  design v2" above; the PCR-vs-`reference-pcrs.txt` check that used to run
-  against `Quote_a` was deliberately removed from `verifier.c` this session
-  to match.
+  onward, now including both AK certificates (mirroring how `attester.c`
+  calls `charra_marshal_attestation_response()` today).
 - Real, persistent AK provisioning for both Attester and RP (currently:
   neither has one — `charra_key_mgr.c` still creates a fresh primary key per
   request) and client-side logic on both to call the now-built `/certify_ak`
-  endpoint and attach the resulting certificate to `/appraise` requests.
+  endpoint and attach the resulting certificate to `/appraise` requests. This
+  is now the sole remaining blocker on `/appraise` ever succeeding for real
+  evidence — the Verifier-side checks (Step 3a/3b, all three items) are
+  complete and wired in.
 - Real (non-synthetic) EK certificates and EK residency on the TPM
   simulator's actual endorsement hierarchy — `keys/gen-ak-pki.sh`'s EK certs
   are plain openssl keys today, not real TPM objects (see `/certify_ak`
   entry in Part 3 for exactly what this blocks).
 - Wiring the AK-provisioning state module's `charra_ak_state_find_by_serial()`
-  into `coap_appraise_handler`'s still-unbuilt Step 3a/3b item 1 EK/AK check,
-  once that check itself exists — the lookup is ready, nothing calls it yet.
+  into `coap_appraise_handler`'s Step 3a/3b item 1 EK/AK check (now built —
+  see its own Part 3 entry) to reject revoked certificates. The check itself
+  currently only verifies chain + key match, not revocation status; the
+  lookup function is ready, nothing calls it yet.
+- A persisted unit test for `msg_rp_appraisal_dto`'s marshal/unmarshal
+  (including the two new AK certificate fields) — currently only verified
+  via a temporary, not-committed live client (see "Step 3a/3b item 1" entry
+  in Part 3), unlike every other DTO this session, which all have one.
 - A manual/administrative revocation trigger — deliberately out of scope for
   now (see "AK-provisioning state" entry in Part 3): the only thing that
   currently revokes a record is a fresh renewal for the same EK.
