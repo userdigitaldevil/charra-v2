@@ -223,31 +223,69 @@ CHARRA_RC charra_replay_ima_log(const uint8_t* log, uint32_t log_len,
  * transit, a redaction bug, or a tampered field that no longer matches its
  * neighbor within the same entry.
  */
-bool verify_log_entries_self_consistent(const uint8_t* log, uint32_t log_len);
+bool charra_verify_log_entries_self_consistent(
+        const uint8_t* log, uint32_t log_len);
 
 /**
- * @brief Replay a log into a PCR value and check it against Quote_r's own
- * pcrDigest -- proves Quote_r genuinely quotes over this exact log.
+ * @brief Replay a log into one accumulator per selected PCR.
+ *
+ * Unlike charra_replay_ima_log(), which reconstructs a single PCR, this
+ * tracks every PCR in the selection at once: each entry extends whichever
+ * PCR it names, and a selected PCR that no entry names stays at its
+ * all-zero power-on value. Entries naming a PCR outside the selection are
+ * parsed (their lengths are needed to find the next entry) but skipped,
+ * since they cannot affect the composite digest.
+ *
+ * @param[in] pcr_selection the PCR indices to track
+ * @param[out] pcrs_out at least pcr_selection_len accumulators, filled in
+ * the same order as pcr_selection
  */
-bool verify_log_matches_quote_r_pcr(
-        const uint8_t* log, uint32_t log_len, TPMS_ATTEST* attest_struct_rp);
+CHARRA_RC charra_replay_ima_log_pcrs(const uint8_t* log, uint32_t log_len,
+        const uint8_t* pcr_selection, uint32_t pcr_selection_len,
+        charra_pcr_accumulator* pcrs_out);
 
 /**
- * @brief Check every log entry's preserved file-content digest against a
- * whitelist/blacklist policy.
+ * @brief Replay a log into the selected PCRs and check that the composite
+ * digest built from them matches the one the quote committed to.
  *
- * Default-deny: a digest matching neither list fails, same as one that
- * explicitly matches the blacklist -- only explicitly-approved file hashes
- * pass. The file digest is read directly out of the redacted
- * template_data's known layout ("sha256:" + 32-byte digest + 32-byte path
- * hash, see charra_sdk.h).
+ * A quote commits to a composite digest over *every* selected PCR, never to
+ * one PCR alone, so all of them are replayed and hashed together in
+ * selection order -- the composite digest is order-sensitive.
  *
- * @param[in] whitelist_path path to a file of "0x<64 hex>" SHA-256 hashes,
- * one per line ('#' comments and blank lines skipped)
- * @param[in] blacklist_path same format as whitelist_path
+ * No reference PCR file is consulted: the replayed values *are* the expected
+ * values. That holds only because the Attester's PCRs start from power-on
+ * zero and are extended solely from this log. On a platform whose firmware
+ * extends PCRs 0-7 at boot, those would need reference values instead.
+ *
+ * @param[in] pcr_selection the PCR indices the quote covers
+ * @param[in] attest_struct the unmarshaled quote holding the pcrDigest
  */
-bool verify_log_file_hashes_against_policy(const uint8_t* log,
-        uint32_t log_len, const char* whitelist_path,
-        const char* blacklist_path);
+bool charra_verify_log_matches_quote_pcr_digest(const uint8_t* log,
+        uint32_t log_len, const uint8_t* pcr_selection,
+        uint32_t pcr_selection_len, const TPMS_ATTEST* attest_struct);
+
+/**
+ * @brief Locate the file-content digest inside an ima-ng entry's
+ * template_data.
+ *
+ * @param[out] digest_out borrows into the entry; not freed by the caller
+ * @return false if template_data is not a well-formed ima-ng d-ng field
+ */
+bool charra_event_log_entry_file_digest(const charra_event_log_entry* entry,
+        const uint8_t** digest_out, uint32_t* digest_len_out);
+
+/**
+ * @brief Check that no log entry's file-content digest appears on a
+ * blacklist.
+ *
+ * Allow-by-default: a digest absent from the list passes, so an empty
+ * blacklist passes every entry. Deliberately weaker than the default-deny a
+ * whitelist would give; revisit once a list of known-good hashes exists.
+ *
+ * @param[in] blacklist_path file of "0x<64 hex>" SHA-256 hashes, one per
+ * line ('#' comments and blank lines skipped)
+ */
+bool charra_verify_log_file_hashes_not_blacklisted(
+        const uint8_t* log, uint32_t log_len, const char* blacklist_path);
 
 #endif /* CHARRA_EVENT_LOG_H */

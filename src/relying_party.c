@@ -15,6 +15,7 @@
 #include "common/charra_log.h"
 #include "common/charra_macro.h"
 #include "core/charra_dto.h"
+#include "core/charra_event_log.h"
 #include "core/charra_key_mgr.h"
 #include "core/charra_marshaling.h"
 #include "core/charra_rim_mgr.h"
@@ -70,7 +71,10 @@ uint16_t attester_response_timeout = 6000;  // timeout when waiting for the atte
 bool use_ima_event_log = false;
 char* ima_event_log_path = "/sys/kernel/security/ima/binary_runtime_measurements";
 bool use_ima_test_log = true;
-char* use_ima_test_log_path = "ima_test_logs.txt";  // path to the IMA test log file for testing purposes
+char* ima_test_log_path = "ima_test_logs.txt";  // path to the IMA test log file for testing purposes
+
+/* RP appraisal config */
+char* blacklist_hashes_path = "blacklist-hashes.txt";
 char attester_host[16] = "127.0.0.1";      // 15 characters for IPv4 plus \0
 unsigned int attester_port = 5683;         // default port
 
@@ -114,6 +118,20 @@ static coap_response_t coap_trust_manager_handler(coap_session_t* session,
                                         const coap_pdu_t* sent,
                                         const coap_pdu_t* received,
                                         const coap_mid_t mid);
+
+/**
+ * @brief Appraise the Attester's evidence locally, before any of it is
+ * forwarded to the Verifiers.
+ *
+ * Runs, in order: the quote signature under the Attester's public key, the
+ * nonce the RP itself generated, each log entry's internal consistency, the
+ * PCR composite digest rebuilt from a replay of the log, and a file-hash
+ * blacklist pass. Every check runs even after one fails, so a single run
+ * reports everything that is wrong rather than only the first thing.
+ *
+ * @return true if every check passed.
+ */
+static bool charra_rp_appraise_evidence(const msg_attestation_response_dto* res);
 
 CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers);
 
@@ -341,6 +359,12 @@ static coap_response_t coap_attester_handler(
         charra_log_error("[" LOG_NAME "] Could not parse CBOR data.");
         goto cleanup;
     }
+    /* appraise the evidence locally before forwarding any of it */
+    if (!charra_rp_appraise_evidence(&res)) {
+        attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
+        goto cleanup;
+    }
+
     charra_log_info("[" LOG_NAME "] Forwarding evidence to the verifiers.");
     /* store last response */
     last_response = res;
@@ -349,6 +373,108 @@ cleanup:
 
     processing_attestation_response = false;
     return COAP_RESPONSE_OK;
+}
+
+static bool charra_rp_appraise_evidence(
+        const msg_attestation_response_dto* res) {
+    charra_log_info("[" LOG_NAME
+            "]  +------------ RP Appraisal of the Evidence --------------+");
+
+    bool signature_ok = false;
+    bool nonce_ok = false;
+    bool entries_ok = false;
+    bool pcr_ok = false;
+    bool blacklist_ok = false;
+
+    /* --- 1. quote signature, under the Attester's own public key --------- */
+    /* Bounds are re-checked here even though charra_unmarshal_attestation_
+     * response() has its own: these three fields are attacker-reachable and
+     * are about to be memcpy'd into fixed-size structs. */
+    if (res->tpm2_signature_len > sizeof(TPMT_SIGNATURE) ||
+            res->tpm2_public_key_len > sizeof(TPM2B_PUBLIC) ||
+            res->attestation_data_len > sizeof(TPM2B_ATTEST)) {
+        charra_log_error("[" LOG_NAME "] Evidence field exceeds its maximum "
+                         "size; refusing to appraise.");
+        goto done;
+    }
+
+    TPMT_SIGNATURE signature = {0};
+    memcpy(&signature, res->tpm2_signature, res->tpm2_signature_len);
+    TPM2B_PUBLIC* tpm2_public_key = (TPM2B_PUBLIC*)res->tpm2_public_key;
+
+    /* mbedTLS rather than the TPM-backed path verifier.c also has: verifying
+     * an RSA-PSS signature needs no TPM, and the software TPM serves one
+     * client at a time -- the RP opening its own session while fanning out
+     * to N verifiers is how the whole testbed deadlocks. */
+    charra_log_info("[" LOG_NAME "] Verifying quote signature ...");
+    mbedtls_rsa_context mbedtls_rsa_pub_key = {0};
+    if (charra_crypto_tpm_pub_key_to_mbedtls_pub_key(tpm2_public_key,
+                &mbedtls_rsa_pub_key) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not convert the Attester's "
+                         "public key.");
+    } else {
+        signature_ok = (charra_crypto_rsa_verify_signature(
+                                &mbedtls_rsa_pub_key, MBEDTLS_MD_SHA256,
+                                res->attestation_data,
+                                (size_t)res->attestation_data_len,
+                                signature.signature.rsapss.sig.buffer) ==
+                        CHARRA_RC_SUCCESS);
+        mbedtls_rsa_free(&mbedtls_rsa_pub_key);
+        charra_log_info("[" LOG_NAME "]     => quote signature is %s",
+                signature_ok ? "valid!" : "NOT valid!");
+    }
+
+    /* --- unmarshal the quote; every remaining check reads it ------------- */
+    TPMS_ATTEST attest_struct = {0};
+    if (charra_unmarshal_tpm2_quote(res->attestation_data_len,
+                res->attestation_data, &attest_struct) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not unmarshal the TPM Quote.");
+        goto done;
+    }
+
+    /* --- 2. nonce: the quote must answer the challenge we just sent ------ */
+    charra_log_info("[" LOG_NAME "] Verifying nonce ...");
+    nonce_ok = charra_verify_tpm2_quote_qualifying_data(
+            (uint16_t)last_request.nonce_len, last_request.nonce,
+            &attest_struct);
+    charra_log_info("[" LOG_NAME "]     => nonce in the quote %s",
+            nonce_ok ? "matches the one sent!"
+                     : "does NOT match the one sent!");
+
+    /* --- 3. every entry's template_digest == hash(template_data) -------- */
+    charra_log_info("[" LOG_NAME "] Verifying log entry self-consistency ...");
+    entries_ok = charra_verify_log_entries_self_consistent(
+            res->event_log, res->event_log_len);
+    charra_log_info("[" LOG_NAME "]     => log entries are %s",
+            entries_ok ? "self-consistent!" : "NOT self-consistent!");
+
+    /* --- 4. replay the log and rebuild the PCR composite digest ---------- */
+    charra_log_info("[" LOG_NAME "] Replaying the log into the PCRs ...");
+    pcr_ok = charra_verify_log_matches_quote_pcr_digest(res->event_log,
+            res->event_log_len, tpm_pcr_selection, tpm_pcr_selection_len,
+            &attest_struct);
+    charra_log_info("[" LOG_NAME "]     => PCR composite digest %s",
+            pcr_ok ? "matches the quote!" : "does NOT match the quote!");
+
+    /* --- 5. no measured file may appear on the blacklist ----------------- */
+    charra_log_info("[" LOG_NAME "] Checking file hashes against the "
+                    "blacklist ...");
+    blacklist_ok = charra_verify_log_file_hashes_not_blacklisted(
+            res->event_log, res->event_log_len, blacklist_hashes_path);
+    charra_log_info("[" LOG_NAME "]     => file hashes are %s",
+            blacklist_ok ? "not blacklisted!" : "BLACKLISTED!");
+
+done:;
+    const bool appraisal_ok = signature_ok && nonce_ok && entries_ok &&
+                              pcr_ok && blacklist_ok;
+    charra_log_info("[" LOG_NAME "] +----------------------------+");
+    if (appraisal_ok) {
+        charra_log_info("[" LOG_NAME "] |  RP Appraisal Successful   |");
+    } else {
+        charra_log_error("[" LOG_NAME "] |    RP Appraisal Failed     |");
+    }
+    charra_log_info("[" LOG_NAME "] +----------------------------+");
+    return appraisal_ok;
 }
 
 static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,

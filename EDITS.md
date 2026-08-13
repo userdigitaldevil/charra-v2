@@ -30,6 +30,13 @@ source file (`src/`, `tests/`, `Makefile`) has been touched.
 | 6 | `src/relying_party.c` | 7 (include), 155–161 | 1 include + 7 lines added | RP ignored `LOG_LEVEL_CHARRA` and always logged at TRACE |
 | 7 | `src/relying_party.c` | 29 | `10` → `2` | 50 attestations per run was unusably slow under emulation |
 | 8 | `src/attester.c` | 68–71, 97–105, 298–430, 512–525 | 158 lines added | extend PCRs from `ima_test_logs.txt` before loading the TPM key |
+| 9a | `src/attester.c` | — | ASCII→binary IMA log conversion, cached | `charra_event_log.c` parses binary TLV; the wire carried ASCII |
+| 9b | `src/attester.c` | 573 | `path[len + 1] = '\n'` → `path[len] = '\0'` | one-byte heap overflow, path never NUL-terminated |
+| 9c | `src/core/charra_event_log.{h,c}` | — | 3 renames + reshaped checks | `quote_r` naming obsolete; 1-PCR composite could never match |
+| 9d | `src/core/charra_rim_mgr.{h,c}` | — | *(reverted — not modified)* | superseded by replaying every selected PCR in 9c |
+| 9e | `src/relying_party.c` | — | `charra_rp_appraise_evidence()` | the five-step RP-side appraisal |
+| 9f | `src/relying_party.c` | 73 | `use_ima_test_log_path` → `ima_test_log_path` | undeclared identifier; did not compile |
+| 9g | `src/verifier.c` | — | *(reverted — not modified)* | comment-only rename touch-up, reverted on request |
 
 ---
 
@@ -315,6 +322,184 @@ AND in `verifier.c`).
 **Not compiled.** No TSS2/libcoap headers exist on the macOS host, so this
 was written against the headers and not built. Needs a `make` inside the
 container to confirm.
+
+---
+
+### Edit 9 — RP-side appraisal of the Attester's evidence
+
+**Requested:** on receiving the response DTO, the RP performs the Verifier's
+appraisal job locally — (1) quote signature under the Attester's public key,
+(2) nonce match, (3) per-entry `template_digest == hash(template_data)`,
+(4) replay the log into expected PCRs and match the digest, (5) file hashes
+not on `blacklist-hashes.txt` — printing "RP Appraisal Successful" or
+"RP Appraisal Failed". Reuse `verifier.c` and `charra_event_log.c` where
+sensible, after verifying the reused code is correct.
+
+Touches six files. Summary of the audit that shaped it comes first, because
+two findings changed what was built.
+
+#### Audit findings that forced design changes
+
+1. **The log on the wire was ASCII, not binary.** The Attester read
+   `event_log_path` with `charra_io_read_continuous_binary_file()` and shipped
+   the bytes verbatim, so the RP received the literal text of
+   `ima_test_logs.txt`. Every function in `charra_event_log.c` parses the
+   binary IMA TLV format and would have failed on it. **Resolved** by
+   converting ASCII → binary in the Attester (edit 9a).
+2. **The template digests in `ima_test_logs.txt` are not reproducible from
+   the fields the file shows.** Fifteen-plus reconstructions of the `ima-ng`
+   template data were tried against entry 1 and all 32 entries —
+   `"<alg>" NUL + digest` / `"<alg>:" + hex` / bare digest, path with and
+   without a NUL, little- and big-endian `u32` length prefixes, no prefixes,
+   under both SHA-1 and SHA-256 — and none reproduce column 2. Step 1.3 was
+   therefore **unsatisfiable** with the file as given: a correct check would
+   have failed all 32 entries. **Resolved** by recomputing the template
+   digest during conversion (edit 9a), which makes
+   `template_digest == SHA256(template_data)` true by construction.
+3. `verify_log_matches_quote_r_pcr()` composited a **single** PCR, but the
+   Attester's quote covers nine ({0-7, 10}), so it could never match.
+   **Resolved** by edit 9c.
+
+#### 9a — `src/attester.c`: ASCII → binary conversion, and send what was extended
+
+Replaces the ASCII-parsing PCR extension added in edit 8. New:
+
+| Function | Purpose |
+|---|---|
+| `build_ima_ng_template_data()` *(static)* | Serializes one entry's `template_data` in the real `ima-ng` layout: `u32 d_len \| "<alg>" NUL <file-digest>` then `u32 n_len \| "<path>" NUL`. |
+| `charra_ima_log_ascii_to_binary()` | Parses the ASCII log, rebuilds `template_data`, recomputes `template_digest = SHA256(template_data)`, emits binary TLV entries via the existing `charra_event_log_append_u32()` / `_append_bytes()`. Returns `CHARRA_RC_MARSHALING_ERROR` when no line parses, which is the signal that the file is not ASCII. |
+| `charra_extend_pcrs_from_binary_log()` *(static)* | Walks the binary log with `charra_event_log_parse_entry()` and extends each entry's digest into the PCR the entry names. |
+| `charra_get_ima_log()` *(static)* | Loads once and caches in `cached_ima_log`. Tries the ASCII conversion first and falls back to reading the file verbatim, so a real `binary_runtime_measurements` still works untouched. |
+
+**Why the template digest is recomputed rather than carried over:** see
+audit finding 2. The consequence is that the Attester's PCR 10 is built from
+the *recomputed* digests, not the ones printed in the text file. That is
+required for consistency — the RP replays the log it receives, and the
+replay must reproduce what the TPM holds.
+
+**Cache is load-bearing, not an optimisation.** The PCRs are extended from
+these exact bytes once, so every response must return these exact bytes.
+`charra_io_free_continuous_file_buffer(&ima_event_log)` was therefore
+**removed** from the handler's cleanup — freeing it would dangle the cache
+and silently change the log between attestations. The buffer now lives for
+the process lifetime, which is deliberate. A `free(path)` was added, since
+that allocation genuinely was leaking on every request.
+
+#### 9b — `src/attester.c` bug fix (pre-existing, unrelated to this feature)
+
+```c
+- path[req.event_log_path_len + 1] = '\n';
++ path[req.event_log_path_len] = '\0';
+```
+
+The old line wrote **one byte past** a `malloc(len + 1)` allocation and never
+NUL-terminated the path, so `fopen()` was reading whatever followed in the
+heap. It happened to work.
+
+#### 9c — `src/core/charra_event_log.{h,c}`: renames and reshaping
+
+Renamed for accuracy now that these are RP-side checks against the
+*Attester's* quote, not Quote_r (the `quote_r` naming no longer described
+anything):
+
+| Old | New |
+|---|---|
+| `verify_log_entries_self_consistent` | `charra_verify_log_entries_self_consistent` |
+| `verify_log_matches_quote_r_pcr` | `charra_verify_log_matches_quote_pcr_digest` |
+| `verify_log_file_hashes_against_policy` | `charra_verify_log_file_hashes_not_blacklisted` |
+
+Behavioural changes:
+
+- **Self-consistency now accepts SHA-1 digests.** It previously hard-required
+  `template_digest_len == TPM2_SHA256_DIGEST_SIZE` and always hashed with
+  SHA-256. It now picks SHA-1 or SHA-256 by digest length, since nothing in
+  the format records which was used.
+- **PCR check replays every selected PCR.** New
+  `charra_replay_ima_log_pcrs()` keeps one `charra_pcr_accumulator` per
+  entry of the requested PCR selection, all starting from the all-zero
+  power-on value, and extends whichever PCR each log entry names. A selected
+  PCR that no entry names simply stays zero.
+  `charra_verify_log_matches_quote_pcr_digest()` then hashes all of them
+  together, **in selection order** (the composite digest is order-sensitive),
+  and compares against the quote's `pcrDigest` via
+  `compute_and_check_PCR_digest()`. Entries naming an unselected PCR are
+  parsed but skipped, since they cannot affect the digest.
+
+  **No reference PCR file is consulted.** The replayed values *are* the
+  expected values. This is valid only because the Attester's PCRs start from
+  power-on zero and are extended solely from this log — true on the software
+  TPM after `tpm2_startup --clear`. On a platform whose firmware extends PCRs
+  0-7 at boot, those would need reference values instead, and this check
+  would have to change.
+- **Policy check is blacklist-only, allow-by-default.** The whitelist
+  parameter and the default-deny behaviour are gone, per the request. An
+  empty blacklist now passes everything, and the list is not even loaded into
+  the entry loop when it has no entries. This is **weaker than the
+  default-deny it replaced** — noted in the header comment.
+- **New `charra_event_log_entry_file_digest()`** extracts the file digest by
+  walking the real `ima-ng` `d-ng` field (NUL-terminated algorithm name, then
+  the digest). The old code assumed a literal `"sha256:"` prefix at
+  `template_data[0]`, which is the *redacted* SDK layout, not the raw one.
+
+#### 9d — `src/core/charra_rim_mgr.{h,c}`: **reverted, no longer changed**
+
+An earlier version of this edit added
+`(const uint8_t* replayed_pcr_value, uint32_t replayed_pcr_index)` to
+`charra_check_pcr_digest_against_reference()`, so a replayed PCR 10 could be
+substituted into reference sets read from `reference-pcrs.txt`. That was the
+wrong design: replaying *every* selected PCR from zero (see 9c) reproduces
+the Attester's PCR state directly and needs no reference file at all.
+
+`charra_rim_mgr.c`, `charra_rim_mgr.h` and the follow-on one-line change to
+`src/verifier_old.c:697` were **reverted to HEAD**. Neither file is modified
+by this session. The RP no longer has a `reference_pcr_file_path` setting.
+
+#### 9e — `src/relying_party.c`: the appraisal itself
+
+New `charra_rp_appraise_evidence()`, called from `coap_attester_handler()`
+**before** `last_response = res` — evidence that fails appraisal is never
+forwarded to the Verifiers. New config: `reference_pcr_file_path`,
+`blacklist_hashes_path`.
+
+The five checks run in order and **all of them run even after one fails**, so
+one run reports everything that is wrong rather than stopping at the first
+problem. Result is the AND of all five.
+
+**Signature verified with mbedTLS, not the TPM.** `verifier.c` does both;
+only the mbedTLS path is used here. Verifying an RSA-PSS signature needs no
+TPM, and the IBM software TPM serves one client at a time — the RP opening
+its own TPM session while fanning out to five verifiers is exactly the
+contention that deadlocked the testbed earlier this session. Bounds on
+`tpm2_signature_len`, `tpm2_public_key_len` and `attestation_data_len` are
+re-checked before the `memcpy`s, in the same defense-in-depth style
+`verifier.c` uses.
+
+#### 9f — `src/relying_party.c` bug fix (pre-existing)
+
+Line 73 declared `use_ima_test_log_path` while lines 291/293 referenced
+`ima_test_log_path`. Renamed the declaration to `ima_test_log_path`. **This
+did not compile before the fix.**
+
+#### 9g — `src/verifier.c`: **reverted, no longer changed**
+
+A comment block at lines 568-571 referenced the three function names renamed
+in 9c. It was updated to the new names, then **reverted to HEAD on request**.
+`src/verifier.c` is not modified by this session. The comment therefore now
+names three functions that no longer exist — a known, accepted staleness.
+
+#### Not compiled
+
+No TSS2/libcoap/mbedTLS headers on the macOS host, so none of this was built.
+Needs `make -j` in the container.
+
+#### Expected behaviour on first run
+
+All five checks should pass. If check 4 fails, run the RP at
+`LOG_LEVEL_CHARRA=DEBUG`: it prints each replayed PCR value. Compare them
+against `tpm2_pcrread sha256:0,1,2,3,4,5,6,7,10` inside the container — every
+one must match, and whichever differs points at the cause (a PCR extended by
+something other than this log, or a replay that disagrees with what the
+Attester extended).
 
 ---
 

@@ -14,6 +14,7 @@
 
 #include "../common/charra_log.h"
 #include "../util/crypto_util.h"
+#include "../util/io_util.h"
 
 #define LOG_NAME "event_log"
 
@@ -351,7 +352,7 @@ CHARRA_RC charra_replay_ima_log(const uint8_t* log, uint32_t log_len,
 
 /* --- log content verification -------------------------------------------- */
 
-bool verify_log_entries_self_consistent(
+bool charra_verify_log_entries_self_consistent(
         const uint8_t* log, uint32_t log_len) {
     if (log_len == 0) {
         /* an empty log has no entries to be inconsistent */
@@ -377,16 +378,24 @@ bool verify_log_entries_self_consistent(
             return false;
         }
 
+        /* Which hash produced template_digest is not recorded anywhere; its
+         * length is the only signal, and the log is uniform in that. */
         uint8_t computed_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
-        if (hash_sha256(entry.template_data_len, entry.template_data,
-                    computed_digest) != CHARRA_RC_SUCCESS) {
+        CHARRA_RC hash_rc =
+                (entry.template_digest_len == TPM2_SHA1_DIGEST_SIZE)
+                        ? hash_sha1(entry.template_data_len,
+                                  entry.template_data, computed_digest)
+                        : hash_sha256(entry.template_data_len,
+                                  entry.template_data, computed_digest);
+        if (hash_rc != CHARRA_RC_SUCCESS) {
             charra_log_error(
                     "[" LOG_NAME "] Hashing entry %u failed.", entry_num);
             return false;
         }
-        if (entry.template_digest_len != TPM2_SHA256_DIGEST_SIZE ||
+        if ((entry.template_digest_len != TPM2_SHA1_DIGEST_SIZE &&
+                    entry.template_digest_len != TPM2_SHA256_DIGEST_SIZE) ||
                 memcmp(computed_digest, entry.template_digest,
-                        TPM2_SHA256_DIGEST_SIZE) != 0) {
+                        entry.template_digest_len) != 0) {
             charra_log_error(
                     "[" LOG_NAME "] Entry %u's template_digest does NOT "
                     "match SHA256(template_data).",
@@ -398,20 +407,104 @@ bool verify_log_entries_self_consistent(
     return true;
 }
 
-bool verify_log_matches_quote_r_pcr(
-        const uint8_t* log, uint32_t log_len, TPMS_ATTEST* attest_struct_rp) {
-    uint8_t replayed_pcr[TPM2_SHA256_DIGEST_SIZE] = {0};
-    if (charra_replay_ima_log(log, log_len, CHARRA_IMA_PCR_INDEX,
-                replayed_pcr) != CHARRA_RC_SUCCESS) {
+CHARRA_RC charra_replay_ima_log_pcrs(const uint8_t* log, uint32_t log_len,
+        const uint8_t* pcr_selection, uint32_t pcr_selection_len,
+        charra_pcr_accumulator* pcrs_out) {
+    if ((log == NULL && log_len != 0) || pcr_selection == NULL ||
+            pcrs_out == NULL || pcr_selection_len == 0) {
+        return CHARRA_RC_BAD_ARGUMENT;
+    }
+
+    /* Every selected PCR starts at its power-on value. Entries then extend
+     * whichever PCR each one names, so a PCR no entry mentions simply stays
+     * all-zero -- which is exactly the state the Attester's TPM is in for
+     * that PCR, given it too was only ever extended from this log. */
+    for (uint32_t i = 0; i < pcr_selection_len; i++) {
+        charra_pcr_reset(&pcrs_out[i]);
+    }
+    if (log_len == 0) {
+        return CHARRA_RC_SUCCESS;
+    }
+
+    uint16_t digest_len = 0;
+    if (charra_event_log_ima_detect_digest_len(log, log_len, &digest_len) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not detect digest size.");
+        return CHARRA_RC_MARSHALING_ERROR;
+    }
+
+    uint32_t offset = 0;
+    uint32_t entry_num = 0;
+    while (offset < log_len) {
+        charra_event_log_entry entry = {0};
+        if (charra_event_log_parse_entry(
+                    log, log_len, &offset, digest_len, &entry) !=
+                CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] Entry %u failed to parse.", entry_num);
+            return CHARRA_RC_MARSHALING_ERROR;
+        }
+
+        /* find which slot of the selection this entry's PCR occupies */
+        bool selected = false;
+        for (uint32_t i = 0; i < pcr_selection_len; i++) {
+            if (pcr_selection[i] != entry.pcr_index) {
+                continue;
+            }
+            if (charra_pcr_extend(&pcrs_out[i], entry.template_digest,
+                        entry.template_digest_len) != CHARRA_RC_SUCCESS) {
+                charra_log_error("[" LOG_NAME "] Extending PCR %u with entry "
+                                 "%u failed.",
+                        entry.pcr_index, entry_num);
+                return CHARRA_RC_CRYPTO_ERROR;
+            }
+            selected = true;
+            break;
+        }
+        /* An entry for an unselected PCR cannot affect the composite digest,
+         * so it is skipped rather than treated as an error. */
+        if (!selected) {
+            charra_log_debug("[" LOG_NAME "] Entry %u targets unselected PCR "
+                             "%u; skipped.",
+                    entry_num, entry.pcr_index);
+        }
+        entry_num++;
+    }
+    return CHARRA_RC_SUCCESS;
+}
+
+bool charra_verify_log_matches_quote_pcr_digest(const uint8_t* log,
+        uint32_t log_len, const uint8_t* pcr_selection,
+        uint32_t pcr_selection_len, const TPMS_ATTEST* attest_struct) {
+    if (pcr_selection_len == 0 || pcr_selection_len > TPM2_MAX_PCRS) {
+        charra_log_error("[" LOG_NAME "] Bad PCR selection length %u.",
+                pcr_selection_len);
+        return false;
+    }
+
+    charra_pcr_accumulator replayed[TPM2_MAX_PCRS] = {{{0}}};
+    if (charra_replay_ima_log_pcrs(log, log_len, pcr_selection,
+                pcr_selection_len, replayed) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Replay failed.");
         return false;
     }
 
-    uint8_t* pcr_values[1] = {replayed_pcr};
-    if (compute_and_check_PCR_digest(pcr_values, 1, attest_struct_rp) !=
+    /* compute_and_check_PCR_digest() wants an array of pointers, in the same
+     * order as the selection the quote was taken over -- the composite
+     * digest is order-sensitive. */
+    uint8_t* pcr_values[TPM2_MAX_PCRS] = {NULL};
+    for (uint32_t i = 0; i < pcr_selection_len; i++) {
+        pcr_values[i] = replayed[i].value;
+        charra_log_debug("[" LOG_NAME "] Replayed PCR %u:", pcr_selection[i]);
+        charra_print_hex(CHARRA_LOG_DEBUG, TPM2_SHA256_DIGEST_SIZE,
+                replayed[i].value, "                        0x", "\n", false);
+    }
+
+    if (compute_and_check_PCR_digest(
+                pcr_values, pcr_selection_len, attest_struct) !=
             CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME
-                         "] Replayed PCR does NOT match Quote_r's pcrDigest.");
+        charra_log_error("[" LOG_NAME "] PCR composite digest built from the "
+                         "replayed log does NOT match the quote.");
         return false;
     }
     return true;
@@ -524,32 +617,69 @@ static bool hash_list_contains(
                    compare_hashes) != NULL;
 }
 
-bool verify_log_file_hashes_against_policy(const uint8_t* log,
-        uint32_t log_len, const char* whitelist_path,
-        const char* blacklist_path) {
-    uint8_t* whitelist = NULL;
-    uint32_t whitelist_count = 0;
-    if (load_hash_list(whitelist_path, &whitelist, &whitelist_count) !=
-            CHARRA_RC_SUCCESS) {
+bool charra_event_log_entry_file_digest(const charra_event_log_entry* entry,
+        const uint8_t** digest_out, uint32_t* digest_len_out) {
+    if (entry == NULL || digest_out == NULL || digest_len_out == NULL) {
         return false;
     }
+    /* ima-ng template_data is two length-prefixed fields:
+     *     u32 d_len | "<alg>" '\0' <file-digest>
+     *     u32 n_len | "<path>" '\0'
+     * so the file digest is what follows the NUL-terminated algorithm name
+     * inside the first field. */
+    if (entry->template_data_len < sizeof(uint32_t)) {
+        return false;
+    }
+    uint32_t offset = 0;
+    const uint32_t d_len = read_u32(entry->template_data);
+    offset += sizeof(uint32_t);
+    if (d_len > entry->template_data_len - offset) {
+        return false;
+    }
+
+    const uint8_t* d_field = entry->template_data + offset;
+    uint32_t alg_len = 0;
+    while (alg_len < d_len && d_field[alg_len] != '\0') {
+        alg_len++;
+    }
+    if (alg_len == d_len) {
+        return false; /* no NUL: not an ima-ng d-ng field */
+    }
+    alg_len++; /* step past the NUL */
+
+    *digest_out = d_field + alg_len;
+    *digest_len_out = d_len - alg_len;
+    return *digest_len_out > 0;
+}
+
+bool charra_verify_log_file_hashes_not_blacklisted(
+        const uint8_t* log, uint32_t log_len, const char* blacklist_path) {
+    /* Blacklist-only, allow-by-default: an entry whose digest is absent from
+     * the list passes. An empty blacklist therefore passes everything, which
+     * is the intended behaviour while the list is unpopulated. This is
+     * deliberately weaker than default-deny -- revisit once a whitelist of
+     * known-good hashes actually exists. */
     uint8_t* blacklist = NULL;
     uint32_t blacklist_count = 0;
     if (load_hash_list(blacklist_path, &blacklist, &blacklist_count) !=
             CHARRA_RC_SUCCESS) {
-        free(whitelist);
+        charra_log_error("[" LOG_NAME "] Could not load blacklist '%s'.",
+                blacklist_path);
         return false;
+    }
+    if (blacklist_count == 0) {
+        charra_log_info("[" LOG_NAME "] Blacklist '%s' is empty; no file "
+                        "hash can be rejected.",
+                blacklist_path);
     }
 
     bool all_ok = true;
-    if (log_len > 0) {
+    if (log_len > 0 && blacklist_count > 0) {
         uint16_t digest_len = 0;
-        if (charra_event_log_ima_detect_digest_len(
-                    log, log_len, &digest_len) != CHARRA_RC_SUCCESS) {
+        if (charra_event_log_ima_detect_digest_len(log, log_len,
+                    &digest_len) != CHARRA_RC_SUCCESS) {
             all_ok = false;
         } else {
-            static const char prefix[] = "sha256:";
-            uint32_t prefix_len = (uint32_t)(sizeof(prefix) - 1);
             uint32_t offset = 0;
             uint32_t entry_num = 0;
             while (offset < log_len) {
@@ -559,30 +689,23 @@ bool verify_log_file_hashes_against_policy(const uint8_t* log,
                     all_ok = false;
                     break;
                 }
-                if (entry.template_data_len <
-                        prefix_len + TPM2_SHA256_DIGEST_SIZE) {
-                    charra_log_error(
-                            "[" LOG_NAME "] Entry %u too short to contain a "
-                            "file-content digest.",
+
+                const uint8_t* file_digest = NULL;
+                uint32_t file_digest_len = 0;
+                if (!charra_event_log_entry_file_digest(
+                            &entry, &file_digest, &file_digest_len)) {
+                    charra_log_warn("[" LOG_NAME "] Entry %u carries no "
+                                    "readable file digest; not checked.",
                             entry_num);
-                    all_ok = false;
                     entry_num++;
                     continue;
                 }
-                const uint8_t* file_digest = entry.template_data + prefix_len;
-
-                if (hash_list_contains(
-                            blacklist, blacklist_count, file_digest)) {
+                if (file_digest_len == TPM2_SHA256_DIGEST_SIZE &&
+                        hash_list_contains(
+                                blacklist, blacklist_count, file_digest)) {
                     charra_log_error(
                             "[" LOG_NAME "] Entry %u's file-content digest "
                             "matches the BLACKLIST.",
-                            entry_num);
-                    all_ok = false;
-                } else if (!hash_list_contains(whitelist, whitelist_count,
-                                   file_digest)) {
-                    charra_log_error(
-                            "[" LOG_NAME "] Entry %u's file-content digest "
-                            "is not on the whitelist.",
                             entry_num);
                     all_ok = false;
                 }
@@ -591,7 +714,6 @@ bool verify_log_file_hashes_against_policy(const uint8_t* log,
         }
     }
 
-    free(whitelist);
     free(blacklist);
     return all_ok;
 }

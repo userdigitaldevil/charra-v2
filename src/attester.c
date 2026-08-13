@@ -33,12 +33,14 @@
 #include "common/charra_log.h"
 #include "common/charra_macro.h"
 #include "core/charra_dto.h"
+#include "core/charra_event_log.h"
 #include "core/charra_helper.h"
 #include "core/charra_key_mgr.h"
 #include "core/charra_marshaling.h"
 #include "util/cbor_util.h"
 #include "util/cli_util.h"
 #include "util/coap_util.h"
+#include "util/crypto_util.h"
 #include "util/io_util.h"
 #include "util/tpm2_util.h"
 
@@ -69,6 +71,10 @@ char* dtls_psk_hint = "Charra Attester";
  * TPM Quote, so that PCR 10 reflects a non-trivial measurement history
  * instead of staying all-zero. */
 char* ima_test_log_path = "ima_test_logs.txt";
+/* The binary IMA log, converted once and then reused: the PCRs are extended
+ * from these exact bytes, so every response must carry these exact bytes. */
+static uint8_t* cached_ima_log = NULL;
+static uint32_t cached_ima_log_len = 0;
 // TODO(any): Allocate memory for CBOR buffer with malloc() as logs can be huge.
 
 // for DTLS-RPK
@@ -95,14 +101,37 @@ static void coap_attest_handler(struct coap_resource_t* resource,
                                 struct coap_pdu_t* response);
 
 /**
- * @brief Extends every entry of the ASCII IMA measurement log at
- * ima_test_log_path into the TPM's PCRs.
+ * @brief Converts an ASCII IMA measurement log ("PCR <idx> <digest> ima-ng
+ * <alg>:<hash> <path>" per line) into the binary TLV format the rest of
+ * CHARRA parses.
+ *
+ * template_data is rebuilt in the real ima-ng layout and template_digest is
+ * recomputed as SHA256(template_data), so the resulting log satisfies its
+ * own self-consistency check by construction.
+ *
+ * @param[in] path the ASCII log to read
+ * @param[out] log_out malloc'd binary log; caller frees
+ * @param[out] log_len_out length of log_out
+ * @return CHARRA_RC_SUCCESS, CHARRA_RC_MARSHALING_ERROR if the file holds no
+ * parseable ASCII entries (i.e. it is not an ASCII log), otherwise an error.
+ */
+CHARRA_RC charra_ima_log_ascii_to_binary(
+        const char* path, uint8_t** log_out, uint32_t* log_len_out);
+
+/**
+ * @brief Extends every entry of a binary IMA log into the PCR it names.
  *
  * @param esys_ctx[in,out] The ESAPI context.
- * @return CHARRA_RC_SUCCESS on success (including when the log file does not
- * exist, which is only warned about), otherwise CHARRA_RC_ERROR.
  */
-static CHARRA_RC charra_extend_pcrs_from_ima_log(ESYS_CONTEXT* esys_ctx);
+static CHARRA_RC charra_extend_pcrs_from_binary_log(
+        ESYS_CONTEXT* esys_ctx, const uint8_t* log, uint32_t log_len);
+
+/**
+ * @brief Returns the Attester's binary IMA log, loading and caching it on
+ * first use.
+ */
+static CHARRA_RC charra_get_ima_log(
+        const char* path, const uint8_t** log_out, uint32_t* log_len_out);
 
 /* --- main --------------------------------------------------------------- */
 
@@ -334,26 +363,55 @@ static bool hex_str_to_bytes(const char* hex, const size_t hex_len,
     return true;
 }
 
-static CHARRA_RC charra_extend_pcrs_from_ima_log(ESYS_CONTEXT* esys_ctx) {
-    if (esys_ctx == NULL) {
-        charra_log_error("[" LOG_NAME "] Bad ESAPI context.");
+/**
+ * @brief Serializes one ima-ng entry's template_data into buf.
+ *
+ * The ima-ng layout is two length-prefixed fields:
+ *
+ *     u32 len | "<alg>" '\0' <file-digest>     (the d-ng field)
+ *     u32 len | "<path>" '\0'                  (the n-ng field)
+ *
+ * @return the number of bytes written, or 0 if buf_len is too small.
+ */
+static uint32_t build_ima_ng_template_data(const char* alg,
+        const uint8_t* file_digest, uint32_t file_digest_len, const char* path,
+        uint8_t* buf, uint32_t buf_len) {
+    const uint32_t alg_len = (uint32_t)strlen(alg) + 1; /* includes NUL */
+    const uint32_t d_len = alg_len + file_digest_len;
+    const uint32_t n_len = (uint32_t)strlen(path) + 1; /* includes NUL */
+    const uint32_t total = sizeof(uint32_t) + d_len + sizeof(uint32_t) + n_len;
+    if (total > buf_len) {
+        return 0;
+    }
+
+    uint32_t offset = 0;
+    charra_event_log_append_u32(buf, &offset, d_len);
+    charra_event_log_append_bytes(buf, &offset, alg, alg_len);
+    charra_event_log_append_bytes(buf, &offset, file_digest, file_digest_len);
+    charra_event_log_append_u32(buf, &offset, n_len);
+    charra_event_log_append_bytes(buf, &offset, path, n_len);
+    return offset;
+}
+
+CHARRA_RC charra_ima_log_ascii_to_binary(
+        const char* path, uint8_t** log_out, uint32_t* log_len_out) {
+    if (path == NULL || log_out == NULL || log_len_out == NULL) {
+        return CHARRA_RC_BAD_ARGUMENT;
+    }
+    *log_out = NULL;
+    *log_len_out = 0;
+
+    FILE* file = fopen(path, "r");
+    if (file == NULL) {
         return CHARRA_RC_ERROR;
     }
 
-    FILE* file = fopen(ima_test_log_path, "r");
-    if (file == NULL) {
-        charra_log_warn("[" LOG_NAME "] IMA log \"%s\" not found; leaving PCRs "
-                        "unextended.",
-                ima_test_log_path);
-        return CHARRA_RC_SUCCESS;
-    }
-    charra_log_info(
-            "[" LOG_NAME "] Extending PCRs from IMA log \"%s\".",
-            ima_test_log_path);
-
     CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
+    uint8_t* log = NULL;
+    uint32_t log_len = 0;
+    uint32_t capacity = 0;
     uint32_t line_no = 0;
-    uint32_t extended = 0;
+    uint32_t entries = 0;
     /* long enough for the longest path an ima-ng entry can carry */
     char line[4096] = {0};
 
@@ -365,35 +423,157 @@ static CHARRA_RC charra_extend_pcrs_from_ima_log(ESYS_CONTEXT* esys_ctx) {
          * Accept the same line without the leading "PCR" token too, since
          * the kernel's own ascii_runtime_measurements omits it. */
         char tag[16] = {0};
-        char digest_hex[TPM2_SHA256_DIGEST_SIZE * 2 + 1] = {0};
+        char unused_digest[TPM2_SHA256_DIGEST_SIZE * 2 + 1] = {0};
+        char template_name[CHARRA_IMA_TEMPLATE_NAME_MAX] = {0};
+        char alg_and_hash[TPM2_SHA256_DIGEST_SIZE * 2 + 32] = {0};
+        char file_path[2048] = {0};
         unsigned int pcr_idx = 0;
-        if (sscanf(line, "%15s %u %64s", tag, &pcr_idx, digest_hex) != 3 ||
-                strcmp(tag, "PCR") != 0) {
-            if (sscanf(line, "%u %64s", &pcr_idx, digest_hex) != 2) {
+        int scanned = sscanf(line, "%15s %u %64s %63s %95s %2047s", tag,
+                &pcr_idx, unused_digest, template_name, alg_and_hash,
+                file_path);
+        if (scanned != 6 || strcmp(tag, "PCR") != 0) {
+            scanned = sscanf(line, "%u %64s %63s %95s %2047s", &pcr_idx,
+                    unused_digest, template_name, alg_and_hash, file_path);
+            if (scanned != 5) {
                 continue; /* blank line or comment */
             }
         }
 
-        /* A SHA-1 (20 byte) template digest is zero-padded into the SHA-256
-         * bank, matching what charra_pcr_extend() does when replaying the
-         * log in software -- the replayed value must equal what the TPM
-         * holds, or appraisal can never match. */
-        const size_t hex_len = strlen(digest_hex);
-        if (hex_len != TPM2_SHA1_DIGEST_SIZE * 2 &&
-                hex_len != TPM2_SHA256_DIGEST_SIZE * 2) {
-            charra_log_warn("[" LOG_NAME "] Skipping line %u: template digest "
-                            "is neither 20 nor 32 bytes.",
+        /* split "<alg>:<hex-file-hash>" */
+        char* colon = strchr(alg_and_hash, ':');
+        if (colon == NULL) {
+            charra_log_warn("[" LOG_NAME "] Skipping line %u: no \"<alg>:<hash>\""
+                            " field.",
                     line_no);
             continue;
         }
-        uint8_t digest[TPM2_SHA256_DIGEST_SIZE] = {0};
-        if (!hex_str_to_bytes(digest_hex, hex_len, digest, hex_len / 2)) {
-            charra_log_warn("[" LOG_NAME "] Skipping line %u: template digest "
-                            "is not valid hex.",
+        *colon = '\0';
+        const char* alg = alg_and_hash;
+        const char* file_hash_hex = colon + 1;
+        const size_t file_hash_hex_len = strlen(file_hash_hex);
+        uint8_t file_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
+        if (file_hash_hex_len != TPM2_SHA256_DIGEST_SIZE * 2 ||
+                !hex_str_to_bytes(file_hash_hex, file_hash_hex_len, file_digest,
+                        TPM2_SHA256_DIGEST_SIZE)) {
+            charra_log_warn("[" LOG_NAME "] Skipping line %u: file hash is not "
+                            "a valid 32 byte hex digest.",
                     line_no);
             continue;
         }
 
+        uint8_t template_data[4096] = {0};
+        const uint32_t template_data_len = build_ima_ng_template_data(alg,
+                file_digest, TPM2_SHA256_DIGEST_SIZE, file_path, template_data,
+                sizeof(template_data));
+        if (template_data_len == 0) {
+            charra_log_warn("[" LOG_NAME "] Skipping line %u: template data "
+                            "does not fit.",
+                    line_no);
+            continue;
+        }
+
+        /* The template digest is recomputed here rather than taken from the
+         * file. The digests in the ASCII file are not reproducible from the
+         * fields it shows -- see EDITS.md -- so keeping them would make the
+         * log permanently fail its own self-consistency check. Recomputing
+         * makes template_digest == SHA256(template_data) hold by
+         * construction, which is exactly the property the Relying Party
+         * checks. */
+        uint8_t template_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
+        if (hash_sha256(template_data_len, template_data, template_digest) !=
+                CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] Hashing template data of line %u failed.",
+                    line_no);
+            charra_r = CHARRA_RC_CRYPTO_ERROR;
+            goto cleanup;
+        }
+
+        const uint32_t name_len = (uint32_t)strlen(template_name);
+        const uint32_t entry_len = sizeof(uint32_t) /* pcr_index */
+                                   + TPM2_SHA256_DIGEST_SIZE /* digest */
+                                   + sizeof(uint32_t) + name_len
+                                   + sizeof(uint32_t) + template_data_len;
+        if (log_len + entry_len > capacity) {
+            capacity = (capacity == 0) ? 8192 : capacity * 2;
+            while (log_len + entry_len > capacity) {
+                capacity *= 2;
+            }
+            uint8_t* grown = realloc(log, capacity);
+            if (grown == NULL) {
+                charra_log_error("[" LOG_NAME "] Out of memory building log.");
+                charra_r = CHARRA_RC_ERROR;
+                goto cleanup;
+            }
+            log = grown;
+        }
+
+        uint32_t offset = log_len;
+        charra_event_log_append_u32(log, &offset, pcr_idx);
+        charra_event_log_append_bytes(
+                log, &offset, template_digest, TPM2_SHA256_DIGEST_SIZE);
+        charra_event_log_append_u32(log, &offset, name_len);
+        charra_event_log_append_bytes(log, &offset, template_name, name_len);
+        charra_event_log_append_u32(log, &offset, template_data_len);
+        charra_event_log_append_bytes(
+                log, &offset, template_data, template_data_len);
+        log_len = offset;
+        ++entries;
+    }
+
+    if (entries == 0) {
+        /* not an ASCII log we understand; let the caller fall back */
+        charra_r = CHARRA_RC_MARSHALING_ERROR;
+        goto cleanup;
+    }
+
+    charra_log_info("[" LOG_NAME "] Converted %u ASCII IMA entries from \"%s\" "
+                    "into %u bytes of binary log.",
+            entries, path, log_len);
+    *log_out = log;
+    *log_len_out = log_len;
+    fclose(file);
+    return CHARRA_RC_SUCCESS;
+
+cleanup:
+    free(log);
+    fclose(file);
+    return charra_r;
+}
+
+static CHARRA_RC charra_extend_pcrs_from_binary_log(
+        ESYS_CONTEXT* esys_ctx, const uint8_t* log, uint32_t log_len) {
+    if (esys_ctx == NULL) {
+        charra_log_error("[" LOG_NAME "] Bad ESAPI context.");
+        return CHARRA_RC_ERROR;
+    }
+    if (log_len == 0) {
+        return CHARRA_RC_SUCCESS;
+    }
+
+    uint16_t digest_len = 0;
+    if (charra_event_log_ima_detect_digest_len(log, log_len, &digest_len) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not detect log digest size.");
+        return CHARRA_RC_ERROR;
+    }
+
+    uint32_t offset = 0;
+    uint32_t entries = 0;
+    while (offset < log_len) {
+        charra_event_log_entry entry = {0};
+        if (charra_event_log_parse_entry(
+                    log, log_len, &offset, digest_len, &entry) !=
+                CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] Malformed entry %u in log.", entries);
+            return CHARRA_RC_MARSHALING_ERROR;
+        }
+
+        /* A digest shorter than 32 bytes is zero-padded into the SHA-256
+         * bank, exactly as charra_pcr_extend() does when the same log is
+         * replayed in software -- the replayed value must equal what the TPM
+         * holds or appraisal can never match. */
         /* clang-format off */
         TPML_DIGEST_VALUES digests = {
             .count = 1,
@@ -402,26 +582,65 @@ static CHARRA_RC charra_extend_pcrs_from_ima_log(ESYS_CONTEXT* esys_ctx) {
             }},
         };
         /* clang-format on */
-        memcpy(digests.digests[0].digest.sha256, digest,
-                TPM2_SHA256_DIGEST_SIZE);
+        memcpy(digests.digests[0].digest.sha256, entry.template_digest,
+                entry.template_digest_len);
 
-        TSS2_RC tss_r = tpm2_pcr_extend(esys_ctx, pcr_idx, &digests);
-        if (tss_r != TSS2_RC_SUCCESS) {
+        if (tpm2_pcr_extend(esys_ctx, entry.pcr_index, &digests) !=
+                TSS2_RC_SUCCESS) {
             charra_log_error("[" LOG_NAME "] Could not extend PCR %u with "
-                             "entry on line %u.",
-                    pcr_idx, line_no);
-            charra_r = CHARRA_RC_ERROR;
-            goto cleanup;
+                             "entry %u.",
+                    entry.pcr_index, entries);
+            return CHARRA_RC_ERROR;
         }
-        ++extended;
+        ++entries;
     }
 
     charra_log_info("[" LOG_NAME "] Extended %u IMA log entries into the PCRs.",
-            extended);
+            entries);
+    return CHARRA_RC_SUCCESS;
+}
 
-cleanup:
-    fclose(file);
-    return charra_r;
+/**
+ * @brief Loads the Attester's IMA log, converting it from ASCII if needed.
+ *
+ * The result is cached in a file-scope buffer: the PCRs are extended from it
+ * once, and every attestation response must then send back exactly those
+ * bytes, or a replay of the log could not reproduce PCR 10.
+ */
+static CHARRA_RC charra_get_ima_log(
+        const char* path, const uint8_t** log_out, uint32_t* log_len_out) {
+    if (cached_ima_log != NULL) {
+        *log_out = cached_ima_log;
+        *log_len_out = cached_ima_log_len;
+        return CHARRA_RC_SUCCESS;
+    }
+
+    /* Try the ASCII form first; a real binary log has no parseable ASCII
+     * entries and falls through to being read verbatim. */
+    uint8_t* log = NULL;
+    uint32_t log_len = 0;
+    if (charra_ima_log_ascii_to_binary(path, &log, &log_len) ==
+            CHARRA_RC_SUCCESS) {
+        cached_ima_log = log;
+        cached_ima_log_len = log_len;
+        *log_out = cached_ima_log;
+        *log_len_out = cached_ima_log_len;
+        return CHARRA_RC_SUCCESS;
+    }
+
+    uint8_t* raw = NULL;
+    size_t raw_len = 0;
+    if (charra_io_read_continuous_binary_file(path, &raw, &raw_len) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_warn(
+                "[" LOG_NAME "] Could not read IMA log \"%s\".", path);
+        return CHARRA_RC_ERROR;
+    }
+    cached_ima_log = raw;
+    cached_ima_log_len = (uint32_t)raw_len;
+    *log_out = cached_ima_log;
+    *log_len_out = cached_ima_log_len;
+    return CHARRA_RC_SUCCESS;
 }
 
 static void coap_attest_handler(struct coap_resource_t* resource,
@@ -515,11 +734,19 @@ static void coap_attest_handler(struct coap_resource_t* resource,
      * it. */
     static bool ima_log_extended = false;
     if (!ima_log_extended) {
-        if ((charra_r = charra_extend_pcrs_from_ima_log(esys_ctx)) !=
+        const uint8_t* log = NULL;
+        uint32_t log_len = 0;
+        if (charra_get_ima_log(ima_test_log_path, &log, &log_len) ==
                 CHARRA_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] Could not extend PCRs from IMA log.");
-            goto error;
+            if ((charra_r = charra_extend_pcrs_from_binary_log(
+                         esys_ctx, log, log_len)) != CHARRA_RC_SUCCESS) {
+                charra_log_error(
+                        "[" LOG_NAME "] Could not extend PCRs from IMA log.");
+                goto error;
+            }
+        } else {
+            charra_log_warn("[" LOG_NAME "] No IMA log available; leaving PCRs "
+                            "unextended.");
         }
         ima_log_extended = true;
     }
@@ -563,16 +790,19 @@ static void coap_attest_handler(struct coap_resource_t* resource,
 
     /* --- send response data --- */
 
-    /* read IMA event log if requested */
-    uint8_t* ima_event_log = NULL;
-    size_t ima_event_log_len = 0;
+    /* Send the IMA event log if requested. These are the same bytes the PCRs
+     * were extended from -- charra_get_ima_log() caches them -- so replaying
+     * the log the Relying Party receives reproduces PCR 10 exactly. */
+    const uint8_t* ima_event_log = NULL;
+    uint32_t ima_event_log_len = 0;
     if (req.event_log_path_len != 0) {
         charra_log_info("[" LOG_NAME "] Reading IMA event log.");
         char* path = malloc(sizeof(char) * (req.event_log_path_len + 1));
         memcpy(path, req.event_log_path, req.event_log_path_len);
-        path[req.event_log_path_len + 1] = '\n';
-        CHARRA_RC rc = charra_io_read_continuous_binary_file(
-                path, &ima_event_log, &ima_event_log_len);
+        path[req.event_log_path_len] = '\0';
+        CHARRA_RC rc =
+                charra_get_ima_log(path, &ima_event_log, &ima_event_log_len);
+        free(path);
         if (rc != CHARRA_RC_SUCCESS) {
             charra_log_error("[" LOG_NAME "] Error while reading IMA event "
                              "log. Sending empty event log!");
@@ -580,7 +810,7 @@ static void coap_attest_handler(struct coap_resource_t* resource,
             ima_event_log = NULL;
         } else {
             charra_log_info("[" LOG_NAME
-                            "] IMA event log has a size of %d bytes.",
+                            "] IMA event log has a size of %u bytes.",
                     ima_event_log_len);
         }
     }
@@ -597,7 +827,8 @@ static void coap_attest_handler(struct coap_resource_t* resource,
             .tpm2_public_key_len = sizeof(*public_key),
             .tpm2_public_key = {0},  // must be memcpy'd, see below
             .event_log_len = ima_event_log_len,
-            .event_log = ima_event_log,
+            /* borrowed from the cache; not freed here */
+            .event_log = (uint8_t*)ima_event_log,
     };
     memcpy(res.attestation_data, attest_buf->attestationData,
             res.attestation_data_len);
@@ -643,7 +874,9 @@ error:
     charra_free_if_not_null(signature);
     charra_free_if_not_null(attest_buf);
     charra_free_if_not_null(public_key);
-    charra_io_free_continuous_file_buffer(&ima_event_log);
+    /* ima_event_log is owned by the cache in charra_get_ima_log() and lives
+     * for the process lifetime -- freeing it here would dangle the cache and
+     * change the log between attestations. */
 
     /* flush handles */
     if (sig_key_handle != ESYS_TR_NONE) {
