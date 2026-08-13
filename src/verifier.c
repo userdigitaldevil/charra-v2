@@ -16,7 +16,6 @@
 #include "core/charra_helper.h"
 #include "core/charra_key_mgr.h"
 #include "core/charra_marshaling.h"
-#include "core/charra_rim_mgr.h"
 #include "util/cbor_util.h"
 #include "util/charra_util.h"
 #include "util/cli_util.h"
@@ -628,40 +627,11 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     verify_nonce_duration = ((double) (end_verifiy_nonce - start_verifiy_nonce)) / CLOCKS_PER_SEC;
     fprintf(p_file, "verify nonce took %f seconds to execute \n", verify_nonce_duration);
 
-    /* --- verify PCRs --- */
-    clock_t start_verifiy_pcr, end_verifiy_pcr;
-    double verify_pcr_duration;
-    start_verifiy_pcr = clock();
-    bool attestation_result_pcrs = false;
-    {
-        charra_log_info("[" LOG_NAME "] Verifying PCRs ...");
-
-        charra_log_info("[" LOG_NAME
-                        "] Actual PCR composite digest from TPM Quote is:");
-        charra_print_hex(CHARRA_LOG_INFO,
-                attest_struct.attested.quote.pcrDigest.size,
-                attest_struct.attested.quote.pcrDigest.buffer,
-                "                        0x", "\n",
-                false);
-
-        CHARRA_RC pcr_check = charra_check_pcr_digest_against_reference(
-                reference_pcr_file_path, tpm_pcr_selection,
-                tpm_pcr_selection_len, &attest_struct);
-        if (pcr_check == CHARRA_RC_SUCCESS) {
-            charra_log_info(
-                    "[" LOG_NAME "]     => PCR composite digest is valid!");
-            attestation_result_pcrs = true;
-        } else {
-            charra_log_error(
-                    "[" LOG_NAME
-                    "]     => PCR composite digest is NOT valid! (does "
-                    "not match any of the digests from the set of reference "
-                    "PCRs)");
-        }
-    }
-    end_verifiy_pcr = clock();
-    verify_pcr_duration = ((double) (end_verifiy_pcr - start_verifiy_pcr)) / CLOCKS_PER_SEC;
-    fprintf(p_file, "verify pcr took %f seconds to execute \n", verify_pcr_duration);
+    /* PCR composite digest verification (charra_check_pcr_digest_against_
+     * reference()) is NOT done here -- per the RP-mediated architecture, PCR
+     * / log correctness is entirely the RP App's Step 2a local-verification
+     * gate. The Verifier checks only quote signatures, nonces, and (once
+     * implemented) EK/AK certificate validity. */
 
     /* --- output result --- */
 
@@ -670,8 +640,7 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
                               attestation_result_signature_rp &&
                               attestation_result_signature_rp_mbedtls &&
                               attestation_result_nonce &&
-                              attestation_result_nonce_rp &&
-                              attestation_result_pcrs;
+                              attestation_result_nonce_rp;
 
 
     const char* message;
@@ -695,7 +664,7 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
 
 
     fprintf(p_file, "appraising took %f seconds to execute \n", appraise_duration);
-    double total_measured = unmarshal_duration + init_duration + load_duration + verify_nonce_duration + verify_signature_duration + verify_pcr_duration;
+    double total_measured = unmarshal_duration + init_duration + load_duration + verify_nonce_duration + verify_signature_duration;
     fprintf(p_file, "total measured %f  \n", total_measured);
 
     if ((coap_r = coap_add_data_large_response(resource, session, request, response,
