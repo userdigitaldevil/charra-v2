@@ -108,7 +108,7 @@ LDPATH =     -L/usr/local/lib/ \
 LIBS =       coap-3-tinydtls \
              qcbor m \
              crypto ssl \
-             mbedcrypto \
+             mbedx509 mbedcrypto \
              util \
              tss2-esys tss2-sys tss2-mu tss2-tctildr \
              $(tcti_module)
@@ -125,14 +125,15 @@ SOURCES = $(shell find $(SRCDIR) -name '*.c')
 INCLUDE = -I$(INCDIR)
 
 OBJECTS =  $(addsuffix .o, $(addprefix $(OBJDIR)/common/, charra_log))
-OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log charra_synthetic_log charra_sdk charra_rp_qualification))
+OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log charra_synthetic_log charra_sdk charra_rp_qualification charra_ak_state))
 OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/util/, cbor_util charra_util coap_util crypto_util io_util tpm2_util cli_util parser_util))
 
 TARGETS = $(addprefix $(BINDIR)/, attester verifier verifier_old relying_party trust_manager)
 
 .PHONY: all attester verifier verifier_old relying_party trust_manager \
         test test_event_log test_synthetic_log test_sdk test_rp_qualification \
-        test_marshaling_bounds clean
+        test_marshaling_bounds test_x509_cert_chain \
+        test_certify_ak_marshaling test_ak_state clean
 
 all: $(TARGETS)
 attester: $(BINDIR)/attester
@@ -145,14 +146,20 @@ test_synthetic_log: $(BINDIR)/test_synthetic_log
 test_sdk: $(BINDIR)/test_sdk
 test_rp_qualification: $(BINDIR)/test_rp_qualification
 test_marshaling_bounds: $(BINDIR)/test_marshaling_bounds
+test_x509_cert_chain: $(BINDIR)/test_x509_cert_chain
+test_certify_ak_marshaling: $(BINDIR)/test_certify_ak_marshaling
+test_ak_state: $(BINDIR)/test_ak_state
 
 ## run the test suite
-test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log $(BINDIR)/test_sdk $(BINDIR)/test_rp_qualification $(BINDIR)/test_marshaling_bounds
+test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log $(BINDIR)/test_sdk $(BINDIR)/test_rp_qualification $(BINDIR)/test_marshaling_bounds $(BINDIR)/test_x509_cert_chain $(BINDIR)/test_certify_ak_marshaling $(BINDIR)/test_ak_state
 	./$(BINDIR)/test_event_log
 	./$(BINDIR)/test_synthetic_log
 	./$(BINDIR)/test_sdk
 	./$(BINDIR)/test_rp_qualification
 	./$(BINDIR)/test_marshaling_bounds
+	./$(BINDIR)/test_x509_cert_chain
+	./$(BINDIR)/test_certify_ak_marshaling
+	./$(BINDIR)/test_ak_state
 
 
 # ------------------------------------------------------------------------------
@@ -210,6 +217,18 @@ $(BINDIR)/test_rp_qualification: tests/test_rp_qualification.c $(OBJECTS)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
 $(BINDIR)/test_marshaling_bounds: tests/test_marshaling_bounds.c $(OBJECTS)
+	@mkdir -p $(@D)
+	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
+
+$(BINDIR)/test_x509_cert_chain: tests/test_x509_cert_chain.c $(OBJECTS)
+	@mkdir -p $(@D)
+	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
+
+$(BINDIR)/test_certify_ak_marshaling: tests/test_certify_ak_marshaling.c $(OBJECTS)
+	@mkdir -p $(@D)
+	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
+
+$(BINDIR)/test_ak_state: tests/test_ak_state.c $(OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 

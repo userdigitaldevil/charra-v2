@@ -146,4 +146,43 @@ CHARRA_RC charra_unmarshal_rp_appraisal(
         const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
         msg_rp_appraisal_dto* rp_appraisal);
 
+/**
+ * @brief Marshals a /certify_ak request DTO (see msg_certify_ak_request_dto
+ * in charra_dto.h).
+ */
+CHARRA_RC charra_marshal_certify_ak_request(
+        const msg_certify_ak_request_dto* certify_ak_request,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data);
+
+/**
+ * @brief Unmarshals a /certify_ak request DTO. Bounds-checks
+ * ak_public_key_len/ak_name_len against their fixed-size destination
+ * arrays, same defense-in-depth style as
+ * charra_unmarshal_attestation_response(). ek_certificate has no fixed
+ * upper bound (real certificates vary in size), so it is heap-allocated,
+ * same as event_log elsewhere in this file.
+ */
+CHARRA_RC charra_unmarshal_certify_ak_request(
+        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
+        msg_certify_ak_request_dto* certify_ak_request);
+
+/**
+ * @brief Marshals a /certify_ak response DTO (see
+ * msg_certify_ak_response_dto in charra_dto.h).
+ */
+CHARRA_RC charra_marshal_certify_ak_response(
+        const msg_certify_ak_response_dto* certify_ak_response,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data);
+
+/**
+ * @brief Unmarshals a /certify_ak response DTO. Bounds-checks
+ * credential_blob_len/wrapped_secret_len against their fixed-size
+ * destination arrays; aes_gcm_nonce/aes_gcm_tag are fixed-size and
+ * length-checked exactly, not just capped. ak_certificate is
+ * heap-allocated, same reasoning as ek_certificate above.
+ */
+CHARRA_RC charra_unmarshal_certify_ak_response(
+        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
+        msg_certify_ak_response_dto* certify_ak_response);
+
 #endif /* MARSHALING_UTIL_H */

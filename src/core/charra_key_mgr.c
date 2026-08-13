@@ -64,3 +64,48 @@ CHARRA_RC charra_load_external_public_key(ESYS_CONTEXT* ctx,
 
     return CHARRA_RC_SUCCESS;
 }
+
+CHARRA_RC charra_tpm_make_credential_for_ak(ESYS_CONTEXT* esys_ctx,
+        TPM2B_PUBLIC* ek_public_key, const TPM2B_NAME* ak_name,
+        const TPM2B_DIGEST* credential,
+        TPM2B_ID_OBJECT** credential_blob_out,
+        TPM2B_ENCRYPTED_SECRET** wrapped_secret_out) {
+    if (esys_ctx == NULL || ek_public_key == NULL || ak_name == NULL ||
+            credential == NULL || credential_blob_out == NULL ||
+            wrapped_secret_out == NULL) {
+        return CHARRA_RC_BAD_ARGUMENT;
+    }
+    *credential_blob_out = NULL;
+    *wrapped_secret_out = NULL;
+
+    ESYS_TR ek_handle = ESYS_TR_NONE;
+    CHARRA_RC charra_r = charra_load_external_public_key(
+            esys_ctx, ek_public_key, &ek_handle);
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "charra_tpm_make_credential_for_ak: could not load EK "
+                "public key.");
+        return charra_r;
+    }
+
+    TSS2_RC tss_r =
+            Esys_MakeCredential(esys_ctx, ek_handle, ESYS_TR_NONE,
+                    ESYS_TR_NONE, ESYS_TR_NONE, credential, ak_name,
+                    credential_blob_out, wrapped_secret_out);
+
+    if (Esys_FlushContext(esys_ctx, ek_handle) != TSS2_RC_SUCCESS) {
+        /* not fatal to the MakeCredential result itself -- log and
+         * continue, matching this file's other flush-failure handling */
+        charra_log_error("charra_tpm_make_credential_for_ak: "
+                         "Esys_FlushContext (EK handle) failed.");
+    }
+
+    if (tss_r != TSS2_RC_SUCCESS) {
+        charra_log_error("charra_tpm_make_credential_for_ak: "
+                         "Esys_MakeCredential failed: 0x%x",
+                tss_r);
+        return CHARRA_RC_TPM;
+    }
+
+    return CHARRA_RC_SUCCESS;
+}

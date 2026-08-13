@@ -26,8 +26,11 @@
 
 #include <tss2/tss2_tpm2_types.h>
 
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/entropy.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/rsa.h>
+#include <mbedtls/x509_crt.h>
 
 #include "../common/charra_error.h"
 
@@ -137,5 +140,183 @@ CHARRA_RC charra_crypto_rsa_sign(mbedtls_pk_context* key,
  */
 CHARRA_RC compute_and_check_PCR_digest(uint8_t** pcr_values,
         uint32_t pcr_value_len, const TPMS_ATTEST* const attest_struct);
+
+/* --- EK/AK certificate chain verification (Step 3a/3b item 1) ---------- */
+
+/**
+ * @brief Initialize and seed an mbedtls CSPRNG, ready to pass as the
+ * (f_rng, p_rng) pair several mbedtls APIs need -- key parsing (blinding),
+ * certificate signing, MakeCredential's seed generation. Same
+ * entropy/ctr_drbg setup charra_random_bytes() (charra_util.c) already
+ * uses internally, exposed here since callers of the functions above need
+ * the raw seeded context itself, not just random bytes out of it.
+ *
+ * @param[out] ctr_drbg_out caller-owned; on CHARRA_RC_SUCCESS must be
+ * cleaned up with charra_crypto_seeded_rng_free().
+ * @param[out] entropy_out same lifetime as ctr_drbg_out; kept alive
+ * alongside it since ctr_drbg_out holds a pointer into it.
+ * @returns CHARRA_RC_SUCCESS, or CHARRA_RC_CRYPTO_ERROR if seeding fails.
+ */
+CHARRA_RC charra_crypto_seeded_rng_init(
+        mbedtls_ctr_drbg_context* ctr_drbg_out,
+        mbedtls_entropy_context* entropy_out);
+
+/** @brief Frees a context pair from charra_crypto_seeded_rng_init(). */
+void charra_crypto_seeded_rng_free(
+        mbedtls_ctr_drbg_context* ctr_drbg, mbedtls_entropy_context* entropy);
+
+/**
+ * @brief Verify that leaf_cert chains to trusted_root and is currently
+ * within its validity window (NotBefore/NotAfter, checked against the
+ * system clock as a normal part of mbedtls_x509_crt_verify()).
+ *
+ * Single-root trust store -- verifies against exactly one trusted
+ * certificate, no intermediate chain support, matching the two-tier PKI
+ * this project uses (root CA signs the leaf directly). Does not check
+ * revocation (no CRL/OCSP); the Verifier stays a passive server, so no
+ * live OCSP-style outbound query is made -- see CHARRA_V2_NOTES.md for the
+ * local-revocation-list alternative if that's ever needed.
+ *
+ * @param[in] leaf_cert_der leaf certificate bytes, DER or PEM
+ * @param[in] leaf_cert_len length of leaf_cert_der
+ * @param[in] trusted_root_der trusted root certificate bytes, DER or PEM
+ * @param[in] trusted_root_len length of trusted_root_der
+ * @param[out] leaf_out parsed leaf certificate; on CHARRA_RC_SUCCESS the
+ * caller owns it and must mbedtls_x509_crt_free() it (matching this
+ * file's existing init-then-caller-frees convention). Lets the caller
+ * inspect the certified public key afterward, e.g. via
+ * charra_crypto_verify_cert_public_key_matches_tpm_public_key() below.
+ * @returns CHARRA_RC_SUCCESS if the chain verifies and the cert is
+ * currently valid, CHARRA_RC_VERIFICATION_FAILED if verification fails
+ * (expired, wrong root, bad signature, ...), CHARRA_RC_CRYPTO_ERROR if
+ * either certificate fails to parse, CHARRA_RC_BAD_ARGUMENT on bad input.
+ */
+CHARRA_RC charra_crypto_verify_x509_cert_chain(const uint8_t* leaf_cert_der,
+        size_t leaf_cert_len, const uint8_t* trusted_root_der,
+        size_t trusted_root_len, mbedtls_x509_crt* leaf_out);
+
+/**
+ * @brief Confirm a certificate's embedded RSA public key is the same key
+ * as a TPM2B_PUBLIC -- ties "this certificate is valid" to "this
+ * certificate actually vouches for the key that signed this specific
+ * quote", not just some unrelated key.
+ *
+ * @returns CHARRA_RC_SUCCESS if the keys match, CHARRA_RC_VERIFICATION_FAILED
+ * if they don't (or the cert's key isn't RSA), CHARRA_RC_CRYPTO_ERROR /
+ * CHARRA_RC_BAD_ARGUMENT on error.
+ */
+CHARRA_RC charra_crypto_verify_cert_public_key_matches_tpm_public_key(
+        const mbedtls_x509_crt* cert, const TPM2B_PUBLIC* tpm_pub_key);
+
+/**
+ * @brief Reconstruct the standard TCG RSA-2048 EK TPM2B_PUBLIC (the fixed
+ * "low range" template real EK certificates are issued against) from an
+ * already chain-verified EK certificate's embedded RSA public key.
+ *
+ * Needed because Esys_MakeCredential (via
+ * charra_tpm_make_credential_for_ak()) takes the EK's full TPM2B_PUBLIC,
+ * not just its bare RSA key: the object's Name -- what ties the wrapped
+ * credential to one specific TPM object -- is computed from the whole
+ * public area (nameAlg, objectAttributes, authPolicy, parameters), not the
+ * modulus alone. A real Privacy CA is expected to know this fixed,
+ * TCG-standard template rather than receive it over the wire; only the
+ * modulus itself (and the confirmation that the exponent is the
+ * TPM-conventional 65537) comes from the certificate.
+ *
+ * The exact template values here (objectAttributes 0x300b2, the authPolicy
+ * digest) were confirmed empirically against a real EK created with
+ * `tpm2_createek -G rsa` against this project's TPM simulator, not just
+ * recalled from the TCG spec.
+ *
+ * @param[in] ek_cert an already chain-verified EK certificate (see
+ * charra_crypto_verify_x509_cert_chain())
+ * @param[out] ek_public_key_out
+ * @returns CHARRA_RC_SUCCESS, CHARRA_RC_BAD_ARGUMENT, or
+ * CHARRA_RC_VERIFICATION_FAILED if the cert's key isn't a 2048-bit RSA key
+ * with the standard 65537 exponent.
+ */
+CHARRA_RC charra_crypto_build_ek_tpm2b_public_from_cert(
+        const mbedtls_x509_crt* ek_cert, TPM2B_PUBLIC* ek_public_key_out);
+
+/* --- AK certificate issuance (Verifier acting as Privacy CA) ----------- */
+
+/**
+ * @brief Sign a new AK certificate for ak_public_key, issued by the
+ * Verifier's own Privacy CA -- the certificate
+ * charra_crypto_verify_x509_cert_chain() later validates on every
+ * /appraise call (Step 3a/3b item 1).
+ *
+ * @param[in] ak_public_key the AK's public key to certify
+ * @param[in] subject_name certificate subject, comma-separated OID=value
+ * pairs, e.g. "CN=CHARRA RP AK"
+ * @param[in] issuer_name must match the CA certificate's own subject name
+ * exactly, e.g. "CN=CHARRA Verifier CA (test only)" (see
+ * keys/gen-ak-pki.sh) -- mbedtls does not read this from ca_private_key_path
+ * itself, since that path names only the private key, not the certificate
+ * @param[in] not_before_utc validity start, "YYYYMMDDHHMMSS" UTC
+ * @param[in] not_after_utc validity end, "YYYYMMDDHHMMSS" UTC
+ * @param[in] ca_private_key_path path to the CA's private key file (PEM or
+ * DER); this is the key that signs the new certificate
+ * @param[out] ak_cert_der_out malloc'd DER-encoded certificate; caller
+ * frees.
+ * @param[out] ak_cert_der_len_out length of ak_cert_der_out
+ * @param[out] serial_out the certificate's own 16-byte serial number, as
+ * written into it (not merely echoed back -- the actual bytes placed in the
+ * DER, sign bit already cleared). Lets the caller record which serial was
+ * just issued (see charra_ak_state.h) without having to re-parse the DER it
+ * just received back.
+ * @returns CHARRA_RC_SUCCESS, CHARRA_RC_BAD_ARGUMENT if any argument is
+ * NULL, CHARRA_RC_CRYPTO_ERROR on any mbedtls failure, CHARRA_RC_ERROR on
+ * allocation failure.
+ */
+CHARRA_RC charra_crypto_sign_ak_certificate(const TPM2B_PUBLIC* ak_public_key,
+        const char* subject_name, const char* issuer_name,
+        const char* not_before_utc, const char* not_after_utc,
+        const char* ca_private_key_path, uint8_t** ak_cert_der_out,
+        uint32_t* ak_cert_der_len_out, uint8_t serial_out[16]);
+
+/* --- AES-256-GCM (wraps the AK certificate under the MakeCredential
+ * secret, see msg_certify_ak_response_dto) ------------------------------- */
+
+#define CHARRA_AES256GCM_KEY_LEN 32
+#define CHARRA_AES256GCM_NONCE_LEN 12
+#define CHARRA_AES256GCM_TAG_LEN 16
+
+/**
+ * @brief AES-256-GCM encrypt plaintext under key, with a freshly generated
+ * random nonce (not caller-supplied -- a new nonce per call is what keeps
+ * reusing the same key safe).
+ *
+ * @param[in] key CHARRA_AES256GCM_KEY_LEN (32) bytes
+ * @param[out] nonce_out CHARRA_AES256GCM_NONCE_LEN (12) bytes
+ * @param[out] tag_out CHARRA_AES256GCM_TAG_LEN (16) bytes
+ * @param[out] ciphertext_out malloc'd, plaintext_len bytes; caller frees.
+ * Same length as plaintext -- GCM is a stream cipher, no padding.
+ * @returns CHARRA_RC_SUCCESS, CHARRA_RC_BAD_ARGUMENT, CHARRA_RC_CRYPTO_ERROR,
+ * CHARRA_RC_ERROR on allocation failure.
+ */
+CHARRA_RC charra_crypto_aes256gcm_encrypt(
+        const uint8_t key[CHARRA_AES256GCM_KEY_LEN],
+        const uint8_t* plaintext, size_t plaintext_len,
+        uint8_t nonce_out[CHARRA_AES256GCM_NONCE_LEN],
+        uint8_t tag_out[CHARRA_AES256GCM_TAG_LEN], uint8_t** ciphertext_out);
+
+/**
+ * @brief AES-256-GCM authenticated decrypt -- verifies tag before
+ * returning plaintext (uses mbedtls_gcm_auth_decrypt(), not the
+ * non-authenticating mbedtls_gcm_crypt_and_tag() in decrypt mode).
+ *
+ * @param[out] plaintext_out malloc'd, ciphertext_len bytes; caller frees.
+ * Left NULL if authentication fails.
+ * @returns CHARRA_RC_SUCCESS, CHARRA_RC_BAD_ARGUMENT,
+ * CHARRA_RC_VERIFICATION_FAILED if the tag doesn't match (wrong key or
+ * tampered ciphertext), CHARRA_RC_CRYPTO_ERROR on other mbedtls failure,
+ * CHARRA_RC_ERROR on allocation failure.
+ */
+CHARRA_RC charra_crypto_aes256gcm_decrypt(
+        const uint8_t key[CHARRA_AES256GCM_KEY_LEN],
+        const uint8_t* ciphertext, size_t ciphertext_len,
+        const uint8_t nonce[CHARRA_AES256GCM_NONCE_LEN],
+        const uint8_t tag[CHARRA_AES256GCM_TAG_LEN], uint8_t** plaintext_out);
 
 #endif /* SITIMA_CRYPTO_H */

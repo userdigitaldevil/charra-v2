@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <tinydtls/session.h>
 #include <tss2/tss2_mu.h>
 #include <tss2/tss2_tctildr.h>
@@ -12,6 +13,7 @@
 
 #include "common/charra_log.h"
 #include "common/charra_macro.h"
+#include "core/charra_ak_state.h"
 #include "core/charra_dto.h"
 #include "core/charra_helper.h"
 #include "core/charra_key_mgr.h"
@@ -64,6 +66,19 @@ bool dtls_rpk_verify_peer_public_key = true;
 
 static msg_attestation_request_dto last_request = {0};
 
+/* config for /certify_ak (Verifier acting as Privacy CA) -- see
+ * keys/gen-ak-pki.sh / keys/README.md for what these test-only files are */
+static char* manufacturer_root_cert_path = "keys/manufacturer-root.crt";
+static char* verifier_ca_cert_path = "keys/verifier-ca.crt";
+static char* verifier_ca_key_path = "keys/verifier-ca.key";
+/* AK certificate validity window -- fixed test-only window. */
+static const char* ak_cert_not_before_utc = "20240101000000";
+static const char* ak_cert_not_after_utc = "20340101000000";
+/* Persisted record of AK certificates issued via /certify_ak -- see
+ * charra_ak_state.h. Shared across every `bin/verifier` instance
+ * start_verifiers.sh spawns, since they all share one CA. */
+static char* ak_state_file_path = "ak-provisioning-state.txt";
+
 /**
  * @brief SIGINT handler: set quit to 1 for graceful termination.
  *
@@ -78,6 +93,12 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
                                 struct coap_pdu_t* response);
                                 
 static void coap_nonce_handler(struct coap_resource_t* resource,
+                                struct coap_session_t* session,
+                                const struct coap_pdu_t* request,
+                                const struct coap_string_t* query,
+                                struct coap_pdu_t* response);
+
+static void coap_certify_ak_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
                                 const struct coap_pdu_t* request,
                                 const struct coap_string_t* query,
@@ -250,6 +271,8 @@ int main(int argc, char** argv) {
             coap_context, COAP_REQUEST_FETCH, "appraise", coap_appraise_handler);
     charra_coap_add_resource(
             coap_context, COAP_REQUEST_FETCH, "nonce", coap_nonce_handler);
+    charra_coap_add_resource(coap_context, COAP_REQUEST_FETCH, "certify_ak",
+            coap_certify_ak_handler);
 
     /* enter main loop */
     charra_log_debug("[" LOG_NAME "] Entering main loop.");
@@ -475,54 +498,21 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     fprintf(p_file, "init took %f seconds to execute \n", init_duration);
 
 
-    /* load TPM key */
+    /* =====================================================================
+     * Step 3a -- New Evidence Verification (Evidence_r = Quote_r, log_r,
+     * EK_r/AK_r), per the supervisor's DRA-TLS spec. Checked in full before
+     * Step 3b below, matching the spec's own ordering ("If the verification
+     * is passed, proceed to Step 3b").
+     * ===================================================================== */
+
+    /* Step 3a item 1: validate EK_r/AK_r certificate -- NOT YET IMPLEMENTED.
+     * See CHARRA_V2_NOTES.md ("Open / undecided" -- EK/AK provisioning) for
+     * what this needs: mbedx509 linked, chain validation, a trust store. */
+
+    /* Step 3a item 2: verify Quote_r signature */
     clock_t start_load, end_load;
     double load_duration;
     start_load = clock();
-    TPM2B_PUBLIC* tpm2_public_key = (TPM2B_PUBLIC*)res.tpm2_public_key;
-    charra_log_info("[" LOG_NAME "] Loading TPM key.");
-    if ((attestation_rc = charra_load_external_public_key(esys_ctx,
-                 tpm2_public_key, &sig_key_handle)) != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Loading external public key failed.");
-        goto cleanup;
-    } else {
-        charra_log_info("[" LOG_NAME "] External public key loaded.");
-    }
-    end_load = clock();
-    load_duration = ((double) (end_load - start_load)) / CLOCKS_PER_SEC;
-    fprintf(p_file, "load external public key took %f seconds to execute \n", load_duration);
-
-    /* prepare verification */
-    charra_log_info("[" LOG_NAME "] Preparing TPM Quote verification.");
-    clock_t start_verifiy_signature, end_verifiy_signature;
-    double verify_signature_duration;
-    start_verifiy_signature = clock();
-    TPM2B_ATTEST attest = {0};
-    attest.size = res.attestation_data_len;
-    memcpy(attest.attestationData, res.attestation_data,
-            res.attestation_data_len);
-    TPMT_SIGNATURE signature = {0};
-    memcpy(&signature, res.tpm2_signature, res.tpm2_signature_len);
-
-    /* --- verify attestation signature --- */
-    bool attestation_result_signature = verify_quote_signature_with_tpm(
-            esys_ctx, sig_key_handle, &attest, &signature, &validation);
-    end_verifiy_signature = clock();
-    verify_signature_duration = ((double) (end_verifiy_signature - start_verifiy_signature)) / CLOCKS_PER_SEC;
-    fprintf(p_file, "verify signature took %f seconds to execute \n", verify_signature_duration);
-    /* --- verify attestation signature (defense in depth, mbedTLS) --- */
-    bool attestation_result_signature_mbedtls = false;
-    if (!verify_quote_signature_mbedtls(tpm2_public_key, res.attestation_data,
-                res.attestation_data_len, &signature,
-                &attestation_result_signature_mbedtls)) {
-        goto cleanup;
-    }
-
-    /* --- verify Quote_r (RP's own quote) --- */
-    /* Same load-key / TPM-verify / mbedTLS-verify sequence as Quote_a above,
-     * applied to RP's fields instead -- the verification logic doesn't care
-     * whose quote it is. Nonce and PCR checks against Quote_r happen further
-     * down, alongside Quote_a's -- see "verify Quote_r's nonce" below. */
     TPM2B_PUBLIC* tpm2_public_key_rp = (TPM2B_PUBLIC*)res.tpm2_public_key_rp;
     charra_log_info("[" LOG_NAME "] Loading RP TPM key.");
     if ((attestation_rc = charra_load_external_public_key(esys_ctx,
@@ -532,7 +522,13 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
         goto cleanup;
     }
     charra_log_info("[" LOG_NAME "] External RP public key loaded.");
+    end_load = clock();
+    load_duration = ((double) (end_load - start_load)) / CLOCKS_PER_SEC;
+    fprintf(p_file, "load external public key took %f seconds to execute \n", load_duration);
 
+    clock_t start_verifiy_signature, end_verifiy_signature;
+    double verify_signature_duration;
+    start_verifiy_signature = clock();
     TPM2B_ATTEST attest_rp = {0};
     attest_rp.size = res.attestation_data_rp_len;
     memcpy(attest_rp.attestationData, res.attestation_data_rp,
@@ -543,6 +539,9 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     bool attestation_result_signature_rp = verify_quote_signature_with_tpm(
             esys_ctx, sig_key_handle_rp, &attest_rp, &signature_rp,
             &validation_rp);
+    end_verifiy_signature = clock();
+    verify_signature_duration = ((double) (end_verifiy_signature - start_verifiy_signature)) / CLOCKS_PER_SEC;
+    fprintf(p_file, "verify signature took %f seconds to execute \n", verify_signature_duration);
 
     bool attestation_result_signature_rp_mbedtls = false;
     if (!verify_quote_signature_mbedtls(tpm2_public_key_rp,
@@ -552,7 +551,7 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     }
 
     /* unmarshal Quote_r's attestation data -- needed for its nonce check
-     * further down */
+     * right below */
     TPMS_ATTEST attest_struct_rp = {0};
     attestation_rc = charra_unmarshal_tpm2_quote(res.attestation_data_rp_len,
             res.attestation_data_rp, &attest_struct_rp);
@@ -563,52 +562,25 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     }
 
     /* log_r content verification (self-consistency, PCR replay, file-hash
-     * policy) is NOT done here -- it is the RP App's own local-verification
-     * gate, run against the log it receives from the Attester, before
-     * cleansing. See verify_log_entries_self_consistent(),
+     * policy) is NOT done here -- it is the RP App's own Step 2a
+     * local-verification gate, run against the log it receives from the
+     * Attester, before cleansing. See verify_log_entries_self_consistent(),
      * verify_log_matches_quote_r_pcr() and
-     * verify_log_file_hashes_against_policy() in charra_event_log.h. The
-     * Verifier only checks Quote_r's signature (above) and nonce (below). */
+     * verify_log_file_hashes_against_policy() in charra_event_log.h. */
 
-    /* unmarshal attestation data */
-    TPMS_ATTEST attest_struct = {0};
-    attestation_rc = charra_unmarshal_tpm2_quote(
-            res.attestation_data_len, res.attestation_data, &attest_struct);
-    if (attestation_rc != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Error while unmarshaling TPM2 Quote.");
-        goto cleanup;
-    }
-
-    /* --- verify nonce --- */
+    /* Step 3a item 3: check nonce consistency */
     clock_t start_verifiy_nonce, end_verifiy_nonce;
     double verify_nonce_duration;
     start_verifiy_nonce = clock();
-    bool attestation_result_nonce = false;
-    {
-        charra_log_info("[" LOG_NAME "] Verifying nonce ...");
-        // TODO: last_request is initialised but never filled with the actual nonce
-        // the relying party needs to send the nonce either inside the appraise request or before separately
-        attestation_result_nonce = charra_verify_tpm2_quote_qualifying_data(
-                last_request.nonce_len, last_request.nonce, &attest_struct);
-        if (attestation_result_nonce == true) {
-            charra_log_info("[" LOG_NAME "]     => Nonce in TPM Quote is "
-                            "valid! (matches the one sent)");
-        } else {
-            charra_log_error("[" LOG_NAME
-                             "]     => Nonce in TPM Quote is NOT valid! (does "
-                             "not match the one sent)");
-        }
-    }
-    /* --- verify Quote_r's nonce --- */
-    /* Same nonce as Quote_a's, on purpose: RP forwards both quotes in one
-     * message, in one attestation session, so Quote_r including the same
-     * session nonce as its own extraData proves "I'm responding within
-     * THIS session," not replaying an old Quote_r. Reuses the exact
-     * mechanism Quote_a's nonce check already uses -- same
+    /* Same nonce Quote_a's check below uses, on purpose: RP forwards both
+     * quotes in one message, in one attestation session, so Quote_r
+     * including the same session nonce as its own extraData proves "I'm
+     * responding within THIS session," not replaying an old Quote_r. Reuses
+     * the exact mechanism Quote_a's nonce check uses -- same
      * charra_verify_tpm2_quote_qualifying_data() call, same
      * last_request.nonce global. (That global is the known cross-session
-     * fragility tracked as bug #6 -- now read for two purposes instead of
-     * one, unchanged risk, not made worse by this.) */
+     * fragility tracked as bug #6 -- read for two purposes instead of one,
+     * unchanged risk, not made worse by this.) */
     bool attestation_result_nonce_rp = false;
     {
         charra_log_info("[" LOG_NAME "] Verifying RP nonce ...");
@@ -627,20 +599,100 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     verify_nonce_duration = ((double) (end_verifiy_nonce - start_verifiy_nonce)) / CLOCKS_PER_SEC;
     fprintf(p_file, "verify nonce took %f seconds to execute \n", verify_nonce_duration);
 
-    /* PCR composite digest verification (charra_check_pcr_digest_against_
-     * reference()) is NOT done here -- per the RP-mediated architecture, PCR
-     * / log correctness is entirely the RP App's Step 2a local-verification
-     * gate. The Verifier checks only quote signatures, nonces, and (once
-     * implemented) EK/AK certificate validity. */
+    /* Step 3a gate: "If the verification is passed, proceed to Step 3b.
+     * Otherwise, send a negative proof result to the relying party." A
+     * failure anywhere in Step 3a skips Step 3b entirely -- Quote_a is not
+     * even looked at, matching the spec's early-exit wording exactly
+     * (previously all six checks ran unconditionally and were only ANDed
+     * together at the end; that no longer matches the spec's text). */
+    bool step_3a_passed = attestation_result_signature_rp &&
+                          attestation_result_signature_rp_mbedtls &&
+                          attestation_result_nonce_rp;
+
+    bool attestation_result_signature = false;
+    bool attestation_result_signature_mbedtls = false;
+    bool attestation_result_nonce = false;
+
+    if (!step_3a_passed) {
+        charra_log_error("[" LOG_NAME "] Step 3a FAILED -- skipping Step 3b "
+                         "(Quote_a is not checked; negative result below).");
+    } else {
+        charra_log_info(
+                "[" LOG_NAME "] Step 3a passed, proceeding to Step 3b ...");
+
+        /* =================================================================
+         * Step 3b -- Original Evidence Verification (Evidence_a' =
+         * Quote_a, EK_a/AK_a; log_a itself is never forwarded to the
+         * Verifier).
+         * ================================================================= */
+
+        /* Step 3b item 1: validate EK_a/AK_a certificate -- NOT YET
+         * IMPLEMENTED. Same gap as Step 3a item 1 above. */
+
+        /* Step 3b item 2: verify Quote_a signature */
+        TPM2B_PUBLIC* tpm2_public_key = (TPM2B_PUBLIC*)res.tpm2_public_key;
+        charra_log_info("[" LOG_NAME "] Loading TPM key.");
+        if ((attestation_rc = charra_load_external_public_key(esys_ctx,
+                     tpm2_public_key, &sig_key_handle)) != CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] Loading external public key failed.");
+            goto cleanup;
+        } else {
+            charra_log_info("[" LOG_NAME "] External public key loaded.");
+        }
+
+        charra_log_info("[" LOG_NAME "] Preparing TPM Quote verification.");
+        TPM2B_ATTEST attest = {0};
+        attest.size = res.attestation_data_len;
+        memcpy(attest.attestationData, res.attestation_data,
+                res.attestation_data_len);
+        TPMT_SIGNATURE signature = {0};
+        memcpy(&signature, res.tpm2_signature, res.tpm2_signature_len);
+
+        attestation_result_signature = verify_quote_signature_with_tpm(
+                esys_ctx, sig_key_handle, &attest, &signature, &validation);
+        if (!verify_quote_signature_mbedtls(tpm2_public_key,
+                    res.attestation_data, res.attestation_data_len,
+                    &signature, &attestation_result_signature_mbedtls)) {
+            goto cleanup;
+        }
+
+        /* unmarshal Quote_a's attestation data -- needed for its nonce
+         * check right below */
+        TPMS_ATTEST attest_struct = {0};
+        attestation_rc = charra_unmarshal_tpm2_quote(res.attestation_data_len,
+                res.attestation_data, &attest_struct);
+        if (attestation_rc != CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] Error while unmarshaling TPM2 Quote.");
+            goto cleanup;
+        }
+
+        /* Step 3b item 3: check nonce consistency */
+        charra_log_info("[" LOG_NAME "] Verifying nonce ...");
+        attestation_result_nonce = charra_verify_tpm2_quote_qualifying_data(
+                last_request.nonce_len, last_request.nonce, &attest_struct);
+        if (attestation_result_nonce == true) {
+            charra_log_info("[" LOG_NAME "]     => Nonce in TPM Quote is "
+                            "valid! (matches the one sent)");
+        } else {
+            charra_log_error("[" LOG_NAME
+                             "]     => Nonce in TPM Quote is NOT valid! (does "
+                             "not match the one sent)");
+        }
+    }
 
     /* --- output result --- */
+    /* Order matches Step 3a then Step 3b, RP's evidence before Attester's.
+     * Equivalent to step_3a_passed && (Step 3b's three results), since
+     * Step 3b's results default to false whenever it was skipped. */
 
-    bool attestation_result = attestation_result_signature &&
-                              attestation_result_signature_mbedtls &&
-                              attestation_result_signature_rp &&
+    bool attestation_result = attestation_result_signature_rp &&
                               attestation_result_signature_rp_mbedtls &&
-                              attestation_result_nonce &&
-                              attestation_result_nonce_rp;
+                              attestation_result_nonce_rp &&
+                              attestation_result_signature &&
+                              attestation_result_signature_mbedtls &&
+                              attestation_result_nonce;
 
 
     const char* message;
@@ -765,4 +817,353 @@ static void coap_nonce_handler(struct coap_resource_t* resource CHARRA_UNUSED,
 
 error:
     return;
+}
+
+/**
+ * @brief Parses a "YYYYMMDDHHMMSS" UTC timestamp -- the format
+ * ak_cert_not_before_utc/ak_cert_not_after_utc are written in, which is
+ * also what charra_crypto_sign_ak_certificate() takes -- into a time_t.
+ *
+ * Used to record an issued AK certificate's real expiry in the
+ * AK-provisioning state (charra_ak_state.h) by parsing the exact same
+ * string that was signed into the certificate, rather than approximating
+ * it as "issued_at + some duration", which could drift from what the
+ * certificate itself actually says.
+ *
+ * @returns true and sets *out on success, false on a malformed string.
+ */
+static bool parse_utc_yyyymmddhhmmss(const char* s, time_t* out) {
+    struct tm tm = {0};
+    if (sscanf(s, "%4d%2d%2d%2d%2d%2d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
+                &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6) {
+        return false;
+    }
+    tm.tm_year -= 1900;
+    tm.tm_mon -= 1;
+    *out = timegm(&tm);
+    return *out != (time_t)-1;
+}
+
+/**
+ * @brief /certify_ak: the Verifier, acting as Privacy CA, certifies a
+ * requester's AK via TPM2_MakeCredential -- see msg_certify_ak_request_dto
+ * / msg_certify_ak_response_dto in charra_dto.h for the wire format and
+ * CHARRA_V2_NOTES.md for why this is a separate exchange from /appraise.
+ *
+ * Flow: verify the requester's EK certificate chains to the (synthetic,
+ * test-only) manufacturer root -> reconstruct the EK's full TPM2B_PUBLIC
+ * from that certificate -> sign a fresh AK certificate for the requested
+ * AK public key -> AES-256-GCM-encrypt that certificate under a freshly
+ * generated key -> wrap that key via Esys_MakeCredential so only a TPM
+ * that completes ActivateCredential with the matching EK/AK pair can ever
+ * recover it.
+ */
+static void coap_certify_ak_handler(struct coap_resource_t* resource,
+                                struct coap_session_t* session,
+                                const struct coap_pdu_t* request,
+                                const struct coap_string_t* query,
+                                struct coap_pdu_t* response) {
+    int coap_r = 0;
+    TSS2_RC tss_r = 0;
+    CHARRA_RC charra_r = CHARRA_RC_ERROR;
+    coap_pdu_code_t response_code = COAP_RESPONSE_CODE_INTERNAL_ERROR;
+
+    msg_certify_ak_request_dto req = {0};
+    bool req_unmarshaled = false;
+
+    char* manufacturer_root_der = NULL;
+    size_t manufacturer_root_der_len = 0;
+    mbedtls_x509_crt ek_leaf_cert;
+    bool ek_leaf_cert_inited = false;
+
+    char* verifier_ca_cert_der = NULL;
+    size_t verifier_ca_cert_der_len = 0;
+    mbedtls_x509_crt verifier_ca_cert;
+    bool verifier_ca_cert_inited = false;
+
+    uint8_t* ak_cert_der = NULL;
+    uint32_t ak_cert_der_len = 0;
+    uint8_t* ak_cert_ciphertext = NULL;
+
+    ESYS_CONTEXT* esys_ctx = NULL;
+    TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
+    TPM2B_ID_OBJECT* credential_blob = NULL;
+    TPM2B_ENCRYPTED_SECRET* wrapped_secret = NULL;
+
+    uint8_t* marshaled_response = NULL;
+    uint32_t marshaled_response_len = 0;
+
+    /* --- receive incoming data --- */
+    size_t data_len = 0;
+    const uint8_t* data = NULL;
+    size_t data_offset = 0;
+    size_t data_total_len = 0;
+    if ((coap_r = coap_get_data_large(request, &data_len, &data, &data_offset,
+                 &data_total_len)) == 0) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: Could not get CoAP PDU data.");
+        response_code = COAP_RESPONSE_CODE_BAD_REQUEST;
+        goto cleanup;
+    }
+    charra_log_info(
+            "[" LOG_NAME "] /certify_ak: received request of length %zu.",
+            data_len);
+
+    if ((charra_r = charra_unmarshal_certify_ak_request(
+                 data_len, data, &req)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: could not parse CBOR request.");
+        response_code = COAP_RESPONSE_CODE_BAD_REQUEST;
+        goto cleanup;
+    }
+    req_unmarshaled = true;
+
+    /* --- validate the requester's EK certificate against the manufacturer
+     * root (Step: EK certificate check, this endpoint's own equivalent of
+     * Step 3a/3b item 1) --- */
+    if ((charra_r = charra_io_read_file(manufacturer_root_cert_path,
+                 &manufacturer_root_der, &manufacturer_root_der_len)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME
+                         "] /certify_ak: could not read manufacturer root "
+                         "certificate ('%s').",
+                manufacturer_root_cert_path);
+        goto cleanup;
+    }
+
+    if ((charra_r = charra_crypto_verify_x509_cert_chain(req.ek_certificate,
+                 req.ek_certificate_len, (uint8_t*)manufacturer_root_der,
+                 manufacturer_root_der_len, &ek_leaf_cert)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: EK certificate did "
+                         "NOT verify against the manufacturer root.");
+        response_code = COAP_RESPONSE_CODE_UNAUTHORIZED;
+        goto cleanup;
+    }
+    ek_leaf_cert_inited = true;
+    charra_log_info(
+            "[" LOG_NAME "] /certify_ak: EK certificate verified.");
+
+    /* --- reconstruct the EK's full TPM2B_PUBLIC (Esys_MakeCredential needs
+     * more than the bare RSA key the certificate carries) --- */
+    TPM2B_PUBLIC ek_public_key = {0};
+    if ((charra_r = charra_crypto_build_ek_tpm2b_public_from_cert(
+                 &ek_leaf_cert, &ek_public_key)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: could not "
+                         "reconstruct EK TPM2B_PUBLIC from certificate.");
+        response_code = COAP_RESPONSE_CODE_UNAUTHORIZED;
+        goto cleanup;
+    }
+
+    /* req.ak_public_key / req.ak_name are raw copies of the requester's own
+     * TPM2B_PUBLIC / TPM2B_NAME structs -- same "cast the byte array back"
+     * convention coap_appraise_handler() uses for tpm2_public_key(_rp). */
+    TPM2B_PUBLIC* ak_public_key = (TPM2B_PUBLIC*)req.ak_public_key;
+    TPM2B_NAME* ak_name = (TPM2B_NAME*)req.ak_name;
+
+    /* --- sign a fresh AK certificate --- */
+    if ((charra_r = charra_io_read_file(verifier_ca_cert_path,
+                 &verifier_ca_cert_der, &verifier_ca_cert_der_len)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: could not read "
+                         "Verifier CA certificate ('%s').",
+                verifier_ca_cert_path);
+        goto cleanup;
+    }
+    mbedtls_x509_crt_init(&verifier_ca_cert);
+    verifier_ca_cert_inited = true;
+    if (mbedtls_x509_crt_parse(&verifier_ca_cert,
+                (uint8_t*)verifier_ca_cert_der,
+                verifier_ca_cert_der_len) != 0) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: could not parse "
+                         "Verifier CA certificate.");
+        charra_r = CHARRA_RC_CRYPTO_ERROR;
+        goto cleanup;
+    }
+    char verifier_ca_subject_name[256] = {0};
+    if (mbedtls_x509_dn_gets(verifier_ca_subject_name,
+                sizeof(verifier_ca_subject_name),
+                &verifier_ca_cert.subject) <= 0) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: could not read "
+                         "Verifier CA subject name.");
+        charra_r = CHARRA_RC_CRYPTO_ERROR;
+        goto cleanup;
+    }
+
+    uint8_t ak_cert_serial[16] = {0};
+    if ((charra_r = charra_crypto_sign_ak_certificate(ak_public_key,
+                 "CN=CHARRA AK", verifier_ca_subject_name,
+                 ak_cert_not_before_utc, ak_cert_not_after_utc,
+                 verifier_ca_key_path, &ak_cert_der, &ak_cert_der_len,
+                 ak_cert_serial)) != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] /certify_ak: could not sign AK certificate.");
+        goto cleanup;
+    }
+    charra_log_info(
+            "[" LOG_NAME "] /certify_ak: AK certificate signed (%u bytes).",
+            ak_cert_der_len);
+
+    /* --- generate the MakeCredential secret (a fresh AES-256 key) and
+     * encrypt the AK certificate under it --- */
+    uint8_t aes_key[CHARRA_AES256GCM_KEY_LEN] = {0};
+    {
+        mbedtls_ctr_drbg_context ctr_drbg;
+        mbedtls_entropy_context entropy;
+        if ((charra_r = charra_crypto_seeded_rng_init(&ctr_drbg, &entropy)) !=
+                CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] /certify_ak: could not seed RNG.");
+            goto cleanup;
+        }
+        int mbedtls_r =
+                mbedtls_ctr_drbg_random(&ctr_drbg, aes_key, sizeof(aes_key));
+        charra_crypto_seeded_rng_free(&ctr_drbg, &entropy);
+        if (mbedtls_r != 0) {
+            charra_log_error("[" LOG_NAME
+                             "] /certify_ak: could not generate AES key.");
+            charra_r = CHARRA_RC_CRYPTO_ERROR;
+            goto cleanup;
+        }
+    }
+
+    uint8_t aes_gcm_nonce[CHARRA_AES256GCM_NONCE_LEN] = {0};
+    uint8_t aes_gcm_tag[CHARRA_AES256GCM_TAG_LEN] = {0};
+    if ((charra_r = charra_crypto_aes256gcm_encrypt(aes_key, ak_cert_der,
+                 ak_cert_der_len, aes_gcm_nonce, aes_gcm_tag,
+                 &ak_cert_ciphertext)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME
+                         "] /certify_ak: could not encrypt AK certificate.");
+        goto cleanup;
+    }
+
+    /* --- wrap the AES key so only a TPM holding the EK/AK pair can
+     * recover it (TPM2_MakeCredential) --- */
+    if ((tss_r = Tss2_TctiLdr_Initialize(getenv("CHARRA_TCTI"), &tcti_ctx)) !=
+            TSS2_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: Tss2_TctiLdr_Initialize.");
+        charra_r = CHARRA_RC_ERROR;
+        goto cleanup;
+    }
+    if ((tss_r = Esys_Initialize(&esys_ctx, tcti_ctx, NULL)) !=
+            TSS2_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: Esys_Initialize.");
+        charra_r = CHARRA_RC_ERROR;
+        goto cleanup;
+    }
+
+    TPM2B_DIGEST credential = {0};
+    credential.size = sizeof(aes_key);
+    memcpy(credential.buffer, aes_key, sizeof(aes_key));
+
+    if ((charra_r = charra_tpm_make_credential_for_ak(esys_ctx,
+                 &ek_public_key, ak_name, &credential, &credential_blob,
+                 &wrapped_secret)) != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] /certify_ak: Esys_MakeCredential failed.");
+        goto cleanup;
+    }
+
+    /* --- marshal + send response --- */
+    msg_certify_ak_response_dto resp = {0};
+    resp.credential_blob_len = sizeof(*credential_blob);
+    memcpy(resp.credential_blob, credential_blob, resp.credential_blob_len);
+    resp.wrapped_secret_len = sizeof(*wrapped_secret);
+    memcpy(resp.wrapped_secret, wrapped_secret, resp.wrapped_secret_len);
+    memcpy(resp.aes_gcm_nonce, aes_gcm_nonce, sizeof(aes_gcm_nonce));
+    memcpy(resp.aes_gcm_tag, aes_gcm_tag, sizeof(aes_gcm_tag));
+    resp.ak_certificate_len = ak_cert_der_len;
+    resp.ak_certificate = ak_cert_ciphertext;
+
+    if ((charra_r = charra_marshal_certify_ak_response(&resp,
+                 &marshaled_response_len, &marshaled_response)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] /certify_ak: could not marshal response.");
+        goto cleanup;
+    }
+
+    charra_log_info("[" LOG_NAME "] /certify_ak: AK certified successfully.");
+
+    /* --- record the issuance: revokes any prior record for this EK, then
+     * appends this one as the new active record. Deliberately done only
+     * here, at the point the response is about to actually be sent -- not
+     * right after signing -- so a later failure (marshal/MakeCredential)
+     * can never revoke a working certificate in favor of one the requester
+     * never receives. */
+    uint8_t ek_fingerprint[32] = {0};
+    if ((charra_r = hash_sha256(req.ek_certificate_len, req.ek_certificate,
+                 ek_fingerprint)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: could not hash EK "
+                         "certificate for state tracking.");
+        goto cleanup;
+    }
+    time_t ak_cert_expires_at = 0;
+    if (!parse_utc_yyyymmddhhmmss(ak_cert_not_after_utc, &ak_cert_expires_at)) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: could not parse AK "
+                         "certificate expiry for state tracking.");
+        charra_r = CHARRA_RC_ERROR;
+        goto cleanup;
+    }
+    charra_ak_state_record ak_record = {0};
+    memcpy(ak_record.ek_fingerprint, ek_fingerprint,
+            sizeof(ak_record.ek_fingerprint));
+    ak_record.ak_name_len = req.ak_name_len;
+    memcpy(ak_record.ak_name, req.ak_name, req.ak_name_len);
+    memcpy(ak_record.serial, ak_cert_serial, sizeof(ak_record.serial));
+    ak_record.issued_at = time(NULL);
+    ak_record.expires_at = ak_cert_expires_at;
+    if ((charra_r = charra_ak_state_renew(
+                 ak_state_file_path, ek_fingerprint, &ak_record)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: could not record "
+                         "issuance in AK-provisioning state.");
+        goto cleanup;
+    }
+
+    response_code = COAP_RESPONSE_CODE_CONTENT;
+    coap_pdu_set_code(response, response_code);
+    if ((coap_r = coap_add_data_large_response(resource, session, request,
+                 response, query, COAP_MEDIATYPE_APPLICATION_CBOR, -1, 0,
+                 marshaled_response_len, marshaled_response, NULL,
+                 NULL)) == 0) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: Error invoking "
+                         "coap_add_data_large_response().");
+    }
+    goto cleanup_success;
+
+cleanup:
+    coap_pdu_set_code(response, response_code);
+
+cleanup_success:
+    free(marshaled_response);
+    free(ak_cert_der);
+    /* ak_cert_ciphertext: owned by resp.ak_certificate once assigned above;
+     * freed here regardless, same pointer either way */
+    free(ak_cert_ciphertext);
+
+    if (credential_blob != NULL) {
+        Esys_Free(credential_blob);
+    }
+    if (wrapped_secret != NULL) {
+        Esys_Free(wrapped_secret);
+    }
+    if (esys_ctx != NULL) {
+        Esys_Finalize(&esys_ctx);
+    }
+    if (tcti_ctx != NULL) {
+        Tss2_TctiLdr_Finalize(&tcti_ctx);
+    }
+
+    if (verifier_ca_cert_inited) {
+        mbedtls_x509_crt_free(&verifier_ca_cert);
+    }
+    charra_io_free_file_buffer(&verifier_ca_cert_der);
+
+    if (ek_leaf_cert_inited) {
+        mbedtls_x509_crt_free(&ek_leaf_cert);
+    }
+    charra_io_free_file_buffer(&manufacturer_root_der);
+
+    if (req_unmarshaled) {
+        charra_free_if_not_null(req.ek_certificate);
+    }
 }

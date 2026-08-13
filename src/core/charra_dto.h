@@ -168,4 +168,53 @@ typedef struct {
     uint8_t* log_r;
 } msg_rp_evidence_dto;
 
+/**
+ * /certify_ak request: asks the Verifier, acting as Privacy CA, to certify
+ * an AK. Sent by whichever party wants an AK certified (RP for itself, or
+ * relayed for the Attester) -- the protocol itself doesn't distinguish
+ * who's asking. A separate exchange from msg_rp_appraisal_dto, completed
+ * once (or on renewal) before that AK is ever presented in an appraisal --
+ * see CHARRA_V2_NOTES.md for why the two can't be merged into one message.
+ */
+typedef struct {
+    /* EK certificate (DER), chains to the manufacturer root */
+    uint32_t ek_certificate_len;
+    uint8_t* ek_certificate;
+
+    /* the AK's public key, to be certified */
+    uint32_t ak_public_key_len;
+    uint8_t ak_public_key[sizeof(TPM2B_PUBLIC)];
+
+    /* the AK's TPM2B_NAME, exactly as the requester's own Esys_ReadPublic()
+     * reports it -- NOT recomputed by the Verifier, see
+     * charra_tpm_make_credential_for_ak()'s docstring for why that's safe */
+    uint32_t ak_name_len;
+    uint8_t ak_name[sizeof(TPM2B_NAME)];
+} msg_certify_ak_request_dto;
+
+/**
+ * /certify_ak response: the TPM2_MakeCredential() output, plus the actual
+ * signed AK certificate -- too large to fit inside MakeCredential's own
+ * small credential field, so it travels alongside, AES-256-GCM-encrypted
+ * under that field's contents (a fresh symmetric key, not the certificate
+ * itself). Only a TPM that completes ActivateCredential with the matching
+ * EK/AK pair ever recovers that key, and so ever recovers the certificate.
+ */
+typedef struct {
+    /* TPM2_MakeCredential() outputs */
+    uint32_t credential_blob_len;
+    uint8_t credential_blob[sizeof(TPM2B_ID_OBJECT)];
+    uint32_t wrapped_secret_len;
+    uint8_t wrapped_secret[sizeof(TPM2B_ENCRYPTED_SECRET)];
+
+    /* AES-256-GCM parameters for ak_certificate below; key = the 32-byte
+     * credential recovered via ActivateCredential */
+    uint8_t aes_gcm_nonce[12];
+    uint8_t aes_gcm_tag[16];
+
+    /* the signed AK certificate (DER), AES-256-GCM-encrypted as above */
+    uint32_t ak_certificate_len;
+    uint8_t* ak_certificate;
+} msg_certify_ak_response_dto;
+
 #endif /* CHARRA_DTO_H */

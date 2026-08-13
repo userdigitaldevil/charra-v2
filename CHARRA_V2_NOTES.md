@@ -56,7 +56,7 @@ defined only by struct order, no schema self-description on the wire.
 | Role | File | Port | CoAP resource(s) | Timing log |
 |---|---|---|---|---|
 | Attester | `src/attester.c` | 5683 | `attest` (FETCH) | `timings_attester.txt` |
-| Verifier (new, passive) | `src/verifier.c` | 31415 | `nonce`, `appraise` | `durations_verifier.txt` |
+| Verifier (new, passive) | `src/verifier.c` | 31415 | `nonce`, `appraise`, `certify_ak` | `durations_verifier.txt` |
 | Verifier (old, active — baseline) | `src/verifier_old.c` | n/a (client) | — (calls Attester's `attest`) | `timings_verifier.txt` |
 | Trust Manager | `src/trust_manager.c` | 6000 | `get_verifiers` | — |
 | Relying Party | `src/relying_party.c` | n/a (client) | — (calls Trust Manager + Attester + each Verifier) | `timings_RP_multi_verifiers.txt` |
@@ -64,6 +64,11 @@ defined only by struct order, no schema self-description on the wire.
 `start_verifiers.sh` spawns 5 `bin/verifier` instances on ports 5684–5693,
 registered in `verifiers_config.txt` as `id ip port` rows that
 `trust_manager.c` reads to resolve `get_verifiers` requests.
+
+The Verifier also writes `ak-provisioning-state.txt` (repo root, same
+directory as `verifiers_config.txt`) — the persisted record of every AK
+certificate issued via `/certify_ak`, shared across all five instances above
+since they share one CA. See "AK-provisioning state" in Part 3.
 
 **Relying Party internals:**
 - `create_attestation_request()` (~line 242) — generates the shared nonce
@@ -175,7 +180,7 @@ file is measured, so no static reference value can exist for it — it has to
 be *derived* by replaying the measurement log: starting from an all-zero PCR
 and re-applying every extend the TPM did.
 
-### Target design (agreed with supervisor)
+### Target design v1 (agreed with supervisor, informal — SUPERSEDED below)
 
 Trust model: **the Verifier trusts the RP.** The RP validates the Attester's
 evidence; the Verifier does not re-check it directly.
@@ -213,6 +218,96 @@ VERIFIER:
                                                 proxy code?)
     6. second pass over entries: file_hash whitelist/blacklist check
 ```
+
+**This design is superseded.** The supervisor later sent a formal write-up
+("DRA-TLS Privacy Protection Solution") that keeps the same trust model and
+general shape but is authoritative on exactly which party does which check —
+see "Target design v2" immediately below. The biggest correction: **the
+Verifier does not replay logs, does not recompute or check any PCR digest,
+and does not run the file-hash policy check at all.** All log/PCR content
+verification (items 3-6 in the "RP:" block above) is the RP App's own
+Step 2a gate, run once, before redaction — not something the Verifier
+repeats. `verifier.c` has been updated to match (see Part 3).
+
+### Target design v2 (supervisor's DRA-TLS spec — authoritative)
+
+Same trust model, precise per-party checklist (Attester = base station, RP
+App = privacy-cleansing node on the network-management side, Verifier =
+independently deployed):
+
+```
+ATTESTER (base station) -> RP App:
+    Evidence_a = Quote_a (quoted_data + AK signature), raw IMA log (log_a),
+    Attester's EK/AK certificate
+    (quoted_data = nonce + selected PCR combination digest)
+
+RP App, Step 2a -- Local Verification (on Evidence_a, using log_a):
+    1. validate Attester's EK/AK certificate
+    2. verify Quote_a signature
+    3. check nonce consistency
+    4. recompute template_hash of each log_a entry, compare
+    5. recompute PCR expansion from log_a's template hashes, compare
+       against Quote_a's PCR combination digest
+    6. check each entry's file hash against the baseline whitelist/
+       blacklist policy
+    -> pass: proceed to Step 2b.
+    -> fail: negative proof result back to the Attester.
+
+RP App, Step 2b -- Privacy Cleanup:
+    output_path = PATH_Clean(input_path)   (built-in path-mapping SDK)
+    rewrite every path in log_a -> log_r; recompute each entry's
+    template_hash from the rewritten data
+    extend a new PCR_r from the original PCR using log_r's template hashes
+    TPM2_Quote, signed by the RP App's own AK          -> Quote_r
+    Evidence_r = (Quote_r, log_r, EK_r/AK_r)
+
+RP App -> VERIFIER:
+    Evidence_r  = (Quote_r, log_r, EK_r/AK_r)
+    Evidence_a' = (Quote_a, EK_a/AK_a)     -- log_a is STRIPPED, never
+                                               forwarded to the Verifier
+
+VERIFIER, Step 3a -- New Evidence Verification (Evidence_r):
+    1. validate EK_r/AK_r certificate
+    2. verify Quote_r signature
+    3. check nonce consistency
+    -> pass: proceed to Step 3b.
+    -> fail: negative proof result to the RP App (network-management node).
+
+VERIFIER, Step 3b -- Original Evidence Verification (Evidence_a'):
+    1. validate EK_a/AK_a certificate
+    2. verify Quote_a signature
+    3. check nonce consistency
+    -> pass: positive proof result to the RP App.
+    -> fail: negative proof result to the RP App.
+```
+
+**No PCR or log content check exists anywhere in the Verifier's steps.**
+That is intentional, not an oversight: Steps 4/5/6 (template-hash recompute,
+PCR-expansion recompute, file-hash policy) only ever appear once, in the RP
+App's Step 2a, run against the *original* `log_a` before it ever gets
+redacted. The Verifier's entire job is cryptographic + identity: quote
+signatures, nonce freshness, and certificate validity, on *two* independent
+evidence bundles (`Evidence_r` and `Evidence_a'`) rather than one.
+
+**RP App-side path privacy cleanup policy monitoring** (separate mechanism
+from per-attestation appraisal, from the same supervisor doc): the Verifier
+releases the `PATH_Clean` SDK to the RP App, then periodically sends a test
+log `log_t`, receives back `log_t'`, and compares it against a locally
+computed expected result to confirm the RP App is still running the correct
+redaction SDK (without the Verifier ever seeing real path data, since the
+RP App can audit the SDK's own code to confirm it can't be used to infer
+real paths). **This matches the RP qualification handshake already built**
+(`charra_rp_qualification.c`, see below) almost exactly — same
+generate-synthetic-data / compare-against-golden-answer shape, same
+periodic-recheck timing decision already made independently in this repo.
+
+**TEE variant (documented, not built):** if the RP App has TEE capability,
+Step 2 runs inside the TEE. `Evidence_r` then additionally carries a
+signature from the path-mapping SDK's own key (proving the *correct,
+unmodified* SDK ran, from inside the TEE); `Evidence_a'` no longer needs to
+be sent at all, and the Verifier skips Step 3b entirely, checking only the
+SDK's signature instead. Not started — no TEE-specific code exists in this
+repo.
 
 #### Why software replay + TPM2_Quote (rather than extending a real PCR)
 
@@ -271,30 +366,56 @@ is known infrastructure the Verifier is meant to recognise.
 
 ### Open / undecided
 
-- **Reference PCRs for the RP.** Checking `Quote_R.pcrDigest` needs known-good
-  boot PCR values *for the RP machine* — a second reference file, distinct
-  from any Attester reference PCRs. Same `charra_check_pcr_digest_against_reference()`
-  machinery, pointed at the RP.
-- **Which PCRs the RP quotes** — its boot PCRs 0-7 presumably; must match
-  whatever the RP's reference file records.
-- **AK provisioning**: Privacy CA issuing an AK cert, vs
-  `TPM2_MakeCredential`/`ActivateCredential` challenge-response. Affects both
-  Attester and RP.
+- **Reference PCRs for the RP — RESOLVED as not needed.** Under the DRA-TLS
+  spec the Verifier never checks any PCR digest at all (RP's or Attester's),
+  so no second reference-PCR file for the RP is required. (RP's own Step 2a
+  PCR recompute compares against `Quote_a`'s own embedded digest directly,
+  not a static reference file either.)
+- **Which PCRs `Quote_r` covers** — still open, but now purely an RP-side
+  concern (Step 2b, not yet implemented by anyone): must be PCR10 alone to
+  match the single-PCR assumption baked into
+  `verify_log_matches_quote_r_pcr()` (see Part 3) — whoever writes RP's
+  `tpm2_quote()` call needs to select PCR10 only.
+- **AK provisioning — Verifier side RESOLVED, implemented as `/certify_ak`**:
+  the Verifier now acts as its own Privacy CA, issuing AK certificates via
+  `TPM2_MakeCredential`/`ActivateCredential` credential activation. See the
+  new "`/certify_ak` — Verifier-as-Privacy-CA AK issuance" entry in Part 3
+  for the full design and code inventory. **Still open on the Attester/RP
+  side**: neither party has a persistent AK yet, nor client-side logic to
+  call `/certify_ak` and attach the resulting certificate to `/appraise`
+  requests — see "Not yet built" below.
+- **AK-provisioning state — RESOLVED, implemented as `charra_ak_state.h`/`.c`**:
+  a persisted, on-disk record of every AK certificate `/certify_ak` has
+  issued. Closes the CRL-style local table this bullet used to ask for:
+  renewal now automatically revokes a requester's previous record, and the
+  lookup a future revocation check would need (by serial number) already
+  exists. See the new "AK-provisioning state" entry in Part 3. Expiry itself
+  is still checked for free by `mbedtls_x509_crt_verify()`; this module adds
+  the *before-expiry* revocation piece OCSP would otherwise be needed for —
+  without the Verifier ever making an outbound call, preserving its
+  passive-server invariant.
 - **Attester key is not currently an AK**: `charra_key_mgr.c:32` calls
   `tpm2_create_primary_key_rsa2048()`, a primary key on demand with no
   certification path. Needs replacing with a real persistent AK.
 - **Manufacturer root CA trust store** — needed by whoever validates EK
   certs. No config, file, or loading code exists.
-- **Whitelist/blacklist semantics**: deny-by-default (miss = fail) vs
-  allow-by-default (miss = inconclusive); hard failure vs flag on a miss;
-  reference hash list format/location.
+- **Whitelist/blacklist semantics — DECIDED and implemented**: deny-by-default
+  (a hash matching neither list is a hard failure, same as an explicit
+  blacklist match); format is `"0x" + 64 hex chars`, one per line, `#`
+  comments/blank lines skipped (`whitelist-hashes.txt`/
+  `blacklist-hashes.txt`, currently empty placeholders at the repo root).
+  Implemented as `verify_log_file_hashes_against_policy()` in
+  `charra_event_log.c` (see Part 3) — this is Step 2a item 6, RP-side, not
+  yet wired into `relying_party.c`.
 - **Blind spot in the PCR10-based integrity check**: replay only folds
   entries tagged for the target PCR, so entries for *other* PCRs could be
   added/removed/altered without affecting `X`. Accepted if the check is
   scoped to PCR10 integrity only; a hash over the whole redacted buffer would
-  close it.
+  close it. (Still relevant — this is now squarely RP's Step 2a/2b concern.)
 - **No certificate handling exists yet** — no X.509 parsing, no chain
-  validation, no EK/AK anywhere. All new.
+  validation, no EK/AK anywhere. All new, and per the spec this is now the
+  single largest remaining gap on *both* sides: `mbedx509` isn't even linked
+  in the Makefile yet (only `mbedcrypto` is).
 
 ### RP access/qualification check (from the deck, "RP Access Check Process")
 
@@ -419,6 +540,30 @@ add `(const uint8_t* replayed_pcr_value, uint32_t replayed_pcr_index)` to
 each candidate reference set before its digest is computed, `NULL` to
 preserve original behaviour.)*
 
+#### Log content verification — moved here from `verifier.c` to match the DRA-TLS spec
+
+Originally built as `static` helpers inside `verifier.c`'s
+`coap_appraise_handler`, under the (superseded) v1 design where the Verifier
+re-checked `log_r` itself. Once the supervisor's DRA-TLS spec confirmed this
+content verification is entirely the **RP App's Step 2a** job (run against
+`log_a`, before redaction — not the Verifier's job on `log_r`), these were
+relocated here and renamed to drop the `_r` suffix, since they're general
+log-verification logic, not specific to the redacted log:
+
+| Function | Signature | Purpose |
+|---|---|---|
+| `verify_log_entries_self_consistent` | `bool verify_log_entries_self_consistent(const uint8_t* log, uint32_t log_len)` | Step 2a item 4. Per entry: `template_digest == SHA256(template_data)`. Catches internal malformation (corruption, a redaction bug, a tampered field) — does **not** by itself prove a log's *content* is honest, only that it's self-consistent. |
+| `verify_log_matches_quote_r_pcr` | `bool verify_log_matches_quote_r_pcr(const uint8_t* log, uint32_t log_len, TPMS_ATTEST* attest_struct_rp)` | Step 2a item 5. Replays the log via `charra_replay_ima_log()` and checks the result against a quote's `pcrDigest` via `compute_and_check_PCR_digest()`. Name kept referencing `quote_r` from its original RP-context use; logic is generic to any single-PCR-selection quote. |
+| `verify_log_file_hashes_against_policy` | `bool verify_log_file_hashes_against_policy(const uint8_t* log, uint32_t log_len, const char* whitelist_path, const char* blacklist_path)` | Step 2a item 6. Default-deny: a file-content digest matching neither list fails, same as an explicit blacklist match. Paths are now function parameters (not globals), since this no longer lives next to `verifier.c`'s config. Reads the file-content digest straight out of the redacted `template_data`'s known layout (`"sha256:" + 32-byte digest + 32-byte path hash`, see `charra_sdk.h`). |
+| `compare_hashes` *(static)* | `int compare_hashes(const void* a, const void* b)` | `memcmp`-based `qsort`/`bsearch` comparator over raw 32-byte hash chunks. |
+| `load_hash_list` *(static)* | `CHARRA_RC load_hash_list(const char* path, uint8_t** hashes_out, uint32_t* count_out)` | Parses a `whitelist-hashes.txt`/`blacklist-hashes.txt`-shaped file (`"0x<64 hex>"` per line, `#`/blank skipped) into a `qsort()`-sorted flat array for `bsearch()`. |
+| `hash_list_contains` *(static)* | `bool hash_list_contains(const uint8_t* hashes, uint32_t count, const uint8_t* needle)` | `bsearch()` membership check against a `load_hash_list()`-sorted array. |
+
+**Status:** built, tested indirectly (via the same primitives
+`test_event_log.c`/`test_sdk.c` already cover), but **unwired** — nothing in
+`relying_party.c` calls any of these yet. That wiring (plus EK/AK
+validation) is the actual remaining RP-side work for Step 2a.
+
 ### New: `src/core/charra_synthetic_log.h` / `.c`
 
 Synthetic IMA log generator for the RP qualification check. Produces a
@@ -490,9 +635,17 @@ practice (Verifier generates synthetic data, then redacts it to compute the
 
 ### Modified: `Makefile`
 
-- `charra_event_log`, `charra_synthetic_log`, `charra_sdk` added to the
-  `core` object list.
-- `test`, `test_event_log`, `test_synthetic_log`, `test_sdk` targets added.
+- `core` object list grew across this fork's work:
+  `charra_event_log charra_synthetic_log charra_sdk charra_rp_qualification
+  charra_ak_state`.
+- `mbedx509` linked (alongside the pre-existing `mbedcrypto`) — needed once
+  X.509 parsing/signing landed for the `/certify_ak` work; previously only
+  raw crypto primitives were linked, no certificate handling at all.
+- Test targets added over time, one per new suite:
+  `test_event_log`, `test_synthetic_log`, `test_sdk`,
+  `test_rp_qualification`, `test_marshaling_bounds`, `test_x509_cert_chain`,
+  `test_certify_ak_marshaling`, `test_ak_state` — all folded into the `test`
+  target, which now runs all eight (175 assertions total).
 
 ### Verified so far
 
@@ -571,33 +724,34 @@ checks (`"TPM Quote signature is valid!"`, twice, once per check) is
 byte-identical to before the refactor, confirming it's purely a
 readability change with no behavior difference.
 
-### The real RP→Verifier message shape — interface built, split with RP-side work
+### The real RP→Verifier message shape — struct landed, marshal bodies + RP-side wiring still open
 
-Confirmed the architecture: the RP sends the Verifier one bundle containing
-`(Quote_a, EK_a/AK_a, Quote_r, log_r, EK_r/AK_r)` — the Attester's own
-quote + identity, the RP's own quote + identity, and the redacted log.
-Mapped against the Verifier-side RP-appraisal checklist:
+Confirmed the architecture, now aligned with the DRA-TLS spec's terminology:
+the RP sends the Verifier one bundle — `Evidence_r` (`Quote_r`, `log_r`,
+`EK_r`/`AK_r`) plus `Evidence_a'` (`Quote_a`, `EK_a`/`AK_a`, with `log_a`
+deliberately stripped, never forwarded). Mapped against the spec's
+Verifier-side checklist (Step 3a/3b — see "Target design v2" above):
 
-- `Quote_a` + `EK_a`/`AK_a` → proves the Attester is genuine and had some
-  real (unredacted) PCR state. `coap_appraise_handler` does the
-  quote-verification half of this; EK/AK chain validation is still wholly
-  unbuilt (see below).
-- `Quote_r` + `EK_r`/`AK_r` → proves the RP is genuine and is the one
-  vouching for `log_r`. Quote_r verification is now wired into
-  `coap_appraise_handler` (see below); EK/AK, same as Attester's, unbuilt.
-- `log_r` → what the per-line hash check, per-line PCR replay (items 4/5,
-  now implemented, see below), and file-hash policy check (item 6, still
-  not implemented) all operate on.
+- `Quote_a` + `EK_a`/`AK_a` (Step 3b) → signature + nonce checked in
+  `coap_appraise_handler`; EK/AK chain validation still wholly unbuilt (see
+  below). **No PCR check** — not part of the spec's Verifier steps.
+- `Quote_r` + `EK_r`/`AK_r` (Step 3a) → same: signature + nonce checked;
+  EK/AK unbuilt. **No PCR check, no log_r check** — same reasoning.
+- `log_r` → the Verifier does **not** inspect its content at all anymore.
+  The per-entry hash check, PCR replay, and file-hash policy check (spec
+  Step 2a items 4/5/6) are the RP App's job, run against `log_a` *before*
+  redaction — see the "Log content verification" entry in Part 3's
+  `charra_event_log` section above. `verifier.c` no longer contains any of
+  this logic; it was moved out and renamed this session.
 
 Important structural point worth remembering: because redaction
-deliberately changes `template_digest` per entry, replaying `log_r` will
-*never* reproduce the PCR value `Quote_a` attests to — that's intentional
-(see "Consequences of recomputing template_digest" earlier in this doc).
-So `Quote_r`'s PCR is not meant to be cross-checked against `Quote_a`'s PCR;
-`Quote_r` functions as the RP's own non-repudiation signature over "this is
-genuinely what I processed," the same trust mechanism the qualification
-handshake already uses on fabricated data, just now applied to real
-evidence.
+deliberately changes `template_digest` per entry, replaying `log_r` would
+never reproduce the PCR value `Quote_a` attests to even if the Verifier did
+check it — that's intentional (see "Consequences of recomputing
+template_digest" earlier in this doc). `Quote_r` functions as the RP's own
+non-repudiation signature over "this is genuinely what I processed," the
+same trust mechanism the qualification handshake already uses on fabricated
+data, just now applied to real evidence.
 
 **Why `Quote_r` needs its own public key + signature on the wire, not just
 identity metadata**: signature verification fundamentally requires three
@@ -608,107 +762,267 @@ bind that trust decision to a *specific* RP key). So `Quote_r`'s key has to
 travel in the message, exactly the same unauthenticated-at-the-transport-level
 situation `Quote_a`'s key is already in today.
 
-**What's actually built** (verifier-side wiring; the `msg_rp_appraisal_dto`
-struct itself and the marshal/unmarshal *bodies* are owned and pushed by
-the other intern working the RP side — division of labor, not a design
-gap. `verifier.c` below is written against the struct shape agreed on, but
-doesn't define it, so it won't even *compile* — not just fail to link —
-until that lands):
+**What's actually built:**
 
-- `msg_rp_appraisal_dto` (`charra_dto.h`, **not included in this work** —
-  added separately by the other intern) — the RP→Verifier struct.
-  Deliberately **not** a bigger `msg_attestation_response_dto`: that struct
-  is Attester's own Attester→RP message and stays untouched, since bolting
-  RP-only fields onto it would mean Attester's own marshal call sends
-  meaningless zeroed copies of fields that aren't its to define. Agreed
-  shape: six fixed-size fields (Quote_a's three, Quote_r's three —
-  mirroring shape exactly) plus `event_log`, whose *meaning* changes from
-  "Attester's raw log" to `log_r` ("RP's redacted log") without changing
-  its type.
+- `msg_rp_appraisal_dto` (`charra_dto.h`) — **landed** (pushed by the other
+  intern working the RP side, pulled in via rebase). Six fixed-size fields
+  (Quote_a's three, Quote_r's three — mirroring shape exactly) plus
+  `event_log`, whose *meaning* is `log_r` ("RP's redacted log"), not
+  Attester's raw log.
 - `charra_marshal_rp_appraisal()` / `charra_unmarshal_rp_appraisal()`
-  (`charra_marshaling.h`) — **signatures only**, no bodies yet. The
-  docstring on the unmarshal declaration spells out the bounds-check
-  requirement explicitly (`attestation_data_len <= sizeof(TPMS_ATTEST)`
-  etc., for all six fixed-size fields, all three new `_rp` ones included)
-  so whoever implements it doesn't reintroduce bug #1's class of overflow.
-- `verifier.c`'s `coap_appraise_handler` — now unmarshals via
-  `charra_unmarshal_rp_appraisal()`, re-validates bounds on all six
-  fixed-size fields independently of the unmarshaler (defense in depth,
-  same style as the rest of the function), and verifies `Quote_r` with the
-  *same* `verify_quote_signature_with_tpm()`/`verify_quote_signature_mbedtls()`
+  (`charra_marshaling.c`) — **implemented**, following
+  `charra_marshal_attestation_response()`'s exact internal/size/marshal/
+  unmarshal pattern. Originally the RP-side intern's assigned scope (still
+  their DTO to own going forward); written here only to unblock a real
+  end-to-end build+test run of the `/certify_ak` and Step 3a/3b work below —
+  see "Live end-to-end CoAP verification" in Part 3. All six fixed-size
+  fields are bounds-checked on unmarshal exactly as the header docstring
+  specifies (`attestation_data_len <= sizeof(TPMS_ATTEST)` etc.), so bug #1's
+  class of overflow does not reappear here.
+- `verifier.c`'s `coap_appraise_handler` — unmarshals via
+  `charra_unmarshal_rp_appraisal()`, re-validates bounds on the fixed-size
+  fields independently of the unmarshaler (defense in depth, same style as
+  the rest of the function), and verifies `Quote_r` with the *same*
+  `verify_quote_signature_with_tpm()`/`verify_quote_signature_mbedtls()`
   helpers used for `Quote_a` — separate `ESYS_TR sig_key_handle_rp` and
   `TPMT_TK_VERIFIED* validation_rp`, both flushed/freed in `cleanup:`. Both
   RP results (`attestation_result_signature_rp`,
   `attestation_result_signature_rp_mbedtls`) fold into the final
-  `attestation_result`. A **nonce** check against `Quote_r` is still
-  deliberately NOT added (open question: what nonce should Quote_r be
-  checked against — unresolved). The **PCR** check against `Quote_r` *is*
-  now implemented (items 4/5, below) — that question turned out to be
-  answerable independently of the nonce one.
+  `attestation_result`, alongside a nonce check on `Quote_r`
+  (`attestation_result_nonce_rp`, reusing `last_request.nonce` — same
+  session nonce as `Quote_a`'s check, closes a "replay just RP's half"
+  attack). That's the **entire** current `attestation_result`: two
+  signature checks + one nonce check, per quote, four booleans total for
+  Quote_a and two more for Quote_r's mbedTLS/TPM pair — no PCR term, no
+  log_r term. Matches Step 3a/3b exactly, modulo the still-missing EK/AK
+  check.
 
-**Items 4/5 — `log_r` checks against `Quote_r`, now implemented**, as two
-new `static` helpers in `verifier.c`, same "small local functions, not a
-shared module" style as the quote-verification helpers:
+**Build status**: `msg_rp_appraisal_dto` and its marshal/unmarshal bodies
+both now exist, so `bin/verifier` compiles *and* links cleanly.
+`attester`/`verifier_old`/`relying_party`/`trust_manager` are unaffected and
+build clean. All 175 assertions across the existing test suites pass (8
+suites: `test_event_log` 29, `test_synthetic_log` 13, `test_sdk` 20,
+`test_rp_qualification` 27, `test_marshaling_bounds` 10,
+`test_x509_cert_chain` 17, `test_certify_ak_marshaling` 20, `test_ak_state`
+39).
 
-- `verify_log_r_entries_self_consistent()` (item 4) — walks every entry in
-  `log_r` via the already-public `charra_event_log_parse_entry()` and
-  checks `template_digest == SHA256(template_data)`, both fields as they
-  currently sit in the *redacted* log. **Important limitation, worth being
-  precise about**: this does NOT prove RP redacted faithfully against real
-  Attester evidence — the Verifier never sees the pre-redaction log to
-  compare against (it never leaves RP, by design), so this check is
-  structurally incapable of catching a dishonest RP that fabricates a
-  self-consistent but entirely fake `log_r`. It only catches internal
-  malformation (corruption, a redaction bug, a partially-tampered entry).
-  The actual "does RP redact honestly" question is what the qualification
-  handshake (`charra_rp_qualification`) is for — a fundamentally different
-  mechanism, because that's the only place the Verifier ever knows the
-  "before" to compare against.
-- `verify_log_r_matches_quote_r_pcr()` (item 5) — replays `log_r` via the
-  already-tested `charra_replay_ima_log()` (PCR10, `CHARRA_IMA_PCR_INDEX`),
-  then reuses the existing `compute_and_check_PCR_digest()` (`crypto_util.c`)
-  to check the replayed value against `attest_struct_rp`'s `pcrDigest`.
-  Proves `Quote_r` is genuinely about *this* `log_r`, independent of
-  freshness (the still-open nonce question).
+Still genuinely unbuilt:
+- Everything in `relying_party.c` for the actual Step 2a/2b flow: EK/AK
+  validation of the Attester, calling the relocated
+  `verify_log_entries_self_consistent()`/`verify_log_matches_quote_r_pcr()`/
+  `verify_log_file_hashes_against_policy()` against `log_a`, redaction
+  (`charra_sdk_redact_ima_log()` exists and is tested but uncalled), `Quote_r`
+  generation (must select PCR10 only — see "Open / undecided" above), and
+  calling `charra_marshal_rp_appraisal()` to send `Evidence_r` +
+  `Evidence_a'` onward.
+- Wiring EK/AK certificate validation into `coap_appraise_handler`'s Step
+  3a/3b item 1 checks. The underlying primitives now exist and are tested
+  (`charra_crypto_verify_x509_cert_chain()`,
+  `charra_crypto_verify_cert_public_key_matches_tpm_public_key()` — see the
+  `/certify_ak` entry in Part 3) but `coap_appraise_handler` itself does not
+  call them yet; its two "Step 3a/3b item 1 — NOT YET IMPLEMENTED" comments
+  are still accurate. Also blocked on the Attester/RP side actually having a
+  certified AK to present (see `/certify_ak` entry).
 
-**Critical constraint this creates, coordination point with RP-side
-`Quote_r` generation**: `compute_and_check_PCR_digest()` doesn't inspect
-`Quote_r`'s actual PCR selection — it just hashes whatever `pcr_values`
-array the caller supplies and compares against `attest_struct_rp`'s
-`pcrDigest`. `verify_log_r_matches_quote_r_pcr()` passes a **single-element**
-array (just the replayed PCR10 value), which is only correct if `Quote_r`
-was produced over a PCR selection containing **PCR10 alone**. This is
-deliberately different from `Quote_a`: the Attester's quote covers
-*several* PCRs (the fixed `tpm_pcr_selection = {0,1,2,3,4,5,6,7,10}` global
-in `verifier.c`, boot PCRs plus IMA), matching `reference-pcrs.txt`'s
-multi-PCR reference sets. `Quote_r` is different in kind, not just in
-value: it's not attesting to a device boot state, it's RP's own
-non-repudiation signature over one specific thing (`log_r`), so a
-single-PCR selection is the right shape for it — but whoever implements
-RP's `tpm2_quote()` call needs to select PCR10 alone to match this
-assumption exactly, or the PCR check will incorrectly reject a genuinely
-valid `Quote_r`.
+### `/certify_ak` — Verifier-as-Privacy-CA AK issuance (built)
 
-**Build status**: this repo's own commits stop at the point where
-`verifier.c` was last verified compiling clean against a local (since
-reverted) copy of `msg_rp_appraisal_dto` — that struct isn't part of this
-work's commits, so as committed here, `verifier.c` won't even *compile*
-(unknown type `msg_rp_appraisal_dto`) until the other intern's struct
-lands, let alone link. `attester`/`verifier_old`/`relying_party`/`trust_manager`
-are unaffected (none of them touch the new functions) and build clean.
-All 94 assertions across the 5 existing test suites still pass; nothing
-there regressed. The two new `log_r` helpers are built on already-tested
-primitives (`charra_event_log_parse_entry`, `charra_replay_ima_log`,
-`compute_and_check_PCR_digest`, `hash_sha256`) and were confirmed compiling
-correctly against the struct before it was pulled out of this work's
-commits — but haven't been exercised live, and can't be until both the
-struct and the marshal/unmarshal bodies land.
+Implements the Verifier-side half of "AK provisioning" (see "Open /
+undecided" above): the Verifier merges the Privacy CA role into itself
+(acceptable here since this project's privacy goal is hiding file paths, not
+hiding device identity from the Verifier) and issues AK certificates via the
+standard TPM2 "Credential Activation" protocol
+(`TPM2_MakeCredential`/`TPM2_ActivateCredential`), rather than requiring a
+separate manual CA enrollment step.
 
-Still genuinely unbuilt: the marshal/unmarshal bodies themselves (RP-side
-work, in progress separately), anything in `attester.c` or the sending half
-of `relying_party.c` (RP producing a real `Quote_r` — which per the above
-must select PCR10 only), EK/AK for either party, and checklist item 6
-(file-hash policy) against `log_r`.
+**Why a separate endpoint, not folded into `/appraise`**: a first-ever
+request for an uncertified AK can't simultaneously carry a meaningful
+appraisal verdict, since `ActivateCredential` (which must complete on the
+*requester's own* TPM) hasn't happened yet at request time. Provisioning
+happens once (or on renewal, once renewal exists — see "Not yet built"); the
+resulting certificate must then be re-presented on every subsequent
+`/appraise` call, since the Verifier is stateless per-request with no
+session/identity tracking.
+
+**Why the credential is a symmetric key, not the certificate itself**:
+`TPM2_MakeCredential`'s `credential` field is capped near a digest size
+(~32-64 bytes) — too small for an X.509 certificate. Resolved by making the
+credential a fresh AES-256 key `K`; the actual signed AK certificate travels
+in the *same* response, AES-256-GCM-encrypted under `K`. The requester
+recovers `K` via `ActivateCredential` on their own TPM (proving co-residency
+of EK + the named AK, without the EK's private key ever leaving that TPM),
+then decrypts the certificate — one round trip, not two.
+
+Request/response shape — `msg_certify_ak_request_dto` /
+`msg_certify_ak_response_dto` (`charra_dto.h`), marshaled by
+`charra_marshal_certify_ak_request()` / `charra_unmarshal_certify_ak_request()`
+and the response-side equivalents (`charra_marshaling.c`), following this
+codebase's established internal/size/marshal/unmarshal pattern exactly.
+Tested in `tests/test_certify_ak_marshaling.c` (20 assertions: round-trips
+for both DTOs, oversized-field rejection, and — since `aes_gcm_nonce`/
+`aes_gcm_tag` are fixed-size, not just capped — wrong-size rejection too, not
+only oversized).
+
+**New crypto primitives** (`src/util/crypto_util.h`/`.c`):
+
+| Function | Purpose |
+|---|---|
+| `charra_crypto_seeded_rng_init`/`_free` | Reusable seeded `mbedtls_ctr_drbg_context`, needed by several of the below (key parsing, cert signing, AES-GCM nonce generation). |
+| `charra_crypto_verify_x509_cert_chain` | Single-root chain verification (leaf vs. one trusted root, no intermediate support — matches this project's two-tier PKI). Checks validity window as a side effect of `mbedtls_x509_crt_verify()`; no revocation check (see "Open/undecided"). |
+| `charra_crypto_verify_cert_public_key_matches_tpm_public_key` | Confirms a certificate's embedded RSA key is the same key as a `TPM2B_PUBLIC` — ties "this cert is valid" to "this cert vouches for the key that signed this specific quote." Not yet called from `coap_appraise_handler` (see "Not yet built"). |
+| `charra_crypto_sign_ak_certificate` | Verifier-as-CA: signs a fresh AK certificate (`mbedtls_x509write_crt`) for a given `TPM2B_PUBLIC`, issued under the Verifier's own CA key. |
+| `charra_crypto_build_ek_tpm2b_public_from_cert` | Reconstructs the full TCG-standard RSA-2048 EK `TPM2B_PUBLIC` (fixed "low range" template — type/nameAlg/objectAttributes/authPolicy/parameters, only the modulus varies) from an already-verified EK certificate. Needed because `Esys_MakeCredential` requires the EK's whole public area, not just its bare RSA key — a real Privacy CA is expected to know this fixed template. **Template values confirmed empirically** against a real `tpm2_createek -G rsa` output on this project's TPM simulator (`objectAttributes` raw `0x300b2`, authPolicy digest `837197...69aa`), not just recalled from the TCG spec. |
+| `charra_crypto_aes256gcm_encrypt`/`_decrypt` | Wraps/unwraps the AK certificate under the MakeCredential secret. Decrypt is authenticated (`mbedtls_gcm_auth_decrypt`, not the non-verifying `mbedtls_gcm_crypt_and_tag`) — a tampered ciphertext or wrong key returns `CHARRA_RC_VERIFICATION_FAILED` with no plaintext output, not a silently-wrong decrypt. |
+
+**Reusable by RP for its own Step 2a item 1** (validate Attester's EK/AK
+certificate): `charra_crypto_verify_x509_cert_chain()` and
+`charra_crypto_verify_cert_public_key_matches_tpm_public_key()` take no
+Verifier-specific state — no build change needed, since `crypto_util.o` is
+already in the shared `OBJECTS` list every binary links (`relying_party.c`
+already `#include`s `util/crypto_util.h`). RP would call the chain-verify
+function twice: once against `keys/manufacturer-root.crt` for the Attester's
+EK cert, once against `keys/verifier-ca.crt` for the Attester's AK cert
+(once the Attester has one via `/certify_ak`) — the same two trust anchors
+the Verifier itself uses for Step 3a/3b, just checked one hop earlier in the
+pipeline. The issuance-side functions
+(`charra_crypto_build_ek_tpm2b_public_from_cert`,
+`charra_crypto_sign_ak_certificate`, `charra_tpm_make_credential_for_ak`,
+AES-GCM *encrypt*) stay Verifier-only, since only the Verifier acts as
+Privacy CA in this design — RP only ever validates certs, never issues them.
+AES-GCM *decrypt* would be needed by whichever party requests certification
+(Attester, to unwrap its own `/certify_ak` response) — not RP's concern
+either way.
+
+**New TPM primitive** (`src/core/charra_key_mgr.h`/`.c`):
+`charra_tpm_make_credential_for_ak()` wraps `Esys_MakeCredential` — loads the
+requester's EK externally (same `Esys_LoadExternal` mechanism used elsewhere
+in this file for quote-verification keys), no TPM identity of the Verifier's
+own required (MakeCredential is pure public-key crypto against the supplied
+EK). Trusts the caller-supplied AK name unverified — a wrong name just makes
+the requester's own later `ActivateCredential` fail, nothing is lost.
+
+**Handler**: `coap_certify_ak_handler()` in `verifier.c`, registered as the
+new `certify_ak` CoAP resource alongside `appraise`/`nonce`. Flow: unmarshal
+request → verify EK cert chains to `keys/manufacturer-root.crt` (else
+`4.01 Unauthorized`) → reconstruct EK `TPM2B_PUBLIC` → sign a fresh AK cert
+(subject `"CN=CHARRA AK"`, issuer read from `keys/verifier-ca.crt`'s own
+subject name, fixed test-only validity window `2024`-`2034`) → generate a
+fresh AES-256 key, AES-GCM-encrypt the certificate under it → `Esys_MakeCredential`
+to wrap that key against the EK/AK pair → record the issuance in the
+AK-provisioning state (`charra_ak_state_renew()`, revoking any previous
+record for this EK — see "AK-provisioning state" below) → marshal + send the
+response. The state-recording step deliberately happens here, only once
+signing and `MakeCredential` have both already succeeded, not right after
+signing — so a later failure can never revoke a working certificate in favor
+of one the requester never actually receives.
+
+**Test-only PKI** (`keys/gen-ak-pki.sh`, see `keys/README.md`):
+`verifier-ca.{key,crt}` (Verifier's own Privacy CA, self-signed), a synthetic
+`manufacturer-root.{key,crt}` standing in for a real TPM manufacturer root
+(the dev-env's software TPM has none), and `rp-ek.{key,crt}`/
+`attester-ek.{key,crt}` synthetic EK certificates signed by that root —
+**plain openssl RSA keys, not yet the TPM simulator's own endorsement-hierarchy
+key** (tracked in "Not yet built"). Certs are DER (real wire format, avoids
+PEM NUL-termination requirements in mbedtls); keys stay PEM.
+
+**Verified**:
+- `tests/test_x509_cert_chain.c` (17 assertions) — chain verification
+  (valid/wrong-root/tampered), key-matching, and a full sign-then-verify
+  round trip against the real CA key.
+- `tests/test_certify_ak_marshaling.c` (20 assertions) — see above.
+- A temporary (not committed) direct-call smoke test proved the full
+  pipeline against the real TPM simulator: EK cert chain verify → EK
+  `TPM2B_PUBLIC` reconstruction → a genuine `Esys_MakeCredential` call that
+  succeeds with the reconstructed template → AK cert signing → AES-256-GCM
+  encrypt/decrypt round trip → tampered-tag rejection. 14/14 passed.
+- A temporary (not committed) end-to-end CoAP client, run against real
+  `bin/attester` + `bin/verifier` processes and the real TPM simulator,
+  confirmed: (a) a single-packet `/certify_ak` request with a bad EK cert
+  correctly returns `4.01 Unauthorized`; (b) a full block-wise (multi-UDP-
+  datagram) `/certify_ak` upload with a real EK certificate is received,
+  reassembled, and processed correctly by the handler; (c) sending a
+  complete, genuine `Evidence_r`/`Evidence_a'` bundle — Attester's real
+  `Quote_a` fetched from `bin/attester`, plus a real RP-side `Quote_r`
+  produced against the same TPM simulator (standing in for `relying_party.c`,
+  which doesn't build this yet) — through `/nonce` then `/appraise` produced
+  a genuine `ATTESTATION SUCCESSFUL` from `coap_appraise_handler`'s Step
+  3a-then-3b gated flow, confirming that logic end to end with real crypto
+  over a real network, not just via unit tests. (Intermittent response
+  delivery under back-to-back heavy requests was observed and traced to
+  TPM-simulator/transport load, not handler logic — the identical request
+  succeeds cleanly in isolation.)
+
+### AK-provisioning state (built) — persisted record of `/certify_ak` issuance
+
+`coap_certify_ak_handler()` was otherwise fully stateless: every call signed
+a fresh certificate with no memory of any previous one for that requester.
+`src/core/charra_ak_state.h`/`.c` gives it that memory, on disk, surviving
+both across separate `/certify_ak` calls and a server restart, and shared
+across the multiple `bin/verifier` processes `start_verifiers.sh` spawns
+(all of which share one CA, so a renewal or future revocation needs to be
+visible to all of them, not just whichever instance handled the request).
+
+**Renewal policy (decided)**: requesting a new AK certificate for an EK that
+already has one on file always issues a fresh certificate and revokes the
+previous record for that EK — a rolling renewal, not a reject or a
+serve-the-same-cert-again. **Revocation trigger (decided, scoped)**: nothing
+else in this pass sets a record `revoked` — no manual/administrative trigger
+exists yet, deliberately; this module is groundwork for one, not the
+mechanism itself.
+
+**Record** (`charra_ak_state_record`): `ek_fingerprint` (SHA-256 of the
+requester's EK certificate DER — the stable identity a renewal is matched
+against, not anything the requester merely claims), `ak_name`/`ak_name_len`,
+`serial` (the issued certificate's own 16-byte serial), `issued_at`,
+`expires_at` (parsed from the exact same `"YYYYMMDDHHMMSS"` string passed to
+`charra_crypto_sign_ak_certificate()`, not approximated as
+"issued_at + duration" — so it can never drift from what the certificate
+itself actually says), `revoked`.
+
+**Storage**: one line per record in `ak-provisioning-state.txt` (repo root,
+same convention as `verifiers_config.txt`/`reference-pcrs.txt`) —
+whitespace-separated hex/decimal fields, not meant to be hand-edited.
+`charra_ak_state_load()`/`_save()` do a full read/rewrite (small-scale, same
+approach as the whitelist/blacklist loaders); a missing file is zero
+records, not an error (a fresh deployment hasn't issued anything yet).
+
+**Concurrency**: `charra_ak_state_renew()` — the only function that ever
+writes, and the only one `coap_certify_ak_handler()` calls directly rather
+than `_load()`/`_save()` — takes an advisory `flock()` on a companion
+`.lock` file around its whole revoke-then-append cycle, safe across the
+multiple `bin/verifier` OS processes mentioned above. No in-process locking
+is needed; `verifier.c`'s own event loop is single-threaded.
+
+**A bug caught before it shipped**: `charra_ak_state_find_by_ek_fingerprint()`
+was first written as a forward linear scan returning the first match. After
+two or more renewals for the same EK, multiple records with that fingerprint
+exist (oldest first, since `_renew()` only ever appends) — a forward scan
+would keep finding the *oldest, already-revoked* one, meaning the second
+renewal would re-revoke an already-revoked record instead of the actually-
+active one, permanently orphaning it as "active" forever. Fixed to scan
+backward, always returning the most recently issued record for a
+fingerprint. Caught and fixed before writing tests, then specifically
+regression-tested (`test_renew_revokes_previous_and_survives_multiple_cycles`,
+four renewal cycles in a row, asserts exactly one record stays unrevoked and
+it's the last one issued).
+
+**Verified**:
+- `tests/test_ak_state.c` (39 assertions) — load/save round-trip, find-by-
+  fingerprint (including the most-recent-not-oldest case above), find-by-
+  serial, `is_valid` (revoked / expired / both), first issuance, the
+  four-cycle renewal regression test, bad-argument rejection.
+- A temporary (not committed) live check against a real running
+  `bin/verifier`: two genuine `/certify_ak` requests for the same real EK
+  certificate produced exactly the expected two-line state file — first
+  record `revoked=1`, second `revoked=0`, different serials (genuinely
+  different signed certificates, not a stub) — confirming
+  `coap_certify_ak_handler()` actually calls `charra_ak_state_renew()`
+  correctly, not just that the module works in isolation.
+
+**One existing function's signature changed to support this**:
+`charra_crypto_sign_ak_certificate()` gained a `uint8_t serial_out[16]`
+out-param — it previously generated a random serial internally and
+discarded it, leaving the caller with no way to know what it had just
+issued. Updated at both call sites (`verifier.c`, `tests/test_x509_cert_chain.c`).
 
 ### Live end-to-end verification (Docker, real TPM simulator)
 
@@ -749,27 +1063,51 @@ instead.
   qualification gate in at the end. (It also can't usefully be wired in
   today anyway -- nothing populates `rp_qualification_state` yet either,
   since the `/qualify` endpoints below don't exist.)
-- `charra_marshal_rp_appraisal()` / `charra_unmarshal_rp_appraisal()`
-  **bodies** (`charra_marshaling.c`) — signatures exist in
-  `charra_marshaling.h` (see above), `verifier.c` already calls the
-  unmarshal one, `bin/verifier` fails to link until this lands. Bounds-check
-  requirements are spelled out in the header docstring.
-- RP-side: EK/AK validation of the Attester, real redaction (would call
-  `charra_sdk_redact_ima_log()`), Quote_r generation — all per the Part 2
-  design, none of it started. This is also where `charra_marshal_rp_appraisal()`
-  would get called from (mirroring how `attester.c` calls
+- RP-side (Step 2a + 2b of the DRA-TLS spec), nothing started: EK/AK
+  validation of the Attester; calling the relocated
+  `verify_log_entries_self_consistent()` / `verify_log_matches_quote_r_pcr()`
+  / `verify_log_file_hashes_against_policy()` (now in `charra_event_log.c`,
+  see Part 3) against `log_a`; real redaction (`charra_sdk_redact_ima_log()`
+  exists and is tested, just uncalled); `Quote_r` generation (PCR10-only
+  selection — see "Open / undecided"); calling
+  `charra_marshal_rp_appraisal()` to send `Evidence_r` + `Evidence_a'`
+  onward (mirroring how `attester.c` calls
   `charra_marshal_attestation_response()` today).
-- Verifier-side, for the real-evidence-appraisal flow: EK/AK validation of
-  the RP, nonce check against `Quote_r` specifically (open design question
-  -- see above; the PCR half of this is now implemented, see above), and
-  file_hash whitelist/blacklist pass (blocked on top of being unbuilt: the
-  current redaction rule discards the file-content digest entirely, so
-  there is nothing to check against a policy post-redaction without
-  revisiting that rule first)
-- Real AK provisioning for both Attester and RP (currently: neither has one)
-- Manufacturer root CA trust store
+- Wiring EK/AK certificate validation into `coap_appraise_handler`'s Step
+  3a/3b item 1 — the primitives exist (`crypto_util.c`, see `/certify_ak`
+  entry in Part 3) but the handler doesn't call them yet. Quote signature
+  checks and nonce checks (Step 3a/3b items 2-3, both quotes) are already
+  done. No PCR or log check belongs here at all per the spec — see "Target
+  design v2" above; the PCR-vs-`reference-pcrs.txt` check that used to run
+  against `Quote_a` was deliberately removed from `verifier.c` this session
+  to match.
+- Real, persistent AK provisioning for both Attester and RP (currently:
+  neither has one — `charra_key_mgr.c` still creates a fresh primary key per
+  request) and client-side logic on both to call the now-built `/certify_ak`
+  endpoint and attach the resulting certificate to `/appraise` requests.
+- Real (non-synthetic) EK certificates and EK residency on the TPM
+  simulator's actual endorsement hierarchy — `keys/gen-ak-pki.sh`'s EK certs
+  are plain openssl keys today, not real TPM objects (see `/certify_ak`
+  entry in Part 3 for exactly what this blocks).
+- Wiring the AK-provisioning state module's `charra_ak_state_find_by_serial()`
+  into `coap_appraise_handler`'s still-unbuilt Step 3a/3b item 1 EK/AK check,
+  once that check itself exists — the lookup is ready, nothing calls it yet.
+- A manual/administrative revocation trigger — deliberately out of scope for
+  now (see "AK-provisioning state" entry in Part 3): the only thing that
+  currently revokes a record is a fresh renewal for the same EK.
 
 ### Bugs found during audit of `verifier.c` (2026 audit, not yet fixed)
+
+**Line numbers below are stale** — this session's DRA-TLS-alignment work
+(moving `log_r` checks to `charra_event_log.c`, removing the PCR-vs-reference
+check) shifted most of the file by hundreds of lines; treat line references
+as approximate, re-locate by function/variable name. **Bug 4 also appears
+already fixed**: `attestation_result_signature_mbedtls` is folded into the
+final `attestation_result` in current `coap_appraise_handler` code, contrary
+to what's described below — likely fixed incidentally during the
+"small `static` helpers" refactor (see above), not verified against the
+original finding. The other six bugs have not been re-checked against
+current code this session.
 
 Most severe first — full details/failure scenarios were reported via
 ReportFindings during the session that found them; summarized here for
