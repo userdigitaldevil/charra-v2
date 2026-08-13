@@ -1,6 +1,5 @@
 #include <arpa/inet.h>
 #include <coap3/coap.h>
-#include <errno.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -14,7 +13,6 @@
 #include "common/charra_log.h"
 #include "common/charra_macro.h"
 #include "core/charra_dto.h"
-#include "core/charra_event_log.h"
 #include "core/charra_helper.h"
 #include "core/charra_key_mgr.h"
 #include "core/charra_marshaling.h"
@@ -40,11 +38,6 @@ static CHARRA_RC attestation_rc = CHARRA_RC_ERROR;
 static uint8_t tpm_pcr_selection[TPM2_MAX_PCRS] = {0, 1, 2, 3, 4, 5, 6, 7, 10};
 static uint32_t tpm_pcr_selection_len = 9;
 char* reference_pcr_file_path = "reference-pcrs.txt";
-/* file-content-hash policy for log_r entries (checklist item 6) -- one
- * "0x<64 hex chars>" SHA-256 hash per line, '#' comments and blank lines
- * skipped, same style as reference-pcrs.txt's "0x..." hex convention */
-char* whitelist_hashes_file_path = "whitelist-hashes.txt";
-char* blacklist_hashes_file_path = "blacklist-hashes.txt";
 coap_log_t coap_log_level = LOG_INFO;
 // #define LOG_LEVEL_CBOR LOG_DEBUG
 charra_log_t charra_log_level = CHARRA_LOG_INFO;
@@ -350,286 +343,6 @@ static bool verify_quote_signature_mbedtls(TPM2B_PUBLIC* tpm2_public_key,
     return true;
 }
 
-/**
- * @brief Per-entry self-consistency check on log_r: does every entry's
- * template_digest equal SHA256(template_data), both fields as they
- * currently appear in the redacted log?
- *
- * This is NOT a check that redaction was done faithfully against real
- * Attester evidence -- that question needs the separate qualification
- * handshake (charra_rp_qualification.h), since the Verifier never sees the
- * pre-redaction log to compare against. This only catches a log_r that is
- * internally malformed: corruption in transit, a redaction bug, or a
- * tampered field that no longer matches its neighbor within the same
- * entry.
- */
-static bool verify_log_r_entries_self_consistent(
-        const uint8_t* log, uint32_t log_len) {
-    if (log_len == 0) {
-        /* an empty log has no entries to be inconsistent */
-        return true;
-    }
-
-    uint16_t digest_len = 0;
-    if (charra_event_log_ima_detect_digest_len(log, log_len, &digest_len) !=
-            CHARRA_RC_SUCCESS) {
-        charra_log_error(
-                "[" LOG_NAME "] log_r: could not detect digest size.");
-        return false;
-    }
-
-    uint32_t offset = 0;
-    uint32_t entry_num = 0;
-    while (offset < log_len) {
-        charra_event_log_entry entry = {0};
-        if (charra_event_log_parse_entry(
-                    log, log_len, &offset, digest_len, &entry) !=
-                CHARRA_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] log_r: entry %u failed to parse.",
-                    entry_num);
-            return false;
-        }
-
-        uint8_t computed_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
-        if (hash_sha256(entry.template_data_len, entry.template_data,
-                    computed_digest) != CHARRA_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] log_r: hashing entry %u failed.",
-                    entry_num);
-            return false;
-        }
-        if (entry.template_digest_len != TPM2_SHA256_DIGEST_SIZE ||
-                memcmp(computed_digest, entry.template_digest,
-                        TPM2_SHA256_DIGEST_SIZE) != 0) {
-            charra_log_error(
-                    "[" LOG_NAME "] log_r: entry %u's template_digest does "
-                    "NOT match SHA256(template_data).",
-                    entry_num);
-            return false;
-        }
-        entry_num++;
-    }
-    return true;
-}
-
-/**
- * @brief Replay log_r into a PCR value and check it against Quote_r's own
- * pcrDigest -- proves Quote_r genuinely quotes over this exact log_r,
- * independent of the (still open) question of what freshness/nonce Quote_r
- * should be checked against.
- */
-static bool verify_log_r_matches_quote_r_pcr(
-        const uint8_t* log, uint32_t log_len, TPMS_ATTEST* attest_struct_rp) {
-    uint8_t replayed_pcr[TPM2_SHA256_DIGEST_SIZE] = {0};
-    if (charra_replay_ima_log(log, log_len, CHARRA_IMA_PCR_INDEX,
-                replayed_pcr) != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] log_r: replay failed.");
-        return false;
-    }
-
-    uint8_t* pcr_values[1] = {replayed_pcr};
-    if (compute_and_check_PCR_digest(pcr_values, 1, attest_struct_rp) !=
-            CHARRA_RC_SUCCESS) {
-        charra_log_error(
-                "[" LOG_NAME "] log_r: replayed PCR does NOT match Quote_r's "
-                "pcrDigest.");
-        return false;
-    }
-    return true;
-}
-
-/** qsort()/bsearch() comparator treating each TPM2_SHA256_DIGEST_SIZE-byte
- * chunk as an opaque sort key. */
-static int compare_hashes(const void* a, const void* b) {
-    return memcmp(a, b, TPM2_SHA256_DIGEST_SIZE);
-}
-
-/**
- * @brief Load a file of hex-encoded SHA-256 hashes, one per line, into a
- * freshly malloc'd flat array, sorted for hash_list_contains() to
- * binary-search ('#' comments and blank lines skipped, optional "0x"
- * prefix -- same hex convention reference-pcrs.txt uses).
- *
- * @param[out] hashes_out malloc'd buffer of *count_out *
- * TPM2_SHA256_DIGEST_SIZE bytes, sorted ascending by raw byte value; caller
- * frees. NULL if the file has no valid entries.
- * @returns CHARRA_RC_SUCCESS, CHARRA_RC_ERROR if the file can't be opened
- * or allocation fails. An unparseable line is logged and skipped, not a
- * hard error -- consistent with rejecting individual bad entries rather
- * than the whole policy file.
- */
-static CHARRA_RC load_hash_list(
-        const char* path, uint8_t** hashes_out, uint32_t* count_out) {
-    *hashes_out = NULL;
-    *count_out = 0;
-
-    FILE* f = fopen(path, "r");
-    if (f == NULL) {
-        charra_log_error(
-                "[" LOG_NAME "] Could not open hash list file '%s'.", path);
-        return CHARRA_RC_ERROR;
-    }
-
-    uint8_t* hashes = NULL;
-    uint32_t count = 0;
-    uint32_t capacity = 0;
-    char line[256];
-    while (fgets(line, sizeof(line), f) != NULL) {
-        char* p = line;
-        while (*p == ' ' || *p == '\t') {
-            p++;
-        }
-        if (*p == '#' || *p == '\n' || *p == '\0') {
-            continue; /* comment or blank line */
-        }
-        if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
-            p += 2;
-        }
-
-        uint8_t digest[TPM2_SHA256_DIGEST_SIZE];
-        bool ok = true;
-        for (uint32_t i = 0; i < TPM2_SHA256_DIGEST_SIZE; i++) {
-            if (p[i * 2] == '\0' || p[i * 2 + 1] == '\0') {
-                ok = false;
-                break;
-            }
-            char byte_str[3] = {p[i * 2], p[i * 2 + 1], '\0'};
-            char* end = NULL;
-            errno = 0;
-            long val = strtol(byte_str, &end, 16);
-            if (end != byte_str + 2 || errno != 0) {
-                ok = false;
-                break;
-            }
-            digest[i] = (uint8_t)val;
-        }
-        if (!ok) {
-            charra_log_error("[" LOG_NAME "] Hash list file '%s': "
-                             "unparseable line, skipping.",
-                    path);
-            continue;
-        }
-
-        if (count == capacity) {
-            capacity += 32;
-            uint8_t* grown = realloc(
-                    hashes, (size_t)capacity * TPM2_SHA256_DIGEST_SIZE);
-            if (grown == NULL) {
-                free(hashes);
-                fclose(f);
-                return CHARRA_RC_ERROR;
-            }
-            hashes = grown;
-        }
-        memcpy(hashes + (size_t)count * TPM2_SHA256_DIGEST_SIZE, digest,
-                TPM2_SHA256_DIGEST_SIZE);
-        count++;
-    }
-    fclose(f);
-
-    qsort(hashes, count, TPM2_SHA256_DIGEST_SIZE, compare_hashes);
-
-    *hashes_out = hashes;
-    *count_out = count;
-    return CHARRA_RC_SUCCESS;
-}
-
-/**
- * @brief Binary search: is needle present in hashes? hashes must already be
- * sorted ascending by raw byte value -- true of every array load_hash_list()
- * returns, and the only producer of these arrays.
- */
-static bool hash_list_contains(
-        const uint8_t* hashes, uint32_t count, const uint8_t* needle) {
-    return bsearch(needle, hashes, count, TPM2_SHA256_DIGEST_SIZE,
-                   compare_hashes) != NULL;
-}
-
-/**
- * @brief Check every log_r entry's preserved file-content digest against
- * the whitelist/blacklist policy (checklist item 6, unblocked now that
- * charra_sdk_redact_ima_log() preserves that digest through redaction).
- *
- * Default-deny: a digest matching neither list fails, same as one that
- * explicitly matches the blacklist -- only explicitly-approved file hashes
- * pass. The file digest is read directly out of the redacted
- * template_data's known layout ("sha256:" + 32-byte digest + 32-byte path
- * hash, see charra_sdk.h) rather than via extract_file_digest_and_path(),
- * since that helper is charra_sdk.c-local; log_r's layout is fixed and
- * public by design, so re-deriving the same 7-byte offset here is fine.
- */
-static bool verify_log_r_file_hashes_against_policy(
-        const uint8_t* log, uint32_t log_len) {
-    uint8_t* whitelist = NULL;
-    uint32_t whitelist_count = 0;
-    if (load_hash_list(whitelist_hashes_file_path, &whitelist,
-                &whitelist_count) != CHARRA_RC_SUCCESS) {
-        return false;
-    }
-    uint8_t* blacklist = NULL;
-    uint32_t blacklist_count = 0;
-    if (load_hash_list(blacklist_hashes_file_path, &blacklist,
-                &blacklist_count) != CHARRA_RC_SUCCESS) {
-        free(whitelist);
-        return false;
-    }
-
-    bool all_ok = true;
-    if (log_len > 0) {
-        uint16_t digest_len = 0;
-        if (charra_event_log_ima_detect_digest_len(
-                    log, log_len, &digest_len) != CHARRA_RC_SUCCESS) {
-            all_ok = false;
-        } else {
-            static const char prefix[] = "sha256:";
-            uint32_t prefix_len = (uint32_t)(sizeof(prefix) - 1);
-            uint32_t offset = 0;
-            uint32_t entry_num = 0;
-            while (offset < log_len) {
-                charra_event_log_entry entry = {0};
-                if (charra_event_log_parse_entry(log, log_len, &offset,
-                            digest_len, &entry) != CHARRA_RC_SUCCESS) {
-                    all_ok = false;
-                    break;
-                }
-                if (entry.template_data_len <
-                        prefix_len + TPM2_SHA256_DIGEST_SIZE) {
-                    charra_log_error(
-                            "[" LOG_NAME "] log_r: entry %u too short to "
-                            "contain a file-content digest.",
-                            entry_num);
-                    all_ok = false;
-                    entry_num++;
-                    continue;
-                }
-                const uint8_t* file_digest = entry.template_data + prefix_len;
-
-                if (hash_list_contains(
-                            blacklist, blacklist_count, file_digest)) {
-                    charra_log_error(
-                            "[" LOG_NAME "] log_r: entry %u's file-content "
-                            "digest matches the BLACKLIST.",
-                            entry_num);
-                    all_ok = false;
-                } else if (!hash_list_contains(whitelist, whitelist_count,
-                                   file_digest)) {
-                    charra_log_error(
-                            "[" LOG_NAME "] log_r: entry %u's file-content "
-                            "digest is not on the whitelist.",
-                            entry_num);
-                    all_ok = false;
-                }
-                entry_num++;
-            }
-        }
-    }
-
-    free(whitelist);
-    free(blacklist);
-    return all_ok;
-}
-
 static void coap_appraise_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
                                 const struct coap_pdu_t* request,
@@ -839,8 +552,8 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
         goto cleanup;
     }
 
-    /* unmarshal Quote_r's attestation data -- needed to get at its
-     * pcrDigest for the log_r checks right below */
+    /* unmarshal Quote_r's attestation data -- needed for its nonce check
+     * further down */
     TPMS_ATTEST attest_struct_rp = {0};
     attestation_rc = charra_unmarshal_tpm2_quote(res.attestation_data_rp_len,
             res.attestation_data_rp, &attest_struct_rp);
@@ -850,41 +563,13 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
         goto cleanup;
     }
 
-    /* --- verify log_r: per-entry self-consistency + PCR replay --- */
-    clock_t start_verify_log_r, end_verify_log_r;
-    double verify_log_r_duration;
-    start_verify_log_r = clock();
-    charra_log_info("[" LOG_NAME "] Verifying log_r ...");
-    bool attestation_result_log_r_entries = verify_log_r_entries_self_consistent(
-            res.event_log, res.event_log_len);
-    if (attestation_result_log_r_entries) {
-        charra_log_info(
-                "[" LOG_NAME "]     => log_r entries are self-consistent!");
-    } else {
-        charra_log_error("[" LOG_NAME
-                         "]     => log_r entries are NOT self-consistent!");
-    }
-    bool attestation_result_log_r_pcr = verify_log_r_matches_quote_r_pcr(
-            res.event_log, res.event_log_len, &attest_struct_rp);
-    if (attestation_result_log_r_pcr) {
-        charra_log_info(
-                "[" LOG_NAME "]     => log_r matches Quote_r's pcrDigest!");
-    } else {
-        charra_log_error("[" LOG_NAME "]     => log_r does NOT match "
-                         "Quote_r's pcrDigest!");
-    }
-    bool attestation_result_log_r_policy = verify_log_r_file_hashes_against_policy(
-            res.event_log, res.event_log_len);
-    if (attestation_result_log_r_policy) {
-        charra_log_info("[" LOG_NAME "]     => log_r file-content digests "
-                        "pass whitelist/blacklist policy!");
-    } else {
-        charra_log_error("[" LOG_NAME "]     => log_r file-content digests "
-                         "do NOT pass whitelist/blacklist policy!");
-    }
-    end_verify_log_r = clock();
-    verify_log_r_duration = ((double) (end_verify_log_r - start_verify_log_r)) / CLOCKS_PER_SEC;
-    fprintf(p_file, "verify log_r took %f seconds to execute \n", verify_log_r_duration);
+    /* log_r content verification (self-consistency, PCR replay, file-hash
+     * policy) is NOT done here -- it is the RP App's own local-verification
+     * gate, run against the log it receives from the Attester, before
+     * cleansing. See verify_log_entries_self_consistent(),
+     * verify_log_matches_quote_r_pcr() and
+     * verify_log_file_hashes_against_policy() in charra_event_log.h. The
+     * Verifier only checks Quote_r's signature (above) and nonce (below). */
 
     /* unmarshal attestation data */
     TPMS_ATTEST attest_struct = {0};
@@ -955,7 +640,7 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
                         "] Actual PCR composite digest from TPM Quote is:");
         charra_print_hex(CHARRA_LOG_INFO,
                 attest_struct.attested.quote.pcrDigest.size,
-                attest_struct.attested.quote.pcrDigest.buffer,                         
+                attest_struct.attested.quote.pcrDigest.buffer,
                 "                        0x", "\n",
                 false);
 
@@ -977,14 +662,6 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     end_verifiy_pcr = clock();
     verify_pcr_duration = ((double) (end_verifiy_pcr - start_verifiy_pcr)) / CLOCKS_PER_SEC;
     fprintf(p_file, "verify pcr took %f seconds to execute \n", verify_pcr_duration);
-    /* The old placeholder "verify event log" block that used to sit here --
-     * gated on use_ima_event_log, hex-dumped res.event_log, always passed
-     * except on a missing log, and was explicitly marked
-     * "TODO(any): Implement real verification" -- is gone. It was a stand-in
-     * for exactly what verify_log_r_entries_self_consistent() and
-     * verify_log_r_matches_quote_r_pcr() now do for real, unconditionally,
-     * above. Keeping both would mean a fake check sitting next to the real
-     * one. */
 
     /* --- output result --- */
 
@@ -992,9 +669,6 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
                               attestation_result_signature_mbedtls &&
                               attestation_result_signature_rp &&
                               attestation_result_signature_rp_mbedtls &&
-                              attestation_result_log_r_entries &&
-                              attestation_result_log_r_pcr &&
-                              attestation_result_log_r_policy &&
                               attestation_result_nonce &&
                               attestation_result_nonce_rp &&
                               attestation_result_pcrs;
@@ -1021,7 +695,7 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
 
 
     fprintf(p_file, "appraising took %f seconds to execute \n", appraise_duration);
-    double total_measured = unmarshal_duration + init_duration + load_duration + verify_nonce_duration + verify_signature_duration + verify_pcr_duration + verify_log_r_duration;
+    double total_measured = unmarshal_duration + init_duration + load_duration + verify_nonce_duration + verify_signature_duration + verify_pcr_duration;
     fprintf(p_file, "total measured %f  \n", total_measured);
 
     if ((coap_r = coap_add_data_large_response(resource, session, request, response,

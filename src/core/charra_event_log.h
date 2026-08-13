@@ -21,6 +21,7 @@
 #define CHARRA_EVENT_LOG_H
 
 #include <inttypes.h>
+#include <stdbool.h>
 #include <stddef.h>
 
 #include <tss2/tss2_tpm2_types.h>
@@ -200,5 +201,53 @@ CHARRA_RC charra_event_log_ima_detect_digest_len(
  */
 CHARRA_RC charra_replay_ima_log(const uint8_t* log, uint32_t log_len,
         uint32_t target_pcr_index, uint8_t pcr_out[TPM2_SHA256_DIGEST_SIZE]);
+
+/* --- log content verification -------------------------------------------
+ *
+ * Per the RP-mediated attestation architecture, this content verification
+ * (self-consistency, PCR replay, file-hash policy) is the RP App's local
+ * verification gate, run against the log it received from the Attester --
+ * not the Verifier's job, which only checks quote signatures and nonces.
+ * Lives here since it is built directly on charra_event_log_parse_entry()
+ * and charra_replay_ima_log() above.
+ */
+
+/**
+ * @brief Per-entry self-consistency check: does every entry's
+ * template_digest equal SHA256(template_data), both fields as they
+ * currently appear in the log?
+ *
+ * This is NOT a check that redaction was done faithfully -- that question
+ * needs the separate qualification handshake (charra_rp_qualification.h).
+ * This only catches a log that is internally malformed: corruption in
+ * transit, a redaction bug, or a tampered field that no longer matches its
+ * neighbor within the same entry.
+ */
+bool verify_log_entries_self_consistent(const uint8_t* log, uint32_t log_len);
+
+/**
+ * @brief Replay a log into a PCR value and check it against Quote_r's own
+ * pcrDigest -- proves Quote_r genuinely quotes over this exact log.
+ */
+bool verify_log_matches_quote_r_pcr(
+        const uint8_t* log, uint32_t log_len, TPMS_ATTEST* attest_struct_rp);
+
+/**
+ * @brief Check every log entry's preserved file-content digest against a
+ * whitelist/blacklist policy.
+ *
+ * Default-deny: a digest matching neither list fails, same as one that
+ * explicitly matches the blacklist -- only explicitly-approved file hashes
+ * pass. The file digest is read directly out of the redacted
+ * template_data's known layout ("sha256:" + 32-byte digest + 32-byte path
+ * hash, see charra_sdk.h).
+ *
+ * @param[in] whitelist_path path to a file of "0x<64 hex>" SHA-256 hashes,
+ * one per line ('#' comments and blank lines skipped)
+ * @param[in] blacklist_path same format as whitelist_path
+ */
+bool verify_log_file_hashes_against_policy(const uint8_t* log,
+        uint32_t log_len, const char* whitelist_path,
+        const char* blacklist_path);
 
 #endif /* CHARRA_EVENT_LOG_H */
