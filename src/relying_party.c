@@ -26,7 +26,7 @@
 #include "util/tpm2_util.h"
 
 /* measurement config */
-#define NUM_RUNS 2
+#define NUM_RUNS 1
 
 /* logging and coap config */ 
 #define CHARRA_UNUSED __attribute__((unused))
@@ -69,6 +69,8 @@ static uint32_t tpm_pcr_selection_len = 9;
 uint16_t attester_response_timeout = 6000;  // timeout when waiting for the attester's answer (evidence) in seconds
 bool use_ima_event_log = false;
 char* ima_event_log_path = "/sys/kernel/security/ima/binary_runtime_measurements";
+bool use_ima_test_log = true;
+char* use_ima_test_log_path = "ima_test_logs.txt";  // path to the IMA test log file for testing purposes
 char attester_host[16] = "127.0.0.1";      // 15 characters for IPv4 plus \0
 unsigned int attester_port = 5683;         // default port
 
@@ -286,9 +288,9 @@ static CHARRA_RC create_attestation_request(msg_attestation_request_dto* attesta
                     .pcrs = {0}  // must be memcpy'd, see below
             }},
             .event_log_path_len =
-                    (use_ima_event_log) ? strlen(ima_event_log_path) : 0,
+                    (use_ima_event_log || use_ima_test_log) ? ((use_ima_event_log) ? strlen(ima_event_log_path) : strlen(ima_test_log_path)) : 0,
             .event_log_path =
-                    (use_ima_event_log) ? (uint8_t*)ima_event_log_path : NULL,
+                    (use_ima_event_log || use_ima_test_log) ? ((use_ima_event_log) ? (uint8_t*)ima_event_log_path : (uint8_t*)ima_test_log_path) : NULL,
     };
     memcpy(req.sig_key_id, TPM_SIG_KEY_ID, TPM_SIG_KEY_ID_LEN);
     memcpy(req.nonce, nonce, nonce_len);
