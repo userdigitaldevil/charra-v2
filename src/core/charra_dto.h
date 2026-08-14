@@ -262,4 +262,41 @@ typedef struct {
     uint8_t* ak_certificate;
 } msg_certify_ak_response_dto;
 
+/**
+ * /qualify response: Verifier -> RP, the raw fabricated log to redact --
+ * see charra_rp_qualification.h for the full handshake this and
+ * msg_qualify_submit_request_dto below implement the wire side of.
+ */
+typedef struct {
+    uint32_t challenge_log_len;
+    uint8_t* challenge_log;
+} msg_qualify_response_dto;
+
+/**
+ * /qualify/submit request: RP -> Verifier, proof that this RP's own
+ * redaction pipeline was run against the /qualify challenge.
+ *
+ * submitted_redacted_log is the RP's own redaction of that challenge log;
+ * submitted_pcr_digest is the PCR composite digest a replay of it produces.
+ * rp_signature is an RSA-PSS/SHA-256 signature over submitted_pcr_digest,
+ * produced by RP's TPM-resident AK (charra_rp_key_mgr_sign()) -- proving
+ * *this* already-certified RP produced the submission, not an
+ * unauthenticated third party relaying bytes. rp_public_key/
+ * ak_certificate_rp are the same DER-encoded key + AK certificate
+ * msg_rp_evidence_dto carries, checked the same way (chain to the
+ * Verifier's CA, then confirm the certified key matches rp_public_key).
+ */
+typedef struct {
+    uint32_t submitted_redacted_log_len;
+    uint8_t* submitted_redacted_log;
+    uint8_t submitted_pcr_digest[TPM2_SHA256_DIGEST_SIZE];
+
+    uint32_t rp_signature_len;
+    uint8_t rp_signature[CHARRA_RSA_SIGNATURE_LEN];
+    uint32_t rp_public_key_len;
+    uint8_t rp_public_key[CHARRA_RSA_PUB_KEY_DER_MAX];
+    uint32_t ak_certificate_rp_len;
+    uint8_t* ak_certificate_rp;
+} msg_qualify_submit_request_dto;
+
 #endif /* CHARRA_DTO_H */

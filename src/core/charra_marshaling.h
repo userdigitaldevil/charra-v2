@@ -189,4 +189,42 @@ CHARRA_RC charra_unmarshal_certify_ak_response(
         const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
         msg_certify_ak_response_dto* certify_ak_response);
 
+/**
+ * @brief Marshals a /qualify response DTO (see msg_qualify_response_dto in
+ * charra_dto.h).
+ */
+CHARRA_RC charra_marshal_qualify_response(
+        const msg_qualify_response_dto* qualify_response,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data);
+
+/**
+ * @brief Unmarshals a /qualify response DTO. challenge_log has no fixed
+ * upper bound (a fabricated log's size is a Verifier policy choice, not a
+ * protocol constant), so it is heap-allocated, same as event_log elsewhere
+ * in this file.
+ */
+CHARRA_RC charra_unmarshal_qualify_response(
+        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
+        msg_qualify_response_dto* qualify_response);
+
+/**
+ * @brief Marshals a /qualify/submit request DTO (see
+ * msg_qualify_submit_request_dto in charra_dto.h).
+ */
+CHARRA_RC charra_marshal_qualify_submit_request(
+        const msg_qualify_submit_request_dto* qualify_submit_request,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data);
+
+/**
+ * @brief Unmarshals a /qualify/submit request DTO. Bounds-checks
+ * rp_signature_len/rp_public_key_len against their fixed-size destination
+ * arrays and submitted_pcr_digest for its exact expected size, same
+ * defense-in-depth style as charra_unmarshal_rp_evidence(). submitted_
+ * redacted_log/ak_certificate_rp have no fixed upper bound, so they are
+ * heap-allocated, same as ek_certificate elsewhere in this file.
+ */
+CHARRA_RC charra_unmarshal_qualify_submit_request(
+        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
+        msg_qualify_submit_request_dto* qualify_submit_request);
+
 #endif /* MARSHALING_UTIL_H */

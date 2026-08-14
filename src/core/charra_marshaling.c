@@ -1380,3 +1380,350 @@ cbor_parse_error:
 
     return CHARRA_RC_MARSHALING_ERROR;
 }
+
+/* --- /qualify response --------------------------------------------------- */
+
+static CHARRA_RC charra_marshal_qualify_response_internal(
+        const msg_qualify_response_dto* qualify_response, UsefulBuf buf_in,
+        UsefulBufC* buf_out) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    assert(qualify_response != NULL);
+    if (qualify_response->challenge_log_len != 0) {
+        assert(qualify_response->challenge_log != NULL);
+    }
+
+    QCBOREncodeContext ec = {0};
+    QCBOREncode_Init(&ec, buf_in);
+
+    QCBOREncode_OpenArray(&ec);
+
+    UsefulBufC challenge_log = {.ptr = qualify_response->challenge_log,
+            .len = qualify_response->challenge_log_len};
+    QCBOREncode_AddBytes(&ec, challenge_log);
+
+    QCBOREncode_CloseArray(&ec);
+
+    if (QCBOREncode_Finish(&ec, buf_out) == QCBOR_SUCCESS) {
+        return CHARRA_RC_SUCCESS;
+    } else {
+        return CHARRA_RC_MARSHALING_ERROR;
+    }
+}
+
+static CHARRA_RC charra_marshal_qualify_response_size(
+        const msg_qualify_response_dto* qualify_response,
+        size_t* marshaled_data_len) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
+
+    UsefulBuf buf_in = {.len = SIZE_MAX, .ptr = NULL};
+    UsefulBufC buf_out = {0};
+
+    if ((charra_r = charra_marshal_qualify_response_internal(
+                 qualify_response, buf_in, &buf_out)) == CHARRA_RC_SUCCESS) {
+        *marshaled_data_len = buf_out.len;
+    }
+
+    return charra_r;
+}
+
+CHARRA_RC charra_marshal_qualify_response(
+        const msg_qualify_response_dto* qualify_response,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
+
+    assert(qualify_response != NULL);
+    if (qualify_response->challenge_log_len != 0) {
+        assert(qualify_response->challenge_log != NULL);
+    }
+
+    UsefulBuf buf_in = {.len = 0, .ptr = NULL};
+    if ((charra_r = charra_marshal_qualify_response_size(
+                 qualify_response, &(buf_in.len))) != CHARRA_RC_SUCCESS) {
+        charra_log_error("Could not compute size of marshaled data.");
+        return charra_r;
+    }
+
+    if ((buf_in.ptr = malloc(buf_in.len)) == NULL) {
+        charra_log_error("Allocating %zu bytes of memory failed.", buf_in.len);
+        return CHARRA_RC_MARSHALING_ERROR;
+    }
+
+    UsefulBufC buf_out = {.len = 0, .ptr = NULL};
+    if ((charra_r = charra_marshal_qualify_response_internal(
+                 qualify_response, buf_in, &buf_out)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("Could not marshal data.");
+        return charra_r;
+    }
+
+    *marshaled_data_len = buf_out.len;
+    *marshaled_data = (uint8_t*)buf_out.ptr;
+
+    return charra_r;
+}
+
+CHARRA_RC charra_unmarshal_qualify_response(
+        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
+        msg_qualify_response_dto* qualify_response) {
+    msg_qualify_response_dto res = {0};
+    /* declared/NULLed here so 'goto cbor_parse_error' can safely
+     * charra_free_if_not_null() it, same convention as ek_certificate
+     * above */
+    uint8_t* challenge_log = NULL;
+
+    QCBORError cborerr = QCBOR_SUCCESS;
+    UsefulBufC marshaled_data_buf = {marshaled_data, marshaled_data_len};
+    QCBORDecodeContext dc = {0};
+    QCBORItem item = {0};
+
+    QCBORDecode_Init(&dc, marshaled_data_buf, QCBOR_DECODE_MODE_NORMAL);
+
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_ARRAY)))
+        goto cbor_parse_error;
+
+    /* parse "challenge-log" (bytes) -- no fixed upper bound, heap-alloc */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.challenge_log_len = item.val.string.len;
+    challenge_log = (uint8_t*)malloc(res.challenge_log_len);
+    if (challenge_log == NULL) {
+        goto cbor_parse_error;
+    }
+    res.challenge_log = challenge_log;
+    memcpy(res.challenge_log, item.val.string.ptr, res.challenge_log_len);
+
+    if ((cborerr = QCBORDecode_Finish(&dc))) {
+        charra_log_error("CBOR parser: expected end of input, but could not "
+                         "find it. Continuing.");
+        goto cbor_parse_error;
+    }
+
+    *qualify_response = res;
+
+    return CHARRA_RC_SUCCESS;
+
+cbor_parse_error:
+    charra_log_error("CBOR parser: %s", qcbor_err_to_str(cborerr));
+    charra_log_info("CBOR parser: skipping parsing.");
+
+    charra_free_if_not_null(challenge_log);
+
+    return CHARRA_RC_MARSHALING_ERROR;
+}
+
+/* --- /qualify/submit request ---------------------------------------------
+ */
+
+static CHARRA_RC charra_marshal_qualify_submit_request_internal(
+        const msg_qualify_submit_request_dto* qualify_submit_request,
+        UsefulBuf buf_in, UsefulBufC* buf_out) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    assert(qualify_submit_request != NULL);
+    if (qualify_submit_request->submitted_redacted_log_len != 0) {
+        assert(qualify_submit_request->submitted_redacted_log != NULL);
+    }
+    if (qualify_submit_request->ak_certificate_rp_len != 0) {
+        assert(qualify_submit_request->ak_certificate_rp != NULL);
+    }
+
+    QCBOREncodeContext ec = {0};
+    QCBOREncode_Init(&ec, buf_in);
+
+    QCBOREncode_OpenArray(&ec);
+
+    UsefulBufC submitted_redacted_log = {
+            .ptr = qualify_submit_request->submitted_redacted_log,
+            .len = qualify_submit_request->submitted_redacted_log_len};
+    QCBOREncode_AddBytes(&ec, submitted_redacted_log);
+
+    UsefulBufC submitted_pcr_digest = {
+            .ptr = qualify_submit_request->submitted_pcr_digest,
+            .len = sizeof(qualify_submit_request->submitted_pcr_digest)};
+    QCBOREncode_AddBytes(&ec, submitted_pcr_digest);
+
+    UsefulBufC rp_signature = {.ptr = qualify_submit_request->rp_signature,
+            .len = qualify_submit_request->rp_signature_len};
+    QCBOREncode_AddBytes(&ec, rp_signature);
+
+    UsefulBufC rp_public_key = {.ptr = qualify_submit_request->rp_public_key,
+            .len = qualify_submit_request->rp_public_key_len};
+    QCBOREncode_AddBytes(&ec, rp_public_key);
+
+    UsefulBufC ak_certificate_rp = {
+            .ptr = qualify_submit_request->ak_certificate_rp,
+            .len = qualify_submit_request->ak_certificate_rp_len};
+    QCBOREncode_AddBytes(&ec, ak_certificate_rp);
+
+    QCBOREncode_CloseArray(&ec);
+
+    if (QCBOREncode_Finish(&ec, buf_out) == QCBOR_SUCCESS) {
+        return CHARRA_RC_SUCCESS;
+    } else {
+        return CHARRA_RC_MARSHALING_ERROR;
+    }
+}
+
+static CHARRA_RC charra_marshal_qualify_submit_request_size(
+        const msg_qualify_submit_request_dto* qualify_submit_request,
+        size_t* marshaled_data_len) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
+
+    UsefulBuf buf_in = {.len = SIZE_MAX, .ptr = NULL};
+    UsefulBufC buf_out = {0};
+
+    if ((charra_r = charra_marshal_qualify_submit_request_internal(
+                 qualify_submit_request, buf_in, &buf_out)) ==
+            CHARRA_RC_SUCCESS) {
+        *marshaled_data_len = buf_out.len;
+    }
+
+    return charra_r;
+}
+
+CHARRA_RC charra_marshal_qualify_submit_request(
+        const msg_qualify_submit_request_dto* qualify_submit_request,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
+
+    assert(qualify_submit_request != NULL);
+    if (qualify_submit_request->submitted_redacted_log_len != 0) {
+        assert(qualify_submit_request->submitted_redacted_log != NULL);
+    }
+    if (qualify_submit_request->ak_certificate_rp_len != 0) {
+        assert(qualify_submit_request->ak_certificate_rp != NULL);
+    }
+
+    UsefulBuf buf_in = {.len = 0, .ptr = NULL};
+    if ((charra_r = charra_marshal_qualify_submit_request_size(
+                 qualify_submit_request, &(buf_in.len))) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("Could not compute size of marshaled data.");
+        return charra_r;
+    }
+
+    if ((buf_in.ptr = malloc(buf_in.len)) == NULL) {
+        charra_log_error("Allocating %zu bytes of memory failed.", buf_in.len);
+        return CHARRA_RC_MARSHALING_ERROR;
+    }
+
+    UsefulBufC buf_out = {.len = 0, .ptr = NULL};
+    if ((charra_r = charra_marshal_qualify_submit_request_internal(
+                 qualify_submit_request, buf_in, &buf_out)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("Could not marshal data.");
+        return charra_r;
+    }
+
+    *marshaled_data_len = buf_out.len;
+    *marshaled_data = (uint8_t*)buf_out.ptr;
+
+    return charra_r;
+}
+
+CHARRA_RC charra_unmarshal_qualify_submit_request(
+        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
+        msg_qualify_submit_request_dto* qualify_submit_request) {
+    msg_qualify_submit_request_dto res = {0};
+    /* declared/NULLed here so every 'goto cbor_parse_error' can safely
+     * charra_free_if_not_null() them, same convention as ek_certificate/
+     * ak_certificate above */
+    uint8_t* submitted_redacted_log = NULL;
+    uint8_t* ak_certificate_rp = NULL;
+
+    QCBORError cborerr = QCBOR_SUCCESS;
+    UsefulBufC marshaled_data_buf = {marshaled_data, marshaled_data_len};
+    QCBORDecodeContext dc = {0};
+    QCBORItem item = {0};
+
+    QCBORDecode_Init(&dc, marshaled_data_buf, QCBOR_DECODE_MODE_NORMAL);
+
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_ARRAY)))
+        goto cbor_parse_error;
+
+    /* parse "submitted-redacted-log" (bytes) -- no fixed upper bound,
+     * heap-alloc */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.submitted_redacted_log_len = item.val.string.len;
+    submitted_redacted_log = (uint8_t*)malloc(res.submitted_redacted_log_len);
+    if (submitted_redacted_log == NULL) {
+        goto cbor_parse_error;
+    }
+    res.submitted_redacted_log = submitted_redacted_log;
+    memcpy(res.submitted_redacted_log, item.val.string.ptr,
+            res.submitted_redacted_log_len);
+
+    /* parse "submitted-pcr-digest" (bytes) -- fixed size, checked exactly */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    if (item.val.string.len != sizeof(res.submitted_pcr_digest)) {
+        charra_log_error(
+                "CBOR parser: submitted PCR digest has the wrong size.");
+        goto cbor_parse_error;
+    }
+    memcpy(&(res.submitted_pcr_digest), item.val.string.ptr,
+            sizeof(res.submitted_pcr_digest));
+
+    /* parse "rp-signature" (bytes) */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.rp_signature_len = item.val.string.len;
+    if (res.rp_signature_len > sizeof(res.rp_signature)) {
+        charra_log_error(
+                "CBOR parser: RP signature exceeds maximum allowed size.");
+        goto cbor_parse_error;
+    }
+    memcpy(&(res.rp_signature), item.val.string.ptr, res.rp_signature_len);
+
+    /* parse "rp-public-key" (bytes) */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.rp_public_key_len = item.val.string.len;
+    if (res.rp_public_key_len > sizeof(res.rp_public_key)) {
+        charra_log_error(
+                "CBOR parser: RP public key exceeds maximum allowed size.");
+        goto cbor_parse_error;
+    }
+    memcpy(&(res.rp_public_key), item.val.string.ptr, res.rp_public_key_len);
+
+    /* parse "ak-certificate-rp" (bytes) -- no fixed upper bound,
+     * heap-alloc */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.ak_certificate_rp_len = item.val.string.len;
+    ak_certificate_rp = (uint8_t*)malloc(res.ak_certificate_rp_len);
+    if (ak_certificate_rp == NULL) {
+        goto cbor_parse_error;
+    }
+    res.ak_certificate_rp = ak_certificate_rp;
+    memcpy(res.ak_certificate_rp, item.val.string.ptr,
+            res.ak_certificate_rp_len);
+
+    if ((cborerr = QCBORDecode_Finish(&dc))) {
+        charra_log_error("CBOR parser: expected end of input, but could not "
+                         "find it. Continuing.");
+        goto cbor_parse_error;
+    }
+
+    *qualify_submit_request = res;
+
+    return CHARRA_RC_SUCCESS;
+
+cbor_parse_error:
+    charra_log_error("CBOR parser: %s", qcbor_err_to_str(cborerr));
+    charra_log_info("CBOR parser: skipping parsing.");
+
+    charra_free_if_not_null(submitted_redacted_log);
+    charra_free_if_not_null(ak_certificate_rp);
+
+    return CHARRA_RC_MARSHALING_ERROR;
+}
