@@ -712,6 +712,12 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
      * with sibling Verifier instances -- see that variable's comment for
      * why. */
     bool attestation_result_qualified = false;
+    /* Distinguishes "never qualified" from "qualified once, but that record
+     * has since expired" -- both leave attestation_result_qualified false,
+     * but the RP's correct next step is the same either way (redo /qualify),
+     * and telling it which case this is (see the response message chain
+     * below) saves it from having to guess. */
+    bool qualification_record_found = false;
     if (attestation_result_ekak_rp) {
         charra_qualification_state_record* qual_records = NULL;
         uint32_t qual_count = 0;
@@ -721,6 +727,7 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
             if (charra_qualification_state_find_by_ek_fingerprint(
                         qual_records, qual_count, ek_fingerprint_rp,
                         &qual_index)) {
+                qualification_record_found = true;
                 attestation_result_qualified =
                         charra_qualification_state_is_valid(
                                 &qual_records[qual_index], time(NULL));
@@ -733,11 +740,14 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
         if (attestation_result_qualified) {
             charra_log_info(
                     "[" LOG_NAME "]     => RP is currently qualified!");
+        } else if (qualification_record_found) {
+            charra_log_error(
+                    "[" LOG_NAME "]     => RP's qualification has EXPIRED!");
         } else {
             charra_log_error(
                     "[" LOG_NAME "]     => RP is NOT currently qualified "
                     "(no passing /qualify/submit on record for this "
-                    "identity, or it expired)!");
+                    "identity)!");
         }
     }
 
@@ -1000,11 +1010,20 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
          * state.h). Deliberately 4.03 Forbidden, not 4.01 -- RP's retry
          * logic treats 4.01 as "go redo /certify_ak", which would be the
          * wrong reaction here; the fix is redoing /qualify, not AK
-         * reprovisioning. */
+         * reprovisioning. Same response code either way (both mean "not
+         * currently qualified, go fix that"), but the message text tells
+         * RP which case it is -- "expired" specifically means it WAS
+         * qualified and should just redo /qualify, not that something is
+         * fundamentally wrong with its identity. */
         attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
-        message = "RP not qualified!       \0";
         response_code = COAP_RESPONSE_CODE_FORBIDDEN;
-        charra_log_info("[" LOG_NAME "] |     RP NOT QUALIFIED       |");
+        if (qualification_record_found) {
+            message = "RP qualification expired!\0";
+            charra_log_info("[" LOG_NAME "] |  RP QUALIFICATION EXPIRED  |");
+        } else {
+            message = "RP not qualified!\0";
+            charra_log_info("[" LOG_NAME "] |     RP NOT QUALIFIED       |");
+        }
     } else {
         attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
         message = "Attestation failed!    \0";

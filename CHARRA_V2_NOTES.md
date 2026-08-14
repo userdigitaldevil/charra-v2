@@ -1361,7 +1361,8 @@ every Verifier, even ones it already holds a perfectly valid qualification
 with. The Verifier-side fix here means those redundant round trips are at
 least redundant *safely* now (correctly re-confirming the same identity)
 rather than papering over a shared, unbound global — but the wasted work
-itself is still there.
+itself is still there. **Fixed in a later entry below** ("RP now caches its
+own qualification client-side...").
 
 ### RP AK certification is now independent per-Verifier (mirrors the qualification fix above)
 
@@ -1661,3 +1662,105 @@ qualification handshake's salted-redaction incompatibility noted here in an
 earlier revision of this doc was fixed in a later session — see "RP
 qualification handshake was structurally broken by salted redaction ...
 FIXED" above.)
+
+### RP now caches its own qualification client-side, and Verifier tells it *why* /appraise was rejected (expired vs. never qualified)
+
+Prompted by a question worth recording verbatim, since the answer isn't
+obvious: *if the RP process is short-lived (the benchmark harness runs a
+fixed loop and exits), is `CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS`
+(24h) actually doing anything?* Answer: not by itself. The RP already had
+the *identical* problem solved for its AK certificate — cached to disk
+(`rp-ak-certificate-<port>.der`), reused across both attestation cycles
+*and* separate process runs — but had no equivalent for qualification, so
+it re-ran the full `/qualify` + `/qualify/submit` round trip unconditionally
+every single cycle, both within one process run and across independent
+runs. The persisted expiry on the Verifier side was real (survives a
+Verifier restart, correctly identity-bound — see the entry above), but
+nothing on the RP side ever *acted* on how much of a grant was left, so the
+24h window was write-only: recorded, never consulted. This didn't need a
+long-running daemon to fix, just the same disk-cache treatment the AK
+certificate already gets.
+
+**Fix, part 1 — RP-side cache**: `rp_qualified_until[MAX_VERIFIERS]`
+(`relying_party.c`), backed by a per-Verifier file,
+`rp-qualification-until-<port>.txt` (a single decimal Unix timestamp — much
+simpler than the AK-provisioning ledger's format since there's only ever
+one live value per Verifier, no history to keep). `rp_perform_qualification_
+handshake()` checks it first (re-checked against the wall clock on every
+call, not just cached as a boolean, so a run that happens to straddle the
+expiry moment stays correct) and short-circuits straight to
+`CHARRA_RC_SUCCESS` — skipping the `/qualify` + `/qualify/submit` round trip
+entirely — when it's still in the future. On a successful handshake,
+`expires_at = now + CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS` is computed
+locally (no wire-protocol change needed: both binaries already link
+`charra_rp_qualification.h`, which is where that constant lives, so RP's
+estimate is exactly the same number the Verifier used) and written back to
+the cache.
+
+**A bug this introduced, caught by live testing before it shipped**: the
+first version of the short-circuit skipped `ensure_rp_ak_certificate()`
+entirely on a cache hit, since it looked like part of "the whole
+handshake." It isn't — `charra_rp_build_evidence_message()` needs
+`rp_ak_cert_der[verifier_index]` regardless of whether `/qualify` itself
+runs, and nothing else in the RP calls `ensure_rp_ak_certificate()`
+independently. Skipping it broke evidence-building outright the moment a
+qualification cache hit happened before an AK certificate had been loaded
+into memory this process (observed live as `"No AK certificate for this
+Verifier; evidence not prepared"` immediately after a `"skipping
+/qualify"` log line — the AK cert *was* cached on disk from a prior run,
+just never reloaded into `rp_ak_cert_der[]` because nothing called the
+function that does that). **Fixed** by always calling
+`ensure_rp_ak_certificate()` first, cache hit or not — it has its own
+independent on-disk cache and short-circuits to a fast disk read itself, so
+this doesn't reintroduce a network round trip, just restores the "AK cert
+ready" side effect the qualification short-circuit had accidentally
+dropped.
+
+**Fix, part 2 — Verifier says *why*, RP reacts**: previously
+`coap_appraise_handler()`'s qualification check collapsed "never
+qualified" and "qualified once, now expired" into one boolean and one
+message, `"RP not qualified!"`. Now `qualification_record_found` is tracked
+separately from `attestation_result_qualified`, and the `4.03 Forbidden`
+response's message text distinguishes the two: `"RP qualification
+expired!"` when a record exists but `charra_qualification_state_is_valid()`
+says no, `"RP not qualified!"` when no record exists at all. Response code
+is deliberately the same either way (both mean "not currently qualified, go
+fix that" — the RP's correct reaction is identical), but the message lets a
+human (or a log) tell them apart.
+
+On the RP side, `coap_verifier_handler_appraisal()` now branches on `4.03
+Forbidden` the same way it already branched on `4.01 Unauthorized` for a
+bad AK certificate: sets `rp_qualification_rejected[verifier_index]`,
+logs the Verifier's actual message text, and signals
+`get_attestation_results_thread()`'s existing retry loop. That loop
+(previously AK-cert-only) now branches on *which* of
+`rp_ak_cert_rejected`/`rp_qualification_rejected` fired — never both at
+once, since `coap_appraise_handler()`'s checks are a strict if/else-if
+chain, so at most one rejection reason is ever reported per response — and
+either re-provisions the AK certificate (as before) or invalidates the
+qualification cache and calls `rp_perform_qualification_handshake()` again
+before resubmitting evidence once. Same one-retry bound as the AK-cert
+case, same reasoning: a blind infinite retry could never fix a genuine
+redaction-pipeline mismatch, but a stale cache (e.g. the Verifier's record
+was cleared, or the two disagree for any other reason) is exactly what one
+retry is for.
+
+**Verified live**, deliberately forcing the mismatch scenario (RP's local
+cache claims valid for another ~999,000 seconds, while the Verifier's own
+ledger record is hand-edited to already be expired) rather than just
+waiting out a real 24h window: RP skips `/qualify` on its own (trusting its
+stale cache), sends evidence, gets back `4.03` with `"RP qualification
+expired!"`, logs `"Verifier n° 1: RP qualification expired!"` then
+`"Re-qualifying with Verifier n° 1 after rejection ..."`, redoes the full
+handshake successfully, resubmits, and reaches `"Attestation successful!"`
+on the retry — Verifier's own log shows the matching
+`"RP's qualification has EXPIRED!"` / `RP QUALIFICATION EXPIRED` on the
+first attempt and `ATTESTATION SUCCESSFUL` on the second. A following
+attestation cycle then correctly reuses the freshly-earned cache
+(`"cached qualification still valid for 86398 more second(s)"`). Full
+rebuild + all 8 test suites still pass, 0 regressions, both before and
+after the `ensure_rp_ak_certificate()` fix above.
+
+**`.gitignore` updated**: `rp-qualification-until-*.txt` (one file per
+Verifier port, RP's own qualification cache) added alongside the existing
+`rp-ak-certificate-*.der` entry.

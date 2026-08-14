@@ -20,6 +20,7 @@
 #include "core/charra_marshaling.h"
 #include "core/charra_rim_mgr.h"
 #include "core/charra_rp_key_mgr.h"
+#include "core/charra_rp_qualification.h"
 #include "core/charra_sdk.h"
 #include "util/charra_util.h"
 #include "util/cli_util.h"
@@ -153,6 +154,26 @@ static CHARRA_RC qualify_response_rc = CHARRA_RC_ERROR;
 static bool processing_qualify_response = false;
 static bool qualify_submit_qualified = false;
 static bool processing_qualify_submit_response = false;
+/* Per-Verifier client-side qualification cache: the RP's own record of
+ * "qualified with this Verifier until when", persisted to
+ * rp-qualification-until-<port>.txt (mirrors rp-ak-certificate-<port>.der's
+ * cache-to-disk pattern) so a fresh RP process doesn't redo /qualify +
+ * /qualify/submit if a previous run's qualification is still within its
+ * validity window. 0 means "unknown/not currently valid" -- both "never
+ * loaded from disk this process" and "loaded, nothing there" collapse to
+ * the same value, since either way the next step is the same: try loading
+ * from disk, and if that doesn't produce a still-future timestamp, redo the
+ * handshake. Without this, RP re-qualifies on every single attestation
+ * cycle regardless of how much of the previous grant is left -- see
+ * CHARRA_V2_NOTES.md. */
+static time_t rp_qualified_until[MAX_VERIFIERS] = {0};
+/* Set by coap_verifier_handler_appraisal() when a Verifier's /appraise
+ * response is 4.03 Forbidden specifically because our qualification is
+ * missing or expired (as opposed to 4.01 Unauthorized for a bad AK
+ * certificate, see rp_ak_cert_rejected) -- signals
+ * get_attestation_results_thread()'s retry loop to invalidate the local
+ * cache above, redo the handshake, and resubmit once. */
+static bool rp_qualification_rejected[MAX_VERIFIERS];
 /* Guards every TPM connection RP opens (provisioning and, later, each
  * Quote_r signing operation): the TPM simulator this dev environment uses
  * accepts only one client connection at a time, and every other binary
@@ -298,6 +319,15 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index);
  */
 static void invalidate_cached_rp_ak_certificate(int verifier_index);
 
+/**
+ * @brief Forget verifiers[verifier_index]'s cached qualification: delete
+ * its on-disk cache file and reset rp_qualified_until[verifier_index] to 0,
+ * so the next rp_perform_qualification_handshake() call redoes /qualify +
+ * /qualify/submit instead of trusting a grant this Verifier just told us
+ * (via a 4.03 Forbidden /appraise response) it no longer honors.
+ */
+static void invalidate_cached_rp_qualification(int verifier_index);
+
 /** @brief See its own definition's docstring, above ensure_rp_ak_certificate()
  * in the .c file -- forward-declared here so charra_rp_build_evidence_
  * message() (defined earlier in the file) can call it too. */
@@ -322,16 +352,24 @@ static coap_response_t coap_qualify_submit_response_handler(
  * PCR digest with RP's TPM-resident AK, and submit it all via
  * /qualify/submit.
  *
+ * Short-circuits to CHARRA_RC_SUCCESS without the /qualify round trip
+ * itself if rp_qualified_until[verifier_index] (or its on-disk cache file,
+ * rp-qualification-until-<port>.txt) says we're already qualified with
+ * this Verifier and haven't hit CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS
+ * yet -- see rp_qualified_until's own comment. Still always calls
+ * ensure_rp_ak_certificate(verifier_index) first regardless of the cache
+ * (cheap on its own cache hit), since AK certificate readiness is needed
+ * downstream for evidence-building either way.
+ *
  * Verifier-local state, same as the AK certificate now is (see
  * ensure_rp_ak_certificate()'s docstring) -- has to be repeated per
- * Verifier the RP intends to submit evidence to. Calls
- * ensure_rp_ak_certificate(verifier_index) itself first, so callers don't
- * need to.
+ * Verifier the RP intends to submit evidence to.
  *
- * @returns CHARRA_RC_SUCCESS only if the Verifier's /qualify/submit
- * response reports the RP as qualified. Any other outcome (transport
- * failure, or a genuine "not qualified" verdict) returns a non-success
- * code -- the caller decides whether that's fatal.
+ * @returns CHARRA_RC_SUCCESS if already cached as qualified, or if the
+ * Verifier's /qualify/submit response reports the RP as qualified (and
+ * caches that). Any other outcome (transport failure, or a genuine "not
+ * qualified" verdict) returns a non-success code -- the caller decides
+ * whether that's fatal.
  */
 static CHARRA_RC rp_perform_qualification_handshake(int verifier_index);
 
@@ -1085,7 +1123,74 @@ static coap_response_t coap_qualify_submit_response_handler(
     return COAP_RESPONSE_OK;
 }
 
+/**
+ * @brief Path of verifier_index's qualification cache file
+ * (rp-qualification-until-<port>.txt), same per-port-filename convention
+ * invalidate_cached_rp_ak_certificate() uses for the AK certificate cache.
+ */
+static void rp_qualification_cache_path(
+        int verifier_index, char* path_out, size_t path_out_len) {
+    snprintf(path_out, path_out_len, "rp-qualification-until-%u.txt",
+            verifiers[verifier_index].port_number);
+}
+
+/**
+ * @brief Read verifier_index's cached qualification expiry from disk.
+ *
+ * @returns the cached expires_at, or 0 if the file doesn't exist or is
+ * unparseable (treated the same as "no cache" -- not an error, a fresh
+ * deployment or a first run simply hasn't qualified yet).
+ */
+static time_t rp_qualification_cache_load(int verifier_index) {
+    char path[64] = {0};
+    rp_qualification_cache_path(verifier_index, path, sizeof(path));
+    FILE* f = fopen(path, "r");
+    if (f == NULL) {
+        return 0;
+    }
+    long long expires_at = 0;
+    int scanned = fscanf(f, "%lld", &expires_at);
+    fclose(f);
+    if (scanned != 1 || expires_at <= 0) {
+        return 0;
+    }
+    return (time_t)expires_at;
+}
+
+/**
+ * @brief Persist verifier_index's freshly-earned qualification expiry to
+ * disk, so a later process invocation can skip the handshake while it's
+ * still valid.
+ */
+static void rp_qualification_cache_save(int verifier_index, time_t expires_at) {
+    char path[64] = {0};
+    rp_qualification_cache_path(verifier_index, path, sizeof(path));
+    FILE* f = fopen(path, "w");
+    if (f == NULL) {
+        charra_log_error(
+                "[" LOG_NAME "] Could not write qualification cache '%s'.",
+                path);
+        return;
+    }
+    fprintf(f, "%lld\n", (long long)expires_at);
+    fclose(f);
+}
+
+static void invalidate_cached_rp_qualification(int verifier_index) {
+    char path[64] = {0};
+    rp_qualification_cache_path(verifier_index, path, sizeof(path));
+    remove(path);
+    rp_qualified_until[verifier_index] = 0;
+}
+
 static CHARRA_RC rp_perform_qualification_handshake(int verifier_index) {
+    /* AK certificate readiness is orthogonal to the qualification cache
+     * below and always needed downstream (charra_rp_build_evidence_message()
+     * reads rp_ak_cert_der[verifier_index], regardless of whether the
+     * /qualify round trip itself runs) -- this call is cheap on a cache hit
+     * (ensure_rp_ak_certificate() has its own on-disk cache, checked before
+     * any network round trip), so it always runs, even when the
+     * qualification short-circuit below skips everything else. */
     CHARRA_RC keypair_and_cert_rc = ensure_rp_ak_certificate(verifier_index);
     if (keypair_and_cert_rc != CHARRA_RC_SUCCESS) {
         charra_log_error(
@@ -1093,6 +1198,31 @@ static CHARRA_RC rp_perform_qualification_handshake(int verifier_index) {
                 "certificate for this Verifier not provisioned.");
         return keypair_and_cert_rc;
     }
+
+    /* Cache short-circuit: if we already hold a still-valid qualification
+     * for this Verifier -- either from earlier this process, or loaded just
+     * now from a previous process run's cache file -- skip the /qualify +
+     * /qualify/submit round trip itself. Re-checked against the wall clock
+     * on every call (not just once), so this stays correct even if a single
+     * process run happens to straddle the expiry moment. This is what makes
+     * CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS actually matter: without it,
+     * RP re-qualified unconditionally on every single attestation cycle
+     * regardless of how much of a previous grant was left. See
+     * CHARRA_V2_NOTES.md. */
+    time_t now = time(NULL);
+    if (rp_qualified_until[verifier_index] <= now) {
+        rp_qualified_until[verifier_index] =
+                rp_qualification_cache_load(verifier_index);
+    }
+    if (rp_qualified_until[verifier_index] > now) {
+        charra_log_info(
+                "[" LOG_NAME "] Verifier n° %d: cached qualification "
+                "still valid for %ld more second(s), skipping /qualify.",
+                verifier_index + 1,
+                (long)(rp_qualified_until[verifier_index] - now));
+        return CHARRA_RC_SUCCESS;
+    }
+
     const verifier_info* verifier = &verifiers[verifier_index];
 
     charra_log_info(
@@ -1210,12 +1340,12 @@ static CHARRA_RC rp_perform_qualification_handshake(int verifier_index) {
 
     if (qualify_submit_qualified) {
         charra_log_info("[" LOG_NAME "] |  RP QUALIFIED              |");
+        time_t expires_at = now + CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS;
+        rp_qualified_until[verifier_index] = expires_at;
+        rp_qualification_cache_save(verifier_index, expires_at);
         result = CHARRA_RC_SUCCESS;
     } else {
-        charra_log_error(
-                "[" LOG_NAME "] |  RP NOT QUALIFIED -- expected for now, "
-                "see CHARRA_V2_NOTES.md (salted redaction vs. byte-exact "
-                "golden-log check)  |");
+        charra_log_error("[" LOG_NAME "] |  RP NOT QUALIFIED          |");
         result = CHARRA_RC_VERIFICATION_FAILED;
     }
 
@@ -1929,6 +2059,7 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
     int* current_thread_index = coap_session_get_app_data(session);
 
     rp_ak_cert_rejected[*current_thread_index] = false;
+    rp_qualification_rejected[*current_thread_index] = false;
 
     if (coap_pdu_get_code(received) == COAP_RESPONSE_CODE_UNAUTHORIZED) {
         /* Verifier rejected our AK certificate specifically (see
@@ -1940,6 +2071,35 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
                         "certificate as invalid or expired.",
                 *current_thread_index + 1);
         rp_ak_cert_rejected[*current_thread_index] = true;
+        attestation_results[*current_thread_index] = false;
+        goto cleanup;
+    }
+
+    if (coap_pdu_get_code(received) == COAP_RESPONSE_CODE_FORBIDDEN) {
+        /* Verifier rejected our qualification specifically (see verifier.c's
+         * coap_appraise_handler, Step 3a item 1b) -- either we never
+         * qualified with it, or a grant we thought was still valid (per our
+         * own local cache, rp_qualified_until) has expired on its end.
+         * Either way, the message text says which; log it, then signal the
+         * caller to invalidate the local cache, redo /qualify +
+         * /qualify/submit, and retry -- same one-retry pattern as the AK
+         * certificate case above. */
+        size_t forbidden_data_len = 0;
+        const uint8_t* forbidden_data = NULL;
+        size_t forbidden_data_offset = 0;
+        size_t forbidden_data_total_len = 0;
+        if (coap_get_data_large(received, &forbidden_data_len,
+                    &forbidden_data, &forbidden_data_offset,
+                    &forbidden_data_total_len) != 0) {
+            charra_log_info("[" LOG_NAME "] Verifier n° %d: %.*s",
+                    *current_thread_index + 1, (int)forbidden_data_len,
+                    (const char*)forbidden_data);
+        } else {
+            charra_log_info("[" LOG_NAME "] Verifier n° %d rejected our "
+                            "qualification.",
+                    *current_thread_index + 1);
+        }
+        rp_qualification_rejected[*current_thread_index] = true;
         attestation_results[*current_thread_index] = false;
         goto cleanup;
     }
@@ -2722,7 +2882,14 @@ void* get_attestation_results_thread(void *arg) {
      * expired (see coap_verifier_handler_appraisal and verifier.c's Step 3a
      * item 1): re-provision via /certify_ak and try again with a fresh
      * certificate, rather than just recording a failed vote a blind retry
-     * could never fix. Not retried for any other kind of failure. */
+     * could never fix. Retried the same way if the complaint was instead
+     * our qualification being missing or expired (Step 3a item 1b): forget
+     * the local cache and redo /qualify + /qualify/submit. The two never
+     * overlap in one response (coap_appraise_handler checks the AK
+     * certificate first and returns immediately on failure, before ever
+     * reaching the qualification check), so at most one of
+     * rp_ak_cert_rejected/rp_qualification_rejected is ever true here. Not
+     * retried for any other kind of failure. */
     for (int attempt = 0; attempt < 2; ++attempt) {
         charra_free_if_not_null(res_buf);
         res_buf = NULL;
@@ -2786,22 +2953,43 @@ void* get_attestation_results_thread(void *arg) {
             }
         }
 
-        if (!rp_ak_cert_rejected[current_thread_index] || attempt == 1) {
+        bool rejected = rp_ak_cert_rejected[current_thread_index] ||
+                        rp_qualification_rejected[current_thread_index];
+        if (!rejected || attempt == 1) {
             break;
         }
 
-        charra_log_info("[" LOG_NAME "] Re-provisioning RP AK certificate "
-                        "after rejection by Verifier n\u00b0 %d ...",
-                current_thread_index + 1);
-        invalidate_cached_rp_ak_certificate(current_thread_index);
-        CHARRA_RC reprovision_rc =
-                ensure_rp_ak_certificate(current_thread_index);
-
-        if (reprovision_rc != CHARRA_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME "] Could not re-provision RP AK "
-                             "certificate; giving up on Verifier n\u00b0 %d.",
+        if (rp_ak_cert_rejected[current_thread_index]) {
+            charra_log_info("[" LOG_NAME "] Re-provisioning RP AK "
+                            "certificate after rejection by Verifier n\u00b0 "
+                            "%d ...",
                     current_thread_index + 1);
-            break;
+            invalidate_cached_rp_ak_certificate(current_thread_index);
+            CHARRA_RC reprovision_rc =
+                    ensure_rp_ak_certificate(current_thread_index);
+
+            if (reprovision_rc != CHARRA_RC_SUCCESS) {
+                charra_log_error(
+                        "[" LOG_NAME "] Could not re-provision RP AK "
+                        "certificate; giving up on Verifier n\u00b0 %d.",
+                        current_thread_index + 1);
+                break;
+            }
+        } else {
+            charra_log_info("[" LOG_NAME "] Re-qualifying with Verifier "
+                            "n\u00b0 %d after rejection ...",
+                    current_thread_index + 1);
+            invalidate_cached_rp_qualification(current_thread_index);
+            CHARRA_RC requalify_rc =
+                    rp_perform_qualification_handshake(current_thread_index);
+
+            if (requalify_rc != CHARRA_RC_SUCCESS) {
+                charra_log_error(
+                        "[" LOG_NAME "] Could not re-qualify; giving up on "
+                        "Verifier n\u00b0 %d.",
+                        current_thread_index + 1);
+                break;
+            }
         }
     }
 
