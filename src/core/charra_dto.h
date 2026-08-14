@@ -161,7 +161,7 @@ typedef struct {
     uint32_t verifier_nonce_len;
     uint8_t verifier_nonce[sizeof(TPMU_HA)];
     /** RSA-PSS/SHA-256 over (pcr_r || verifier_nonce), produced by RP's
-     * TPM-resident AK (see charra_rp_identity.h). */
+     * TPM-resident AK (see charra_rp_key_mgr.h). */
     uint32_t rp_signature_len;
     uint8_t rp_signature[CHARRA_RSA_SIGNATURE_LEN];
 

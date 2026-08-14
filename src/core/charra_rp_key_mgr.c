@@ -1,4 +1,4 @@
-#include "charra_rp_identity.h"
+#include "charra_rp_key_mgr.h"
 
 #include <string.h>
 
@@ -8,7 +8,7 @@
 
 /* --- EK ------------------------------------------------------------------ */
 
-CHARRA_RC charra_rp_identity_create_ek(
+CHARRA_RC charra_rp_key_mgr_create_ek(
         ESYS_CONTEXT* esys_ctx, ESYS_TR* ek_handle_out,
         TPM2B_PUBLIC** ek_public_out) {
     if (esys_ctx == NULL || ek_handle_out == NULL || ek_public_out == NULL) {
@@ -18,7 +18,7 @@ CHARRA_RC charra_rp_identity_create_ek(
     TPM2B_AUTH auth_endorsement = {.size = 0, .buffer = {0}};
     if (Esys_TR_SetAuth(esys_ctx, ESYS_TR_RH_ENDORSEMENT, &auth_endorsement) !=
             TSS2_RC_SUCCESS) {
-        charra_log_error("charra_rp_identity_create_ek: Esys_TR_SetAuth");
+        charra_log_error("charra_rp_key_mgr_create_ek: Esys_TR_SetAuth");
         return CHARRA_RC_TPM;
     }
 
@@ -63,7 +63,7 @@ CHARRA_RC charra_rp_identity_create_ek(
                  ESYS_TR_NONE, &in_sensitive, &in_public, &outside_info,
                  &creation_pcr, ek_handle_out, ek_public_out, NULL, NULL,
                  NULL)) != TSS2_RC_SUCCESS) {
-        charra_log_error("charra_rp_identity_create_ek: Esys_CreatePrimary: "
+        charra_log_error("charra_rp_key_mgr_create_ek: Esys_CreatePrimary: "
                          "0x%x",
                 create_primary_rc);
         return CHARRA_RC_TPM;
@@ -74,7 +74,7 @@ CHARRA_RC charra_rp_identity_create_ek(
 
 /* --- AK ------------------------------------------------------------------ */
 
-/** Shared by charra_rp_identity_create_ak() and _load_ak(): the EK's auth
+/** Shared by charra_rp_key_mgr_create_ak() and _load_ak(): the EK's auth
  * (empty) is needed to use it as a parent handle for Create/Load. */
 static CHARRA_RC set_ek_auth_for_parent_use(
         ESYS_CONTEXT* esys_ctx, ESYS_TR ek_handle) {
@@ -86,7 +86,7 @@ static CHARRA_RC set_ek_auth_for_parent_use(
     return CHARRA_RC_SUCCESS;
 }
 
-CHARRA_RC charra_rp_identity_create_ak(ESYS_CONTEXT* esys_ctx,
+CHARRA_RC charra_rp_key_mgr_create_ak(ESYS_CONTEXT* esys_ctx,
         ESYS_TR ek_handle, ESYS_TR* ak_handle_out, TPM2B_PUBLIC** ak_public_out,
         TPM2B_PRIVATE** ak_private_out, TPM2B_NAME** ak_name_out) {
     if (esys_ctx == NULL || ak_handle_out == NULL || ak_public_out == NULL ||
@@ -139,14 +139,14 @@ CHARRA_RC charra_rp_identity_create_ak(ESYS_CONTEXT* esys_ctx,
                  &outside_info, &creation_pcr, ak_private_out, ak_public_out,
                  NULL, NULL, NULL)) != TSS2_RC_SUCCESS) {
         charra_log_error(
-                "charra_rp_identity_create_ak: Esys_Create: 0x%x", create_rc);
+                "charra_rp_key_mgr_create_ak: Esys_Create: 0x%x", create_rc);
         return CHARRA_RC_TPM;
     }
 
     if (Esys_Load(esys_ctx, ek_handle, ESYS_TR_PASSWORD, ESYS_TR_NONE,
                 ESYS_TR_NONE, *ak_private_out, *ak_public_out,
                 ak_handle_out) != TSS2_RC_SUCCESS) {
-        charra_log_error("charra_rp_identity_create_ak: Esys_Load");
+        charra_log_error("charra_rp_key_mgr_create_ak: Esys_Load");
         Esys_Free(*ak_private_out);
         Esys_Free(*ak_public_out);
         *ak_private_out = NULL;
@@ -157,20 +157,20 @@ CHARRA_RC charra_rp_identity_create_ak(ESYS_CONTEXT* esys_ctx,
     TPM2B_AUTH auth_for_use = {.size = 0, .buffer = {0}};
     if (Esys_TR_SetAuth(esys_ctx, *ak_handle_out, &auth_for_use) !=
             TSS2_RC_SUCCESS) {
-        charra_log_error("charra_rp_identity_create_ak: Esys_TR_SetAuth (AK)");
+        charra_log_error("charra_rp_key_mgr_create_ak: Esys_TR_SetAuth (AK)");
         return CHARRA_RC_TPM;
     }
 
     if (Esys_TR_GetName(esys_ctx, *ak_handle_out, ak_name_out) !=
             TSS2_RC_SUCCESS) {
-        charra_log_error("charra_rp_identity_create_ak: Esys_TR_GetName");
+        charra_log_error("charra_rp_key_mgr_create_ak: Esys_TR_GetName");
         return CHARRA_RC_TPM;
     }
 
     return CHARRA_RC_SUCCESS;
 }
 
-CHARRA_RC charra_rp_identity_load_ak(ESYS_CONTEXT* esys_ctx, ESYS_TR ek_handle,
+CHARRA_RC charra_rp_key_mgr_load_ak(ESYS_CONTEXT* esys_ctx, ESYS_TR ek_handle,
         const TPM2B_PUBLIC* ak_public, const TPM2B_PRIVATE* ak_private,
         ESYS_TR* ak_handle_out, TPM2B_NAME** ak_name_out) {
     if (esys_ctx == NULL || ak_public == NULL || ak_private == NULL ||
@@ -188,20 +188,20 @@ CHARRA_RC charra_rp_identity_load_ak(ESYS_CONTEXT* esys_ctx, ESYS_TR ek_handle,
                  ESYS_TR_NONE, ESYS_TR_NONE, ak_private, ak_public,
                  ak_handle_out)) != TSS2_RC_SUCCESS) {
         charra_log_error(
-                "charra_rp_identity_load_ak: Esys_Load: 0x%x", load_rc);
+                "charra_rp_key_mgr_load_ak: Esys_Load: 0x%x", load_rc);
         return CHARRA_RC_TPM;
     }
 
     TPM2B_AUTH auth_for_use = {.size = 0, .buffer = {0}};
     if (Esys_TR_SetAuth(esys_ctx, *ak_handle_out, &auth_for_use) !=
             TSS2_RC_SUCCESS) {
-        charra_log_error("charra_rp_identity_load_ak: Esys_TR_SetAuth (AK)");
+        charra_log_error("charra_rp_key_mgr_load_ak: Esys_TR_SetAuth (AK)");
         return CHARRA_RC_TPM;
     }
 
     if (Esys_TR_GetName(esys_ctx, *ak_handle_out, ak_name_out) !=
             TSS2_RC_SUCCESS) {
-        charra_log_error("charra_rp_identity_load_ak: Esys_TR_GetName");
+        charra_log_error("charra_rp_key_mgr_load_ak: Esys_TR_GetName");
         return CHARRA_RC_TPM;
     }
 
@@ -211,7 +211,7 @@ CHARRA_RC charra_rp_identity_load_ak(ESYS_CONTEXT* esys_ctx, ESYS_TR ek_handle,
 /* --- /certify_ak: ActivateCredential --------------------------------------
  */
 
-CHARRA_RC charra_rp_identity_activate_credential(ESYS_CONTEXT* esys_ctx,
+CHARRA_RC charra_rp_key_mgr_activate_credential(ESYS_CONTEXT* esys_ctx,
         ESYS_TR ak_handle, ESYS_TR ek_handle,
         const TPM2B_ID_OBJECT* credential_blob,
         const TPM2B_ENCRYPTED_SECRET* wrapped_secret,
@@ -225,7 +225,7 @@ CHARRA_RC charra_rp_identity_activate_credential(ESYS_CONTEXT* esys_ctx,
                 ESYS_TR_PASSWORD, ESYS_TR_PASSWORD, ESYS_TR_NONE,
                 credential_blob, wrapped_secret,
                 credential_out) != TSS2_RC_SUCCESS) {
-        charra_log_error("charra_rp_identity_activate_credential: "
+        charra_log_error("charra_rp_key_mgr_activate_credential: "
                          "Esys_ActivateCredential");
         return CHARRA_RC_TPM;
     }
@@ -236,7 +236,7 @@ CHARRA_RC charra_rp_identity_activate_credential(ESYS_CONTEXT* esys_ctx,
 /* --- signing --------------------------------------------------------------
  */
 
-CHARRA_RC charra_rp_identity_sign(ESYS_CONTEXT* esys_ctx, ESYS_TR ak_handle,
+CHARRA_RC charra_rp_key_mgr_sign(ESYS_CONTEXT* esys_ctx, ESYS_TR ak_handle,
         const uint8_t* data, size_t data_len, uint8_t* signature_out) {
     if (esys_ctx == NULL || data == NULL || signature_out == NULL) {
         return CHARRA_RC_BAD_ARGUMENT;
@@ -263,7 +263,7 @@ CHARRA_RC charra_rp_identity_sign(ESYS_CONTEXT* esys_ctx, ESYS_TR ak_handle,
     if (Esys_Sign(esys_ctx, ak_handle, ESYS_TR_PASSWORD, ESYS_TR_NONE,
                 ESYS_TR_NONE, &digest, &scheme, &null_ticket, &signature) !=
             TSS2_RC_SUCCESS) {
-        charra_log_error("charra_rp_identity_sign: Esys_Sign");
+        charra_log_error("charra_rp_key_mgr_sign: Esys_Sign");
         return CHARRA_RC_TPM;
     }
 
@@ -277,7 +277,7 @@ CHARRA_RC charra_rp_identity_sign(ESYS_CONTEXT* esys_ctx, ESYS_TR ak_handle,
 /* --- DER export ------------------------------------------------------------
  */
 
-CHARRA_RC charra_rp_identity_public_key_to_der(const TPM2B_PUBLIC* ak_public,
+CHARRA_RC charra_rp_key_mgr_public_key_to_der(const TPM2B_PUBLIC* ak_public,
         uint8_t* der_out, size_t der_out_size, uint32_t* der_len_out) {
     if (ak_public == NULL || der_out == NULL || der_len_out == NULL) {
         return CHARRA_RC_BAD_ARGUMENT;
@@ -296,7 +296,7 @@ CHARRA_RC charra_rp_identity_public_key_to_der(const TPM2B_PUBLIC* ak_public,
     if ((mbedtls_r = mbedtls_pk_setup(
                  &pk, mbedtls_pk_info_from_type(MBEDTLS_PK_RSA))) != 0) {
         charra_log_error(
-                "charra_rp_identity_public_key_to_der: mbedtls_pk_setup: %d",
+                "charra_rp_key_mgr_public_key_to_der: mbedtls_pk_setup: %d",
                 mbedtls_r);
         mbedtls_rsa_free(&rsa_pub_key);
         return CHARRA_RC_CRYPTO_ERROR;
@@ -304,7 +304,7 @@ CHARRA_RC charra_rp_identity_public_key_to_der(const TPM2B_PUBLIC* ak_public,
     if ((mbedtls_r = mbedtls_rsa_copy(mbedtls_pk_rsa(pk), &rsa_pub_key)) !=
             0) {
         charra_log_error(
-                "charra_rp_identity_public_key_to_der: mbedtls_rsa_copy: %d",
+                "charra_rp_key_mgr_public_key_to_der: mbedtls_rsa_copy: %d",
                 mbedtls_r);
         mbedtls_rsa_free(&rsa_pub_key);
         mbedtls_pk_free(&pk);
@@ -320,7 +320,7 @@ CHARRA_RC charra_rp_identity_public_key_to_der(const TPM2B_PUBLIC* ak_public,
 
 /* --- persistence ------------------------------------------------------- */
 
-CHARRA_RC charra_rp_identity_save_public(
+CHARRA_RC charra_rp_key_mgr_save_public(
         const char* path, const TPM2B_PUBLIC* pub) {
     if (path == NULL || pub == NULL) {
         return CHARRA_RC_BAD_ARGUMENT;
@@ -328,7 +328,7 @@ CHARRA_RC charra_rp_identity_save_public(
     return charra_io_write_file(path, (const uint8_t*)pub, sizeof(*pub));
 }
 
-CHARRA_RC charra_rp_identity_load_public(
+CHARRA_RC charra_rp_key_mgr_load_public(
         const char* path, TPM2B_PUBLIC* pub_out) {
     if (path == NULL || pub_out == NULL) {
         return CHARRA_RC_BAD_ARGUMENT;
@@ -340,7 +340,7 @@ CHARRA_RC charra_rp_identity_load_public(
     }
     if (buf_len != sizeof(*pub_out)) {
         charra_log_error(
-                "charra_rp_identity_load_public: '%s' has the wrong size.",
+                "charra_rp_key_mgr_load_public: '%s' has the wrong size.",
                 path);
         charra_io_free_file_buffer(&buf);
         return CHARRA_RC_ERROR;
@@ -350,7 +350,7 @@ CHARRA_RC charra_rp_identity_load_public(
     return CHARRA_RC_SUCCESS;
 }
 
-CHARRA_RC charra_rp_identity_save_private(
+CHARRA_RC charra_rp_key_mgr_save_private(
         const char* path, const TPM2B_PRIVATE* priv) {
     if (path == NULL || priv == NULL) {
         return CHARRA_RC_BAD_ARGUMENT;
@@ -358,7 +358,7 @@ CHARRA_RC charra_rp_identity_save_private(
     return charra_io_write_file(path, (const uint8_t*)priv, sizeof(*priv));
 }
 
-CHARRA_RC charra_rp_identity_load_private(
+CHARRA_RC charra_rp_key_mgr_load_private(
         const char* path, TPM2B_PRIVATE* priv_out) {
     if (path == NULL || priv_out == NULL) {
         return CHARRA_RC_BAD_ARGUMENT;
@@ -370,7 +370,7 @@ CHARRA_RC charra_rp_identity_load_private(
     }
     if (buf_len != sizeof(*priv_out)) {
         charra_log_error(
-                "charra_rp_identity_load_private: '%s' has the wrong size.",
+                "charra_rp_key_mgr_load_private: '%s' has the wrong size.",
                 path);
         charra_io_free_file_buffer(&buf);
         return CHARRA_RC_ERROR;

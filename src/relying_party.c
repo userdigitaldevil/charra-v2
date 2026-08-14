@@ -19,7 +19,7 @@
 #include "core/charra_key_mgr.h"
 #include "core/charra_marshaling.h"
 #include "core/charra_rim_mgr.h"
-#include "core/charra_rp_identity.h"
+#include "core/charra_rp_key_mgr.h"
 #include "core/charra_sdk.h"
 #include "util/charra_util.h"
 #include "util/cli_util.h"
@@ -87,7 +87,7 @@ static uint8_t* rp_log_r = NULL;
 static uint32_t rp_log_r_len = 0;
 static uint8_t rp_pcr_r[TPM2_SHA256_DIGEST_SIZE] = {0};
 /* Quote_r's signing key is RP's TPM-resident AK (see ensure_rp_ak_certificate()
- * / charra_rp_identity.h) -- provisioned once and reused for the process's
+ * / charra_rp_key_mgr.h) -- provisioned once and reused for the process's
  * lifetime, unlike the throwaway software key this used to be. */
 static uint8_t rp_public_key_der[CHARRA_RSA_PUB_KEY_DER_MAX] = {0};
 static uint32_t rp_public_key_der_len = 0;
@@ -709,7 +709,7 @@ static CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
     }
     Esys_Free(sign_ak_name);
 
-    charra_r = charra_rp_identity_sign(sign_esys_ctx, sign_ak_handle,
+    charra_r = charra_rp_key_mgr_sign(sign_esys_ctx, sign_ak_handle,
             signed_data, sizeof(ev.pcr_r) + ev.verifier_nonce_len,
             ev.rp_signature);
 
@@ -790,7 +790,7 @@ cleanup:
 
 /**
  * @brief Open a fresh TPM connection, recreate RP's EK (deterministic --
- * see charra_rp_identity_create_ek()), and load the AK from its persisted
+ * see charra_rp_key_mgr_create_ek()), and load the AK from its persisted
  * public/private blobs. Caller must hold rp_tpm_mutex and Esys_Finalize()/
  * Tss2_TctiLdr_Finalize() the returned contexts when done -- this is the
  * short-lived-connection building block every TPM operation past initial
@@ -816,7 +816,7 @@ static CHARRA_RC rp_open_tpm_and_load_ak(ESYS_CONTEXT** esys_ctx_out,
     }
 
     TPM2B_PUBLIC* ek_public = NULL;
-    CHARRA_RC result = charra_rp_identity_create_ek(
+    CHARRA_RC result = charra_rp_key_mgr_create_ek(
             *esys_ctx_out, ek_handle_out, &ek_public);
     Esys_Free(ek_public);
     if (result != CHARRA_RC_SUCCESS) {
@@ -826,17 +826,17 @@ static CHARRA_RC rp_open_tpm_and_load_ak(ESYS_CONTEXT** esys_ctx_out,
 
     TPM2B_PUBLIC ak_public = {0};
     TPM2B_PRIVATE ak_private = {0};
-    if ((result = charra_rp_identity_load_public(
+    if ((result = charra_rp_key_mgr_load_public(
                  rp_ak_public_path, &ak_public)) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not load AK public key.");
         goto error;
     }
-    if ((result = charra_rp_identity_load_private(
+    if ((result = charra_rp_key_mgr_load_private(
                  rp_ak_private_path, &ak_private)) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not load AK private area.");
         goto error;
     }
-    if ((result = charra_rp_identity_load_ak(*esys_ctx_out, *ek_handle_out,
+    if ((result = charra_rp_key_mgr_load_ak(*esys_ctx_out, *ek_handle_out,
                  &ak_public, &ak_private, ak_handle_out, ak_name_out)) !=
             CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not load RP's AK.");
@@ -890,7 +890,7 @@ static CHARRA_RC ensure_rp_ak_certificate(
          * message()). */
         charra_log_info(
                 "[" LOG_NAME "] Reloading previously provisioned RP AK.");
-        if ((result = charra_rp_identity_load_public(
+        if ((result = charra_rp_key_mgr_load_public(
                      rp_ak_public_path, &ak_public)) != CHARRA_RC_SUCCESS) {
             charra_log_error("[" LOG_NAME "] Could not load cached AK public "
                              "key.");
@@ -956,7 +956,7 @@ static CHARRA_RC ensure_rp_ak_certificate(
             goto error;
         }
 
-        if ((result = charra_rp_identity_create_ek(
+        if ((result = charra_rp_key_mgr_create_ek(
                      esys_ctx, &ek_handle, &ek_public)) != CHARRA_RC_SUCCESS) {
             charra_log_error("[" LOG_NAME "] Could not create RP's EK.");
             Esys_Finalize(&esys_ctx);
@@ -966,7 +966,7 @@ static CHARRA_RC ensure_rp_ak_certificate(
         }
 
         /* --- RP's own EK certificate: cached after the first mint, since
-         * charra_rp_identity_create_ek() reproduces the same EK every time
+         * charra_rp_key_mgr_create_ek() reproduces the same EK every time
          * anyway --------------------------------------------------------- */
         if (charra_io_file_exists(rp_ek_cert_cache_path) == CHARRA_RC_SUCCESS) {
             char* buf = NULL;
@@ -1071,7 +1071,7 @@ static CHARRA_RC ensure_rp_ak_certificate(
         /* --- create the AK, persist its blobs -------------------------- */
         TPM2B_PUBLIC* ak_public_p = NULL;
         TPM2B_PRIVATE* ak_private_p = NULL;
-        if ((result = charra_rp_identity_create_ak(esys_ctx, ek_handle,
+        if ((result = charra_rp_key_mgr_create_ak(esys_ctx, ek_handle,
                      &ak_handle, &ak_public_p, &ak_private_p, &ak_name)) !=
                 CHARRA_RC_SUCCESS) {
             charra_log_error("[" LOG_NAME "] Could not create RP's AK.");
@@ -1086,7 +1086,7 @@ static CHARRA_RC ensure_rp_ak_certificate(
         Esys_Free(ak_public_p);
         Esys_Free(ak_private_p);
 
-        if ((result = charra_rp_identity_save_public(
+        if ((result = charra_rp_key_mgr_save_public(
                      rp_ak_public_path, &ak_public)) != CHARRA_RC_SUCCESS) {
             charra_log_error("[" LOG_NAME "] Could not persist AK public key.");
             Esys_Free(ak_name);
@@ -1097,7 +1097,7 @@ static CHARRA_RC ensure_rp_ak_certificate(
             pthread_mutex_unlock(&rp_tpm_mutex);
             goto error;
         }
-        if ((result = charra_rp_identity_save_private(
+        if ((result = charra_rp_key_mgr_save_private(
                      rp_ak_private_path, &ak_private)) != CHARRA_RC_SUCCESS) {
             charra_log_error(
                     "[" LOG_NAME "] Could not persist AK private area.");
@@ -1257,7 +1257,7 @@ static CHARRA_RC ensure_rp_ak_certificate(
         Esys_Free(ak_name2);
 
         TPM2B_DIGEST* credential = NULL;
-        if ((result = charra_rp_identity_activate_credential(esys_ctx,
+        if ((result = charra_rp_key_mgr_activate_credential(esys_ctx,
                      ak_handle2, ek_handle2,
                      (TPM2B_ID_OBJECT*)certify_ak_response.credential_blob,
                      (TPM2B_ENCRYPTED_SECRET*)
@@ -1322,7 +1322,7 @@ static CHARRA_RC ensure_rp_ak_certificate(
                 rp_ak_cert_der_len);
     }
 
-    if ((result = charra_rp_identity_public_key_to_der(&ak_public,
+    if ((result = charra_rp_key_mgr_public_key_to_der(&ak_public,
                  rp_public_key_der, sizeof(rp_public_key_der),
                  &rp_public_key_der_len)) != CHARRA_RC_SUCCESS) {
         charra_log_error(
