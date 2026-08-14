@@ -546,6 +546,34 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
         goto cleanup;
     }
 
+    /* --- RP qualification gate: reject before doing any of the expensive
+     * Step 3a/3b work below if this RP hasn't proven its own redaction
+     * pipeline via /qualify + /qualify/submit -- see
+     * charra_rp_qualification.h. Deliberately a different response code
+     * (4.03 Forbidden) than the 4.01 Unauthorized the RP-AK-certificate-
+     * rejected path further down uses: RP's own retry logic
+     * (relying_party.c) treats 4.01 specifically as "go redo /certify_ak",
+     * which would be the wrong reaction to "you're not qualified" and
+     * could send it into a pointless AK-reprovisioning loop instead of
+     * redoing /qualify. */
+    if (!charra_rp_qualification_is_valid(&qualification_state, time(NULL))) {
+        charra_log_error(
+                "[" LOG_NAME "] RP is not currently qualified -- no "
+                "passing /qualify/submit on record, or it expired.");
+        const char* not_qualified_message = "RP not qualified!       \0";
+        coap_pdu_set_code(response, COAP_RESPONSE_CODE_FORBIDDEN);
+        if ((coap_r = coap_add_data_large_response(resource, session, request,
+                     response, query, COAP_MEDIATYPE_TEXT_PLAIN, -1, 0,
+                     strlen(not_qualified_message),
+                     (const uint8_t*)not_qualified_message, NULL,
+                     (void*)strlen(not_qualified_message))) == 0) {
+            charra_log_error("[" LOG_NAME "] Error invoking "
+                             "coap_add_data_large_response().");
+        }
+        attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
+        goto cleanup;
+    }
+
     /* --- verify TPM Quote --- */
     charra_log_info("[" LOG_NAME "] Starting verification.");
 
