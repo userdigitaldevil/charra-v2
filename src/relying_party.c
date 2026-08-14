@@ -1025,20 +1025,31 @@ static coap_response_t coap_qualify_submit_response_handler(
         const coap_mid_t mid CHARRA_UNUSED) {
     processing_qualify_submit_response = true;
 
-    qualify_submit_qualified =
-            coap_pdu_get_code(received) == COAP_RESPONSE_CODE_CONTENT;
+    /* Verifier's coap_qualify_submit_handler() responds with 2.05 Content
+     * for BOTH "qualified" and "not qualified" -- same convention
+     * coap_appraise_handler() uses for /appraise's own success/failure
+     * message -- so the actual verdict has to come from the message text,
+     * not the response code alone. memcmp against the exact expected
+     * length, not strcmp: data has no guaranteed NUL terminator, same
+     * reasoning coap_verifier_handler_appraisal() already documents. */
+    const char* qualified_message = "Qualification successful!\0";
 
-    /* body is just a human-readable message (see coap_qualify_submit_
-     * handler() in verifier.c) -- logged for visibility, not parsed */
     size_t data_len = 0;
     const uint8_t* data = NULL;
     size_t data_offset = 0;
     size_t data_total_len = 0;
-    if (coap_get_data_large(received, &data_len, &data, &data_offset,
-                &data_total_len) != 0) {
+    bool got_data = coap_get_data_large(received, &data_len, &data,
+                             &data_offset, &data_total_len) != 0;
+
+    if (got_data) {
         charra_log_info("[" LOG_NAME "] /qualify/submit: Verifier says: %.*s",
                 (int)data_len, (const char*)data);
     }
+
+    qualify_submit_qualified =
+            coap_pdu_get_code(received) == COAP_RESPONSE_CODE_CONTENT &&
+            got_data && data_len == strlen(qualified_message) &&
+            memcmp(data, qualified_message, data_len) == 0;
 
     processing_qualify_submit_response = false;
     return COAP_RESPONSE_OK;
