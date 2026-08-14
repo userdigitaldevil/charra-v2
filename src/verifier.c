@@ -69,6 +69,19 @@ bool dtls_rpk_verify_peer_public_key = true;
 
 static msg_attestation_request_dto last_request = {0};
 
+/* The Verifier's OWN freshness challenge for Quote_r, generated fresh by
+ * coap_nonce_handler() on every /nonce call -- deliberately separate from
+ * last_request.nonce above (the nonce RP gave the ATTESTER, still needed
+ * for Quote_a's own freshness check, Step 3b item 3). Quote_r's freshness
+ * has to be checked against a value the VERIFIER picked, not one RP picked
+ * itself: an RP echoing back its own nonce proves nothing to the Verifier
+ * about freshness, since RP could replay an old signature over an old
+ * self-chosen nonce it already knows will "match". Same single-in-flight-
+ * global limitation as last_request (bug #6 in CHARRA_V2_NOTES.md's
+ * verifier.c audit -- deliberately left as is for now, unchanged by this). */
+static uint8_t verifier_challenge_nonce[TPM2_SHA256_DIGEST_SIZE] = {0};
+static uint32_t verifier_challenge_nonce_len = 0;
+
 /* config for /qualify + /qualify/submit (RP qualification handshake) --
  * see charra_rp_qualification.h. Holds only the CURRENT outstanding
  * challenge's golden answer -- single global, same one-in-flight-round-at-
@@ -806,13 +819,16 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
      * verify_log_file_hashes_against_policy() in charra_event_log.h. */
 
     /* Step 3a item 3: check nonce consistency -- Quote_r's verifier_nonce
-     * must be exactly the nonce this Verifier's own /nonce handler echoed
-     * back (see coap_nonce_handler()), which is itself the same nonce RP
-     * sent the Attester in this same session -- so a plain byte-compare
-     * against last_request.nonce proves freshness, same reasoning the old
+     * must be exactly the challenge this Verifier itself generated and
+     * handed out in coap_nonce_handler() (verifier_challenge_nonce, a
+     * genuine Verifier-picked value, not something RP merely echoed back
+     * -- see that global's own comment for why the distinction matters). A
+     * plain byte-compare proves freshness, same reasoning the old
      * TPM-quote-qualifying-data check used, just without a TPM structure to
-     * unwrap. (last_request is the known cross-session-fragility global
-     * tracked as bug #6 -- unchanged risk, not made worse by this.) */
+     * unwrap. (verifier_challenge_nonce is a single-in-flight global, same
+     * known cross-session-fragility class as last_request -- bug #6 in
+     * CHARRA_V2_NOTES.md's verifier.c audit, deliberately left as is for
+     * now.) */
     clock_t start_verifiy_nonce, end_verifiy_nonce;
     double verify_nonce_duration;
     start_verifiy_nonce = clock();
@@ -820,9 +836,9 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     {
         charra_log_info("[" LOG_NAME "] Verifying RP nonce ...");
         attestation_result_nonce_rp =
-                res.verifier_nonce_len == last_request.nonce_len &&
-                memcmp(res.verifier_nonce, last_request.nonce,
-                        last_request.nonce_len) == 0;
+                res.verifier_nonce_len == verifier_challenge_nonce_len &&
+                memcmp(res.verifier_nonce, verifier_challenge_nonce,
+                        verifier_challenge_nonce_len) == 0;
         if (attestation_result_nonce_rp == true) {
             charra_log_info("[" LOG_NAME "]     => Nonce in Quote_r is "
                             "valid! (matches the one sent)");
@@ -1124,30 +1140,38 @@ static void coap_nonce_handler(struct coap_resource_t* resource,
         goto error;
     }
 
-    /* nonce */
+    /* nonce RP gave the Attester -- kept in last_request for Quote_a's own
+     * freshness check (Step 3b item 3); NOT used for Quote_r's, see
+     * verifier_challenge_nonce's own comment above. */
     if (req.nonce_len > sizeof(TPMU_HA)) {
         charra_log_error("[" LOG_NAME "] Nonce too long.");
         goto error;
     }
-    TPM2B_DATA qualifying_data = {.size = 0, .buffer = {0}};
-    qualifying_data.size = req.nonce_len;
-    memcpy(qualifying_data.buffer, req.nonce, req.nonce_len);
     last_request = req;
 
-    /* Echo the nonce back as this response's body: this IS "the Verifier's
-     * nonce" RP's coap_verifier_handler_nonce() stores as verifier_nonce
-     * and signs into Quote_r -- the same nonce already embedded in the
-     * request RP just sent (the one it also gave the Attester), not a
-     * separately-generated one. That's what lets Step 3a item 3 below
-     * check Quote_r's freshness with a plain byte-compare against
-     * last_request.nonce, and is exactly the reasoning the old
-     * TPM-quote-based nonce check's comment already documented ("same
-     * nonce Quote_a's check uses, on purpose"). Without this response body,
-     * RP's client-side nonce wait loop fails every time ("Verifier returned
-     * no nonce") -- this handler previously never sent one. */
+    /* Generate the Verifier's own freshness challenge and send THAT back as
+     * this response's body -- not req.nonce. A challenge RP picked itself
+     * and merely echoed back would prove nothing about freshness from the
+     * Verifier's side (RP could replay an old Quote_r over a nonce it
+     * already knows will "match"); the challenger has to pick the value.
+     * RP's coap_verifier_handler_nonce() stores whatever comes back here as
+     * verifier_nonce and signs it into Quote_r, which Step 3a item 3 below
+     * then checks against verifier_challenge_nonce. Without a response
+     * body at all, RP's client-side nonce wait loop fails every time
+     * ("Verifier returned no nonce") -- this handler previously never sent
+     * one, before it was fixed to (at the time) echo req.nonce. */
+    if ((charra_r = charra_random_bytes(sizeof(verifier_challenge_nonce),
+                 verifier_challenge_nonce)) != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Could not generate a random nonce.");
+        goto error;
+    }
+    verifier_challenge_nonce_len = sizeof(verifier_challenge_nonce);
+
     if ((coap_r = coap_add_data_large_response(resource, session, request,
                  response, query, COAP_MEDIATYPE_APPLICATION_OCTET_STREAM, -1,
-                 0, req.nonce_len, req.nonce, NULL, NULL)) == 0) {
+                 0, verifier_challenge_nonce_len, verifier_challenge_nonce,
+                 NULL, NULL)) == 0) {
         charra_log_error("[" LOG_NAME "] /nonce: Error invoking "
                          "coap_add_data_large_response().");
         goto error;

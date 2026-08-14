@@ -2671,10 +2671,15 @@ void* get_attestation_results_thread(void *arg) {
      * already built for the Attester (last_request, stable and read-only by
      * now -- populated once in get_evidence(), which always completes
      * before get_attestation_results() spawns this thread). verifier.c's
-     * coap_nonce_handler() unmarshals this exact DTO and echoes req.nonce
-     * back as the response body -- an empty request body here made it fail
-     * unmarshaling immediately ("Could not get CoAP PDU data"), which is
-     * why RP never received a nonce and Quote_r could never be built. */
+     * coap_nonce_handler() unmarshals this exact DTO -- keeping req.nonce
+     * for its own separate Quote_a freshness check -- then generates and
+     * returns its own fresh challenge as the response body, a genuinely
+     * Verifier-picked value rather than an echo of what RP just sent (see
+     * verifier_challenge_nonce's comment in verifier.c for why that
+     * distinction matters). An empty request body here made unmarshaling
+     * fail immediately ("Could not get CoAP PDU data"), which is why RP
+     * never received a nonce and Quote_r could never be built, before this
+     * was fixed. */
     if ((result = charra_marshal_attestation_request(
                  &last_request, &nonce_req_buf_len, &nonce_req_buf)) !=
             CHARRA_RC_SUCCESS) {

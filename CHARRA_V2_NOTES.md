@@ -1147,11 +1147,11 @@ instead.
   simulator's actual endorsement hierarchy — `keys/gen-ak-pki.sh`'s EK certs
   are plain openssl keys today, not real TPM objects (see `/certify_ak`
   entry in Part 3 for exactly what this blocks).
-- Wiring the AK-provisioning state module's `charra_ak_state_find_by_serial()`
-  into `coap_appraise_handler`'s Step 3a/3b item 1 EK/AK check (now built —
-  see its own Part 3 entry) to reject revoked certificates. The check itself
-  currently only verifies chain + key match, not revocation status; the
-  lookup function is ready, nothing calls it yet.
+- ~~Wiring the AK-provisioning state module's `charra_ak_state_find_by_serial()`
+  into `coap_appraise_handler`'s Step 3a/3b item 1 EK/AK check~~ **Built** —
+  `is_ak_serial_currently_valid()` (`verifier.c`) calls
+  `charra_ak_state_find_by_serial()` then `charra_ak_state_is_valid()`, so a
+  revoked or expired serial now fails the check, not just a broken chain.
 - A persisted unit test for `msg_rp_appraisal_dto`'s marshal/unmarshal
   (including the two new AK certificate fields) — currently only verified
   via a temporary, not-committed live client (see "Step 3a/3b item 1" entry
@@ -1160,46 +1160,62 @@ instead.
   now (see "AK-provisioning state" entry in Part 3): the only thing that
   currently revokes a record is a fresh renewal for the same EK.
 
-### Bugs found during audit of `verifier.c` (2026 audit, not yet fixed)
+### Bugs found during audit of `verifier.c` (2026 audit) — re-checked against current code, most already fixed
 
 **Line numbers below are stale** — this session's DRA-TLS-alignment work
 (moving `log_r` checks to `charra_event_log.c`, removing the PCR-vs-reference
 check) shifted most of the file by hundreds of lines; treat line references
-as approximate, re-locate by function/variable name. **Bug 4 also appears
-already fixed**: `attestation_result_signature_mbedtls` is folded into the
-final `attestation_result` in current `coap_appraise_handler` code, contrary
-to what's described below — likely fixed incidentally during the
-"small `static` helpers" refactor (see above), not verified against the
-original finding. The other six bugs have not been re-checked against
-current code this session.
+as approximate, re-locate by function/variable name.
 
-Most severe first — full details/failure scenarios were reported via
-ReportFindings during the session that found them; summarized here for
-persistence:
+**Update, later session — bugs 1, 2, 3, 5 re-checked against current code and
+are all already fixed**, by unrelated work sometime after the original audit;
+nobody circled back to mark them resolved here, so this list kept claiming
+they were still open long after they weren't. Verified directly by reading
+the current code (not just re-running tests):
 
-1. **Unbounded `memcpy` into `tpm2_public_key`** (`charra_marshaling.c:441`)
-   — no length check before copying attacker-controlled CBOR bytes into a
-   fixed-size struct field. Most severe: no cap at all on the overflow.
-2. **`attestation_data` bounds check uses wrong `sizeof`**
-   (`verifier.c:342`/`406`) — checks against the whole `TPM2B_ATTEST` struct
-   but writes into a smaller sub-field; ~2-byte overflow window.
-3. **Uninitialized `esys_ctx`/`tcti_ctx` read if `fopen()` fails**
-   (`verifier.c:300`) — a `goto cleanup` jumps over their declarations;
-   undefined behavior if the working directory isn't writable.
-4. **mbedTLS signature check result is discarded** (`verifier.c:447`) — the
-   "defense in depth" second signature check never actually gates the
-   attestation result; only the TPM-based check does.
-5. **File handle leak on every error path** (`verifier.c:296`) —
-   `durations_verifier.txt` only gets `fclose`'d on full success.
+1. ~~**Unbounded `memcpy` into `tpm2_public_key`**~~ **Fixed** —
+   `charra_marshaling.c` now bounds-checks every byte-string field against
+   its destination's `sizeof` before copying, `tpm2_public_key` included; a
+   banner comment above the first check block (*"Every length is checked
+   against its destination before the copy: this is attacker-reachable
+   input and the destinations are fixed-size"*) confirms this was done
+   deliberately, not incidentally.
+2. ~~**`attestation_data` bounds check uses wrong `sizeof`**~~ **Fixed** —
+   `coap_appraise_handler()` checks `res.attestation_data_len >
+   sizeof(TPMS_ATTEST)`, not the larger `TPM2B_ATTEST`, with a comment
+   spelling out exactly this distinction and why it matters.
+3. ~~**Uninitialized `esys_ctx`/`tcti_ctx` read if `fopen()` fails**~~
+   **Fixed** — both are declared and NULL-initialized before the
+   `durations_verifier.txt` `fopen()` call, with a comment explaining why
+   (so `cleanup` can safely `if (esys_ctx != NULL)` instead of reading an
+   indeterminate value on that early exit).
+4. ~~**mbedTLS signature check result is discarded**~~ **Fixed** (found
+   already fixed in an earlier revision of this doc) —
+   `attestation_result_signature_mbedtls` is folded into the final
+   `attestation_result`.
+5. ~~**File handle leak on every error path**~~ **Fixed** — every early
+   exit in `coap_appraise_handler()` goes through `goto cleanup`, which
+   unconditionally does `if (p_file != NULL) fclose(p_file)`; no `return`
+   bypasses it.
 6. **Global `last_request` risks cross-session nonce mixing**
-   (`verifier.c:66`) — shared mutable state between `/nonce` and `/appraise`;
-   already hinted at in the code's own TODO comment.
+   (`verifier.c`) — **still open, deliberately left as is for now.**
+   Shared mutable state between `/nonce` and `/appraise`, overwritten by
+   whichever RP's `/nonce` call lands most recently regardless of which RP
+   is mid-appraisal; the code's own comment calls it "the known
+   cross-session-fragility global." Can't forge an accept (nonces are
+   randomly generated, no plausible collision), but can cause spurious
+   appraisal failures if multiple RPs' `/nonce`↔`/appraise` exchanges
+   interleave against one Verifier process — a real gap, but the same class
+   of "single in-flight round" simplification the code already accepts
+   deliberately for `qualification_state`. A proper fix needs pending-nonce
+   state keyed per requesting session/peer instead of one shared global;
+   out of scope for now by explicit decision.
 7. **(Different file) `relying_party.c:366`** — `strcmp` result inverted,
    swaps pass/fail when interpreting the Verifier's own response message.
    Outside `verifier.c` but directly consumes its output. **FIXED** — see
    "Live end-to-end verification on `EK/AK_rp_verifier`" below.
 
-Bugs 1, 2, 3, 5, 6 not fixed yet; flagging here so they aren't lost.
+Only bug 6 remains open.
 
 ### RP qualification handshake was structurally broken by salted redaction (found on `EK/AK_rp_verifier`) — **FIXED**
 
@@ -1578,26 +1594,43 @@ rejects an existing one as invalid/expired, then retry `/appraise`):
   the EK itself didn't expire and `charra_rp_key_mgr_create_ek()` would just
   reproduce it identically anyway) followed by a fresh
   `ensure_rp_ak_certificate()` call.
-- **Thundering-herd guard**: several verifier threads can discover a
-  rejection at once (they share one Verifier-side CA and one
-  `ak-provisioning-state.txt`, so one bad/expired cert is bad for all of
-  them simultaneously). Naively re-provisioning per-thread would have each
+- **Thundering-herd guard (superseded, see update below)**: at the time this
+  was built, several verifier threads could discover a rejection at once
+  because they all shared one identity — one Verifier-side CA and one
+  `ak-provisioning-state.txt`, so one bad/expired cert was bad for all of
+  them simultaneously. Naively re-provisioning per-thread would have each
   thread's renewal revoke the previous thread's freshly-issued cert (renewal
   semantics: issuing always revokes the prior record for the same EK — see
-  "AK-provisioning state" above), so retries could livelock. Fixed with a
-  single-flight pattern: a new `rp_ak_generation` counter (bumped once per
-  actual re-provision) plus `rp_ak_reprovision_mutex`. Each attempt records
-  the generation its evidence was built under; on rejection, a thread only
-  performs the actual re-provisioning itself if the generation hasn't moved
-  since — otherwise another thread already refreshed it, so this one just
-  retries against the now-current cached identity. The same mutex also
-  guards every read of `rp_ak_cert_der`/`rp_public_key_der` during evidence
-  building, closing a data race against a concurrent re-provision freeing/
-  replacing those buffers mid-read.
-- Not yet exercised by a real rejection in a live run (Step 3a keeps passing
-  on the first try once the nonce bug above was fixed, so the retry path
-  hasn't fired) — logic verified by code review and successful compilation,
-  not by observing an actual retry happen.
+  "AK-provisioning state" above), so retries could livelock. Fixed at the
+  time with a single-flight pattern: an `rp_ak_generation` counter (bumped
+  once per actual re-provision) plus `rp_ak_reprovision_mutex`. Each attempt
+  recorded the generation its evidence was built under; on rejection, a
+  thread only performed the actual re-provisioning itself if the generation
+  hadn't moved since — otherwise another thread had already refreshed it, so
+  that thread just retried against the now-current cached identity. The same
+  mutex also guarded every read of `rp_ak_cert_der`/`rp_public_key_der`
+  during evidence building, closing a data race against a concurrent
+  re-provision freeing/replacing those buffers mid-read.
+- **Update, later session — `rp_ak_generation` and the single-flight guard
+  above are gone.** "RP AK certification is now independent per-Verifier"
+  (below) made AK certification genuinely per-Verifier: each thread now
+  owns its own `rp_ak_cert_der[i]`/`rp_ak_cert_der_len[i]`/
+  `rp_ak_cert_ready[i]` slot and calls its own separate `/certify_ak`,
+  against its own separate `ak-provisioning-state-<port>.txt` ledger (now
+  `state/rp-ak-provisioning/rp-ak-provisioning-state-<port>.txt` — see the
+  rename/reorg entry below). There is no longer a shared identity for
+  threads to stampede on, so the whole problem this guard solved no longer
+  exists: one Verifier rejecting one thread's certificate says nothing
+  about any other thread's, and re-provisioning one slot can't revoke
+  another. `rp_ak_generation` was deleted outright rather than kept as dead
+  code; `rp_ak_reprovision_mutex` still exists but now guards a different,
+  smaller thing — see its own comment in `relying_party.c`.
+- Not yet exercised by a real rejection in a live run *at the time this was
+  written* — since superseded: the qualification-expiry retry path (a
+  structurally identical one-retry-then-give-up pattern, added later for a
+  different rejection reason) has since been observed firing correctly in a
+  live run — see "RP now caches its own qualification client-side..."
+  below.
 
 **Temporary: Verifier accepts an empty Attester AK certificate.** Step 3b
 item 1 previously hard-failed every attestation once RP started forwarding a
@@ -1764,3 +1797,51 @@ after the `ensure_rp_ak_certificate()` fix above.
 **`.gitignore` updated**: `rp-qualification-until-*.txt` (one file per
 Verifier port, RP's own qualification cache) added alongside the existing
 `rp-ak-certificate-*.der` entry.
+
+### `/nonce` now returns a genuine Verifier-generated challenge, not an echo of RP's own nonce
+
+Raised while re-auditing the `verifier.c` bug list above (bug 6, `last_
+request`): `coap_nonce_handler()` was unmarshaling RP's request DTO and
+echoing `req.nonce` — the same nonce RP separately generated for the
+*Attester* — straight back as "the Verifier's nonce" for Quote_r's
+freshness check (a lower-effort choice made explicitly, see "Live
+end-to-end verification..." above: *"Fixed (lower-effort, verifier-
+compatible direction, per explicit decision)"*). That's not a real
+challenge: a value RP picked itself and the Verifier merely reflects back
+proves nothing about freshness *from the Verifier's side* — RP could sign
+an old Quote_r over a self-chosen nonce it already knows will "match" on
+replay. A genuine freshness challenge has to be picked by the party doing
+the checking.
+
+**Fix**: `coap_nonce_handler()` still unmarshals and stores RP's request
+DTO into `last_request` (unchanged — Quote_a's own freshness check, Step 3b
+item 3, still needs the nonce RP gave the *Attester*, a separate concern
+from Quote_r's), but now calls `charra_random_bytes()` to generate a fresh
+32-byte challenge of its own, stored in a new global,
+`verifier_challenge_nonce`/`_len`, and returns *that* as the `/nonce`
+response body instead of `req.nonce`. Step 3a item 3 (Quote_r's freshness
+check) now compares against `verifier_challenge_nonce`, not `last_request.
+nonce` — the two nonces are now genuinely different values checked by two
+genuinely separate comparisons (Quote_a vs. the Attester-facing nonce,
+Quote_r vs. the Verifier-generated one), where before both checks
+happened to compare against the same shared value by construction.
+
+Also removed: a `TPM2B_DATA qualifying_data` local in `coap_nonce_handler()`
+that was built (`size`/`buffer` populated from `req.nonce`) but never
+actually read anywhere afterward — dead code left over from an earlier
+design, noticed while rewriting this exact function.
+
+`verifier_challenge_nonce` is a single global with the same single-in-
+flight-round limitation as `last_request` — genuinely fixing that (keying
+pending nonce state per requesting session instead of one shared global)
+is bug 6 above, and remains open by explicit decision; this change doesn't
+worsen or improve that, it only fixes *what* gets checked, not *how many
+sessions can be in flight at once*.
+
+**Verified live**: RP's log now shows `"Received nonce of 32 bytes from
+Verifier n° 1"` (the Verifier's fresh challenge) alongside its own
+unrelated `"Generated nonce of length 20"` (RP's own nonce for the
+Attester) — two visibly distinct values, not one echoed number. Verifier's
+log shows both freshness checks passing independently: `"Nonce in Quote_r
+is valid!"` and `"Nonce in TPM Quote is valid!"`, ending in `ATTESTATION
+SUCCESSFUL`. Full rebuild + all 8 test suites still pass, 0 regressions.
