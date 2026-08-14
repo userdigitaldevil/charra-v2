@@ -324,6 +324,19 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
             struct timespec start_time, end_time;
             double duration;
 
+            /* Clear delimiter between sweep iterations -- without this, every
+             * run's log lines (1..5 verifiers, NUM_RUNS repeats each) run
+             * together with no way to tell where one attestation attempt ends
+             * and the next begins. */
+            charra_log_info("[" LOG_NAME
+                            "] ============================================================");
+            charra_log_info("[" LOG_NAME
+                            "] Starting new attestation run with %d verifier(s) "
+                            "(run %d/%d).",
+                    num_verifiers, run + 1, NUM_RUNS);
+            charra_log_info("[" LOG_NAME
+                            "] ============================================================");
+
             /* check environment variables */
             charra_log_info("[" LOG_NAME "] Checking environment variables.");
             // Your environment setup code here
@@ -509,7 +522,13 @@ static coap_response_t coap_attester_handler(
         goto cleanup;
     }
 
-    charra_log_info("[" LOG_NAME "] Forwarding evidence to the verifiers.");
+    /* NOT actually forwarding yet -- charra_rp_prepare_evidence() (privacy
+     * cleaning: redact the log, build Quote_r) still has to run first, in
+     * get_attestation_results() below. The real "Forwarding evidence to the
+     * verifiers" log is there, after that redaction succeeds. */
+    charra_log_info(
+            "[" LOG_NAME "] Evidence appraised locally; privacy-cleaning "
+            "before forwarding to the Verifiers.");
     /* store last response */
     last_response = res;
 
@@ -2328,6 +2347,7 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
 
     CHARRA_RC result = EXIT_FAILURE;
 
+    charra_log_info("[" LOG_NAME "] Forwarding (redacted) evidence to the verifiers.");
     charra_log_info("[" LOG_NAME "]  +------------ Interaction with the Verifiers --------------+");
 
     pthread_t threads[num_verifiers];
