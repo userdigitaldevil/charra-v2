@@ -1193,7 +1193,7 @@ persistence:
 
 Bugs 1, 2, 3, 5, 6 not fixed yet; flagging here so they aren't lost.
 
-### Known issue: RP qualification handshake is structurally broken by salted redaction (found on `EK/AK_rp_verifier`, not fixed)
+### RP qualification handshake was structurally broken by salted redaction (found on `EK/AK_rp_verifier`) — **FIXED**
 
 `charra_rp_qualification_check()` (`charra_rp_qualification.c`) compares an
 RP's submitted redacted log against a locally-computed "golden log" with a
@@ -1202,32 +1202,41 @@ byte-exact `memcmp()`. `charra_sdk_redact_ima_log()` was rewritten in
 salt per call** (`hash_path_salted()`, deliberately never transmitted, so
 equal paths don't redact to equal values across separate redactions). Nobody
 updated the qualification check to account for this: **an RP running the
-exact correct, unmodified SDK can never produce byte-identical output to the
-Verifier's own golden-log redaction**, since both calls mint independent
-random salts. The check is not merely stale — it cannot pass for a correctly
-behaving RP anymore, by construction. This was caught because rebuilding this
+exact correct, unmodified SDK could never produce byte-identical output to
+the Verifier's own golden-log redaction**, since both calls minted
+independent random salts. The check was not merely stale — it could not pass
+for a correctly behaving RP by construction. Caught because rebuilding this
 branch in Docker and running `make test` surfaced 4 failing assertions in
-`test_rp_qualification` (`"an RP that redacts correctly qualifies"`); not
-fixed yet, left for a future session. Fix needs a real design decision (e.g.
-a salt parameter so the qualification challenge can use a fixed/known salt
-while real `/appraise` redaction keeps using a random one — safe since
-qualification only ever touches fabricated synthetic paths — or dropping the
-byte-exact log comparison in favor of a structural/PCR-only check).
+`test_rp_qualification` (`"an RP that redacts correctly qualifies"`).
 
-**Update: this is now enforced live, not just in `test_rp_qualification`
-(see "RP qualification handshake wired end-to-end" below).** As of the
-`coap_appraise_handler` gate landing, this known-broken comparison means
-**every `/appraise` call is currently rejected with `4.03 Forbidden`,
-regardless of how correct the RP's evidence is** — confirmed live: a full
-attester → RP → verifier run now ends in "Attestation failed!" purely
-because `/qualify/submit` never passes, never reaching Step 3a/3b at all.
-This is the intended, explicitly-requested state of this branch for now
-(the wiring was built ahead of the salt fix, deliberately) — but it is a
-real behavior change from the previous session's "`ATTESTATION SUCCESSFUL`
-end to end" result, and the salt-handling design decision above is now the
-sole blocker on `/appraise` passing again, not a nice-to-have.
+Briefly, once `coap_appraise_handler`'s qualification gate landed (see below)
+before this was fixed, the consequence was severe: **every `/appraise` call
+rejected with `4.03 Forbidden`, regardless of how correct the RP's evidence
+was** — confirmed live, a full attester → RP → verifier run ended in
+"Attestation failed!" purely because `/qualify/submit` never passed. That was
+the deliberately-accepted state for one session while the wiring above was
+built ahead of this fix.
 
-### RP qualification handshake wired end-to-end (built this session, salt issue above deliberately left unfixed)
+**Fix**: `charra_sdk_redact_ima_log()` gained an optional `salt` parameter —
+`NULL` (unchanged default, used for all real evidence) generates a fresh
+random salt per entry exactly as before; a caller-given
+`CHARRA_SDK_PATH_SALT_LEN`-byte salt is used for every entry instead, making
+two redactions of the same log byte-identical. This is the one deliberate
+exception to "salt is never transmitted" — safe only because the
+qualification challenge is Verifier-fabricated synthetic data, never real
+Attester evidence (real evidence must always pass `NULL`). The Verifier now
+generates one random salt per `/qualify` challenge
+(`charra_rp_qualification_generate()`'s new `salt` parameter), redacts its
+own golden copy with it, and sends it to the RP alongside the raw log
+(`msg_qualify_response_dto`'s new `salt` field); the RP redacts the challenge
+with that same salt before submitting. Confirmed live:
+`/qualify/submit` now returns *"Qualification successful!"*, the appraise
+gate passes, and a full run ends in `ATTESTATION SUCCESSFUL` again.
+`test_rp_qualification` went from 4 failing to 0 failing (27 → 28 assertions,
+one new bad-argument check for the now-mandatory salt); `test_sdk` grew a new
+determinism test for the shared-salt path (20 → 23 assertions).
+
+### RP qualification handshake wired end-to-end (built this session; salt issue above also fixed)
 
 The four pieces the "Not yet built" list used to describe as missing are
 now built and confirmed live:
@@ -1477,7 +1486,9 @@ working tree. Added to `.gitignore` alongside `bin/`/`obj/` so a stray
 
 **Still open after this session**: `relying_party.c`'s AK-cert-rejection
 retry path is implemented but unexercised live (see above); the seven-bug
-audit list above still has bugs 1/2/3/5/6 unfixed; the RP qualification
-handshake's salted-redaction incompatibility (see its own entry above)
-remains unfixed; the Attester still has no real AK (Step 3b's bypass above
-is a stopgap, not a fix).
+audit list above still has bugs 1/2/3/5/6 unfixed; the Attester still has no
+real AK (Step 3b's bypass above is a stopgap, not a fix). (The RP
+qualification handshake's salted-redaction incompatibility noted here in an
+earlier revision of this doc was fixed in a later session — see "RP
+qualification handshake was structurally broken by salted redaction ...
+FIXED" above.)
