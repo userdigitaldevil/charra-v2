@@ -123,6 +123,17 @@ static uint8_t* rp_ak_cert_der = NULL;
 static uint32_t rp_ak_cert_der_len = 0;
 static bool processing_certify_ak_response = false;
 static CHARRA_RC certify_ak_rc = CHARRA_RC_ERROR;
+
+/* --- RP qualification handshake state (/qualify + /qualify/submit) ------
+ * See charra_rp_qualification.h. Verifier-local state, so this handshake
+ * has to be repeated against each Verifier the RP submits evidence to, not
+ * just verifiers[0] like AK provisioning above. */
+static uint8_t* qualify_challenge_log = NULL;
+static uint32_t qualify_challenge_log_len = 0;
+static CHARRA_RC qualify_response_rc = CHARRA_RC_ERROR;
+static bool processing_qualify_response = false;
+static bool qualify_submit_qualified = false;
+static bool processing_qualify_submit_response = false;
 /* Guards every TPM connection RP opens (provisioning and, later, each
  * Quote_r signing operation): the TPM simulator this dev environment uses
  * accepts only one client connection at a time, and every other binary
@@ -262,6 +273,35 @@ static void invalidate_cached_rp_ak_certificate(void);
 static CHARRA_RC rp_open_tpm_and_load_ak(ESYS_CONTEXT** esys_ctx_out,
         TSS2_TCTI_CONTEXT** tcti_ctx_out, ESYS_TR* ek_handle_out,
         ESYS_TR* ak_handle_out, TPM2B_NAME** ak_name_out);
+
+static coap_response_t coap_qualify_response_handler(
+        coap_session_t* session CHARRA_UNUSED,
+        const coap_pdu_t* sent CHARRA_UNUSED, const coap_pdu_t* received,
+        const coap_mid_t mid CHARRA_UNUSED);
+
+static coap_response_t coap_qualify_submit_response_handler(
+        coap_session_t* session CHARRA_UNUSED,
+        const coap_pdu_t* sent CHARRA_UNUSED, const coap_pdu_t* received,
+        const coap_mid_t mid CHARRA_UNUSED);
+
+/**
+ * @brief Run the RP qualification handshake (charra_rp_qualification.h)
+ * against one Verifier: fetch a fresh /qualify challenge, redact it with
+ * the same pipeline real evidence uses, sign the resulting PCR digest with
+ * RP's TPM-resident AK, and submit it all via /qualify/submit.
+ *
+ * Verifier-local state (unlike the AK certificate, which is trusted by
+ * every Verifier equally, see ensure_rp_ak_certificate()'s docstring) --
+ * has to be repeated per Verifier the RP intends to submit evidence to.
+ * Requires rp_identity_ready (an RP AK certificate must already exist).
+ *
+ * @returns CHARRA_RC_SUCCESS only if the Verifier's /qualify/submit
+ * response reports the RP as qualified. Any other outcome (transport
+ * failure, or a genuine "not qualified" verdict) returns a non-success
+ * code -- the caller decides whether that's fatal.
+ */
+static CHARRA_RC rp_perform_qualification_handshake(
+        const verifier_info* verifier);
 
 CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers);
 
@@ -833,6 +873,315 @@ static coap_response_t coap_certify_ak_response_handler(
 cleanup:
     processing_certify_ak_response = false;
     return COAP_RESPONSE_OK;
+}
+
+/**
+ * @brief Send req_buf (may be NULL/0 for an empty body) as a CoAP FETCH
+ * request to ip_address:port/uri_path, registering response_handler, and
+ * block until libcoap has nothing left pending for the exchange, an I/O
+ * error occurs, or verifier_response_timeout is exceeded.
+ *
+ * Factors out the create-context/create-session/build-and-send-PDU/wait-
+ * for-response/tear-down sequence every one-shot RP-as-client exchange in
+ * this file repeats (ensure_rp_ak_certificate()'s /certify_ak call,
+ * rp_perform_qualification_handshake()'s /qualify and /qualify/submit).
+ * response_handler is expected to record the exchange's actual content-
+ * level result (parsed data, or a parse failure) in its own dedicated
+ * global, the same way coap_certify_ak_response_handler() does for
+ * certify_ak_rc -- this function only reports whether the CoAP transport
+ * itself completed, not whether the response's content was valid.
+ *
+ * @param[in,out] processing_flag caller's own dedicated "response handler
+ * is currently running" flag (e.g. &processing_qualify_response), reset to
+ * false here before sending -- same flag every response handler in this
+ * file already toggles true/false around its own body.
+ */
+static CHARRA_RC rp_coap_fetch(const char* ip_address, unsigned int port,
+        const char* uri_path, const uint8_t* req_buf, uint32_t req_buf_len,
+        coap_response_handler_t response_handler, bool* processing_flag) {
+    CHARRA_RC result = CHARRA_RC_ERROR;
+    coap_context_t* coap_context = NULL;
+    coap_session_t* coap_session = NULL;
+    coap_optlist_t* coap_options = NULL;
+
+    if ((coap_context = charra_coap_new_context(true)) == NULL) {
+        charra_log_error(
+                "[" LOG_NAME "] Cannot create CoAP context for /%s.", uri_path);
+        return CHARRA_RC_COAP_ERROR;
+    }
+    coap_register_response_handler(coap_context, response_handler);
+
+    if ((coap_session = charra_coap_new_client_session(
+                 coap_context, ip_address, port, COAP_PROTO_UDP)) == NULL) {
+        charra_log_error(
+                "[" LOG_NAME "] Cannot create /%s client session.", uri_path);
+        charra_free_if_not_null_ex(coap_context, coap_free_context);
+        return CHARRA_RC_COAP_ERROR;
+    }
+
+    uint8_t coap_mediatype_cbor_buf[4] = {0};
+    unsigned int coap_mediatype_cbor_buf_len = coap_encode_var_safe(
+            coap_mediatype_cbor_buf, sizeof(coap_mediatype_cbor_buf),
+            COAP_MEDIATYPE_APPLICATION_CBOR);
+    coap_insert_optlist(&coap_options,
+            coap_new_optlist(COAP_OPTION_URI_PATH, strlen(uri_path),
+                    (const uint8_t*)uri_path));
+    coap_insert_optlist(&coap_options,
+            coap_new_optlist(COAP_OPTION_CONTENT_TYPE,
+                    coap_mediatype_cbor_buf_len, coap_mediatype_cbor_buf));
+
+    coap_pdu_t* pdu = charra_coap_new_request(coap_session,
+            COAP_MESSAGE_TYPE_CON, COAP_REQUEST_FETCH, &coap_options, req_buf,
+            req_buf_len);
+    if (pdu == NULL) {
+        charra_log_error(
+                "[" LOG_NAME "] Cannot create /%s request PDU.", uri_path);
+        charra_free_if_not_null_ex(coap_options, coap_delete_optlist);
+        charra_free_if_not_null_ex(coap_session, coap_session_release);
+        charra_free_if_not_null_ex(coap_context, coap_free_context);
+        return CHARRA_RC_ERROR;
+    }
+
+    coap_fixed_point_t coap_timeout = {verifier_response_timeout, 0};
+    coap_session_set_ack_timeout(coap_session, coap_timeout);
+
+    if (coap_send_large(coap_session, pdu) == COAP_INVALID_MID) {
+        charra_log_error("[" LOG_NAME "] Cannot send /%s request.", uri_path);
+        charra_free_if_not_null_ex(coap_options, coap_delete_optlist);
+        charra_free_if_not_null_ex(coap_session, coap_session_release);
+        charra_free_if_not_null_ex(coap_context, coap_free_context);
+        return CHARRA_RC_COAP_ERROR;
+    }
+
+    *processing_flag = false;
+    uint16_t response_wait_time = 0;
+    int coap_io_process_time = -1;
+    result = CHARRA_RC_SUCCESS;
+    while (!(*processing_flag) && coap_io_pending(coap_context)) {
+        if ((coap_io_process_time = coap_io_process(
+                     coap_context, COAP_IO_PROCESS_TIME_MS)) == -1) {
+            charra_log_error(
+                    "[" LOG_NAME "] Error during CoAP I/O processing for /%s.",
+                    uri_path);
+            result = CHARRA_RC_COAP_ERROR;
+            break;
+        }
+        response_wait_time += coap_io_process_time;
+        if (response_wait_time >= (verifier_response_timeout * 1000)) {
+            charra_log_error(
+                    "[" LOG_NAME "] Timeout waiting for /%s response.",
+                    uri_path);
+            result = CHARRA_RC_TIMEOUT;
+            break;
+        }
+    }
+
+    charra_free_if_not_null_ex(coap_options, coap_delete_optlist);
+    charra_free_if_not_null_ex(coap_session, coap_session_release);
+    charra_free_if_not_null_ex(coap_context, coap_free_context);
+    return result;
+}
+
+static coap_response_t coap_qualify_response_handler(
+        coap_session_t* session CHARRA_UNUSED,
+        const coap_pdu_t* sent CHARRA_UNUSED, const coap_pdu_t* received,
+        const coap_mid_t mid CHARRA_UNUSED) {
+    processing_qualify_response = true;
+
+    int coap_r = 0;
+    size_t data_len = 0;
+    const uint8_t* data = NULL;
+    size_t data_offset = 0;
+    size_t data_total_len = 0;
+    if ((coap_r = coap_get_data_large(
+                 received, &data_len, &data, &data_offset, &data_total_len)) ==
+            0) {
+        charra_log_error(
+                "[" LOG_NAME "] /qualify: Could not get CoAP PDU data.");
+        qualify_response_rc = CHARRA_RC_ERROR;
+        goto cleanup;
+    }
+
+    msg_qualify_response_dto resp = {0};
+    if ((qualify_response_rc = charra_unmarshal_qualify_response(
+                 data_len, data, &resp)) != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] /qualify: Could not parse CBOR response.");
+        goto cleanup;
+    }
+
+    charra_free_if_not_null(qualify_challenge_log);
+    qualify_challenge_log = resp.challenge_log;
+    qualify_challenge_log_len = resp.challenge_log_len;
+
+cleanup:
+    processing_qualify_response = false;
+    return COAP_RESPONSE_OK;
+}
+
+static coap_response_t coap_qualify_submit_response_handler(
+        coap_session_t* session CHARRA_UNUSED,
+        const coap_pdu_t* sent CHARRA_UNUSED, const coap_pdu_t* received,
+        const coap_mid_t mid CHARRA_UNUSED) {
+    processing_qualify_submit_response = true;
+
+    qualify_submit_qualified =
+            coap_pdu_get_code(received) == COAP_RESPONSE_CODE_CONTENT;
+
+    /* body is just a human-readable message (see coap_qualify_submit_
+     * handler() in verifier.c) -- logged for visibility, not parsed */
+    size_t data_len = 0;
+    const uint8_t* data = NULL;
+    size_t data_offset = 0;
+    size_t data_total_len = 0;
+    if (coap_get_data_large(received, &data_len, &data, &data_offset,
+                &data_total_len) != 0) {
+        charra_log_info("[" LOG_NAME "] /qualify/submit: Verifier says: %.*s",
+                (int)data_len, (const char*)data);
+    }
+
+    processing_qualify_submit_response = false;
+    return COAP_RESPONSE_OK;
+}
+
+static CHARRA_RC rp_perform_qualification_handshake(
+        const verifier_info* verifier) {
+    if (!rp_identity_ready) {
+        charra_log_error(
+                "[" LOG_NAME "] Cannot run qualification handshake: RP AK "
+                "not provisioned yet.");
+        return CHARRA_RC_ERROR;
+    }
+
+    charra_log_info(
+            "[" LOG_NAME "]  +------------ RP Qualification --------------+");
+
+    CHARRA_RC result = CHARRA_RC_ERROR;
+    uint8_t* redacted_log = NULL;
+    uint32_t redacted_log_len = 0;
+
+    /* --- 1. fetch a fresh challenge --- */
+    qualify_response_rc = CHARRA_RC_ERROR;
+    result = rp_coap_fetch(verifier->ip_address, verifier->port_number,
+            "qualify", NULL, 0, coap_qualify_response_handler,
+            &processing_qualify_response);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /qualify request failed.");
+        return result;
+    }
+    if (qualify_response_rc != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /qualify response invalid.");
+        return qualify_response_rc;
+    }
+    charra_log_info("[" LOG_NAME "] Received a %u-byte challenge log.",
+            qualify_challenge_log_len);
+
+    /* --- 2. redact it with the exact same pipeline real evidence uses --- */
+    result = charra_sdk_redact_ima_log(qualify_challenge_log,
+            qualify_challenge_log_len, &redacted_log, &redacted_log_len);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not redact the qualification "
+                         "challenge log.");
+        goto done;
+    }
+
+    /* --- 3. replay the redacted log into its PCR digest --- */
+    uint8_t submitted_pcr_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
+    result = charra_replay_ima_log(redacted_log, redacted_log_len,
+            CHARRA_IMA_PCR_INDEX, submitted_pcr_digest);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not replay the redacted "
+                         "challenge log.");
+        goto done;
+    }
+
+    /* --- 4. sign the PCR digest with RP's TPM-resident AK, same
+     * short-lived-connection pattern charra_rp_build_evidence_message()
+     * uses for Quote_r --- */
+    uint8_t rp_signature[CHARRA_RSA_SIGNATURE_LEN] = {0};
+    pthread_mutex_lock(&rp_tpm_mutex);
+    ESYS_CONTEXT* sign_esys_ctx = NULL;
+    TSS2_TCTI_CONTEXT* sign_tcti_ctx = NULL;
+    ESYS_TR sign_ek_handle = ESYS_TR_NONE;
+    ESYS_TR sign_ak_handle = ESYS_TR_NONE;
+    TPM2B_NAME* sign_ak_name = NULL;
+    result = rp_open_tpm_and_load_ak(&sign_esys_ctx, &sign_tcti_ctx,
+            &sign_ek_handle, &sign_ak_handle, &sign_ak_name);
+    if (result != CHARRA_RC_SUCCESS) {
+        pthread_mutex_unlock(&rp_tpm_mutex);
+        charra_log_error("[" LOG_NAME "] Could not open TPM connection to "
+                         "sign the qualification PCR digest.");
+        goto done;
+    }
+    Esys_Free(sign_ak_name);
+
+    result = charra_rp_key_mgr_sign(sign_esys_ctx, sign_ak_handle,
+            submitted_pcr_digest, sizeof(submitted_pcr_digest), rp_signature);
+
+    Esys_FlushContext(sign_esys_ctx, sign_ak_handle);
+    Esys_FlushContext(sign_esys_ctx, sign_ek_handle);
+    Esys_Finalize(&sign_esys_ctx);
+    Tss2_TctiLdr_Finalize(&sign_tcti_ctx);
+    pthread_mutex_unlock(&rp_tpm_mutex);
+
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Could not sign the qualification PCR "
+                "digest.");
+        goto done;
+    }
+
+    /* --- 5. submit --- */
+    msg_qualify_submit_request_dto submit_req = {
+            .submitted_redacted_log_len = redacted_log_len,
+            .submitted_redacted_log = redacted_log,
+            .rp_signature_len = sizeof(rp_signature),
+            .rp_public_key_len = rp_public_key_der_len,
+            .ak_certificate_rp_len = rp_ak_cert_der_len,
+            .ak_certificate_rp = rp_ak_cert_der,
+    };
+    memcpy(submit_req.submitted_pcr_digest, submitted_pcr_digest,
+            sizeof(submitted_pcr_digest));
+    memcpy(submit_req.rp_signature, rp_signature, sizeof(rp_signature));
+    memcpy(submit_req.rp_public_key, rp_public_key_der, rp_public_key_der_len);
+
+    uint8_t* submit_buf = NULL;
+    uint32_t submit_buf_len = 0;
+    result = charra_marshal_qualify_submit_request(
+            &submit_req, &submit_buf_len, &submit_buf);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Could not marshal /qualify/submit request.");
+        goto done;
+    }
+
+    result = rp_coap_fetch(verifier->ip_address, verifier->port_number,
+            "qualify_submit", submit_buf, submit_buf_len,
+            coap_qualify_submit_response_handler,
+            &processing_qualify_submit_response);
+    charra_free_if_not_null(submit_buf);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /qualify/submit request failed.");
+        goto done;
+    }
+
+    if (qualify_submit_qualified) {
+        charra_log_info("[" LOG_NAME "] |  RP QUALIFIED              |");
+        result = CHARRA_RC_SUCCESS;
+    } else {
+        charra_log_error(
+                "[" LOG_NAME "] |  RP NOT QUALIFIED -- expected for now, "
+                "see CHARRA_V2_NOTES.md (salted redaction vs. byte-exact "
+                "golden-log check)  |");
+        result = CHARRA_RC_VERIFICATION_FAILED;
+    }
+
+done:
+    charra_free_if_not_null(qualify_challenge_log);
+    qualify_challenge_log = NULL;
+    qualify_challenge_log_len = 0;
+    charra_free_if_not_null(redacted_log);
+    return result;
 }
 
 /**
@@ -1912,6 +2261,22 @@ void* get_attestation_results_thread(void *arg) {
     coap_context_t* coap_context_verifier_appraisal = NULL;
     coap_session_t* coap_session_verifier_appraisal = NULL;
     coap_optlist_t* coap_options_verifier_appraisal = NULL;
+
+    /* RP qualification handshake (/qualify + /qualify/submit) -- Verifier-
+     * local state (see rp_perform_qualification_handshake()'s docstring),
+     * so unlike AK provisioning this has to run against every verifier,
+     * not just verifiers[0]. Not fatal here if it fails: it always does
+     * right now, by design -- see CHARRA_V2_NOTES.md -- and
+     * coap_appraise_handler() on the Verifier side is the actual
+     * enforcement point; a failed handshake here just means the /appraise
+     * call below is expected to come back rejected. */
+    if (rp_perform_qualification_handshake(&verifier_info) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Verifier n° %d: qualification handshake did "
+                "not succeed; proceeding to /appraise anyway.",
+                current_thread_index + 1);
+    }
 
     if (use_dtls_psk && use_dtls_rpk) {
         charra_log_error(
