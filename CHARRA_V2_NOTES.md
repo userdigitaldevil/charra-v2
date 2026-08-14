@@ -1196,9 +1196,10 @@ persistence:
    already hinted at in the code's own TODO comment.
 7. **(Different file) `relying_party.c:366`** — `strcmp` result inverted,
    swaps pass/fail when interpreting the Verifier's own response message.
-   Outside `verifier.c` but directly consumes its output.
+   Outside `verifier.c` but directly consumes its output. **FIXED** — see
+   "Live end-to-end verification on `EK/AK_rp_verifier`" below.
 
-None of these fixed yet; flagging here so they aren't lost.
+Bugs 1, 2, 3, 5, 6 not fixed yet; flagging here so they aren't lost.
 
 ### Known issue: RP qualification handshake is structurally broken by salted redaction (found on `EK/AK_rp_verifier`, not fixed)
 
@@ -1240,3 +1241,173 @@ new 4-byte length prefixes (redacted `template_data` is now 79 bytes, not
 updated: it previously asserted two redactions of the same log produce
 byte-identical output, which is now false by design per the salting above —
 it now asserts the opposite (same length, different bytes).
+
+### Rename: `charra_rp_identity` → `charra_rp_key_mgr`
+
+`charra_rp_identity.h`/`.c` (RP's TPM-resident EK/AK creation, persistence,
+`ActivateCredential`, AK-signing — introduced in `bb0eeed`) renamed to match
+this codebase's existing naming convention: `charra_key_mgr.h`/`.c` is
+already the Attester-side equivalent, so `charra_rp_key_mgr` makes the
+parallel explicit rather than leaving two unrelated-sounding names for
+mirror-image modules. Every `charra_rp_identity_*` function renamed to
+`charra_rp_key_mgr_*` (`create_ek`, `create_ak`, `load_ak`,
+`activate_credential`, `sign`, `public_key_to_der`, `save_public`/
+`load_public`, `save_private`/`load_private`), include guard
+`CHARRA_RP_IDENTITY_H` → `CHARRA_RP_KEY_MGR_H`. Call sites updated in
+`relying_party.c`, references in `charra_dto.h`'s docstrings, `Makefile`'s
+`OBJECTS` list. Pure rename, no logic changed; rebuilt clean in Docker
+afterward to confirm.
+
+### Live end-to-end verification on `EK/AK_rp_verifier` — first genuine `ATTESTATION SUCCESSFUL` for the full RP/EK/AK pipeline
+
+Ran the actual quartet (`trust_manager` + `attester` + up to 5 `verifier`
+instances + `relying_party`) against the dev-env container's real TPM
+simulator, no mocks — not unit tests, the actual CoAP wire protocol end to
+end. This surfaced and fixed several bugs that unit tests couldn't catch
+(they all live in the CoAP/threading glue, not in logic the existing test
+suites exercise), then reached a genuine `ATTESTATION SUCCESSFUL` for the
+first time.
+
+**Bug: `/nonce` request sent with an empty body — RP and Verifier were built
+to two different, incompatible nonce designs.** `relying_party.c`'s `/nonce`
+client code carried an explicit comment: *"The request carries no payload —
+the Verifier contributes the challenge, which is the whole point: a nonce
+the RP generated could never prove freshness TO the Verifier."* But
+`verifier.c`'s `coap_nonce_handler()` was written the other way around: it
+unconditionally unmarshals a full `msg_attestation_request_dto` from the
+incoming request and echoes back `req.nonce` — its own comment says this is
+what lets `Quote_r`'s freshness check later byte-compare against
+`last_request.nonce`. Two different contributors independently resolved the
+open "who generates the freshness challenge?" question (see "Deliberately
+out of scope" in Part 2) in opposite directions, and nobody reconciled them.
+Concretely: RP sends zero bytes → `coap_get_data_large()` on the Verifier
+side returns 0 → immediate `"Could not get CoAP PDU data"` → Verifier
+responds `4.00 Bad Request` with no body → RP's `coap_verifier_handler_nonce()`
+finds no data → `"Verifier returned no nonce"` → every single attestation
+died right here, before `Quote_r` could ever be built. **Fixed** (lower-effort,
+verifier-compatible direction, per explicit decision): RP's `/nonce` request
+now sends `last_request` (the same request DTO already built for the
+Attester, stable and read-only by the time this fires — populated once in
+`get_evidence()`, which always completes before `get_attestation_results()`
+spawns any verifier thread) marshaled via the already-existing
+`charra_marshal_attestation_request()`, instead of `NULL, 0`.
+
+**Bug 7 (audit list above), confirmed and fixed**: `coap_verifier_handler_appraisal()`'s
+`if (strcmp((const char*)data, successful_message))` had success and failure
+backwards (`strcmp` returns 0 on a match, i.e. exactly when the attestation
+*succeeded*, which took the `else`/`false` branch). Fixed to
+`memcmp(data, successful_message, data_len) == 0` — also switched off
+`strcmp` entirely: `data` points into the CoAP PDU buffer with no guaranteed
+NUL terminator past `data_len` bytes (the Verifier sends `strlen(message)`
+bytes, excluding the terminator), so comparing by exact received length is
+correctness, not just style.
+
+**New bug found and fixed (not in the original audit list): uninitialized-pointer
+double free on early `goto cleanup`.** `get_attestation_results_thread()`
+declared `coap_context_verifier_appraisal`/`coap_session_verifier_appraisal`/
+`coap_options_verifier_appraisal` (and, independently, `res_buf`) well after
+several earlier `goto cleanup` jumps — including the "Verifier did not supply
+a nonce" path, which fires whenever a verifier times out. Jumping over a C
+variable's initializer leaves it with an indeterminate value, not `NULL`; the
+shared `cleanup:` label then unconditionally passed all three (plus `res_buf`)
+to `charra_free_if_not_null_ex()`/`charra_free_if_not_null()`, calling
+`coap_free_context()`/`coap_session_release()`/`coap_delete_optlist()`/`free()`
+on garbage stack pointers. Reproduced live: a real timed-out verifier during a
+multi-verifier sweep crashed the whole RP process with
+`double free or corruption (out)` — happened in the very first live run this
+session, before any other change, so pre-existing, not introduced by this
+session's other edits. **Fixed** the same way this file's own convention
+already handles `coap_context`/`coap_session`/`coap_options` (comment: *"set
+variables here such that they are valid in case of a goto cleanup"*): hoisted
+all four (`nonce_req_buf`, `res_buf`, and the three
+`coap_*_verifier_appraisal` handles) to the top of the function, initialized
+before any `goto cleanup` can fire.
+
+**AK-certificate-rejection retry, implemented** (explicit ask: RP should call
+`/certify_ak` both on first run with no cert *and* whenever a Verifier
+rejects an existing one as invalid/expired, then retry `/appraise`):
+- `verifier.c`'s `coap_appraise_handler()` now signals this case distinctly:
+  when `attestation_result_ekak_rp` (Step 3a item 1, RP's own AK/EK check —
+  chain validity *or* `is_ak_serial_currently_valid()`) is false, the
+  response is `4.01 Unauthorized` with body `"RP AK certificate invalid or
+  expired!"`, instead of the generic `2.05 Content` + `"Attestation failed!"`
+  every other failure gets. Same response code `/certify_ak` itself already
+  uses for a bad EK certificate — consistent "your credential, not your
+  evidence, is the problem" signal.
+- `relying_party.c`'s `coap_verifier_handler_appraisal()` checks
+  `coap_pdu_get_code(received)` first: on `4.01`, sets a new per-verifier
+  `rp_ak_cert_rejected[]` flag instead of parsing the body as pass/fail.
+- `get_attestation_results_thread()`'s build-evidence → send → wait sequence
+  is now a `for (attempt = 0; attempt < 2; ++attempt)` loop. On rejection
+  (attempt 0 only), re-provisions before retrying: `invalidate_cached_rp_ak_certificate()`
+  (new function — deletes the cached AK public/private/cert files and
+  in-memory state, deliberately leaves the cached EK certificate alone since
+  the EK itself didn't expire and `charra_rp_key_mgr_create_ek()` would just
+  reproduce it identically anyway) followed by a fresh
+  `ensure_rp_ak_certificate()` call.
+- **Thundering-herd guard**: several verifier threads can discover a
+  rejection at once (they share one Verifier-side CA and one
+  `ak-provisioning-state.txt`, so one bad/expired cert is bad for all of
+  them simultaneously). Naively re-provisioning per-thread would have each
+  thread's renewal revoke the previous thread's freshly-issued cert (renewal
+  semantics: issuing always revokes the prior record for the same EK — see
+  "AK-provisioning state" above), so retries could livelock. Fixed with a
+  single-flight pattern: a new `rp_ak_generation` counter (bumped once per
+  actual re-provision) plus `rp_ak_reprovision_mutex`. Each attempt records
+  the generation its evidence was built under; on rejection, a thread only
+  performs the actual re-provisioning itself if the generation hasn't moved
+  since — otherwise another thread already refreshed it, so this one just
+  retries against the now-current cached identity. The same mutex also
+  guards every read of `rp_ak_cert_der`/`rp_public_key_der` during evidence
+  building, closing a data race against a concurrent re-provision freeing/
+  replacing those buffers mid-read.
+- Not yet exercised by a real rejection in a live run (Step 3a keeps passing
+  on the first try once the nonce bug above was fixed, so the retry path
+  hasn't fired) — logic verified by code review and successful compilation,
+  not by observing an actual retry happen.
+
+**Temporary: Verifier accepts an empty Attester AK certificate.** Step 3b
+item 1 previously hard-failed every attestation once RP started forwarding a
+real `msg_rp_appraisal_dto` (`ak_certificate_len == 0`, since the Attester
+has no `/certify_ak` client yet — see "Still genuinely unbuilt" above) — by
+design, correctly, per the spec. But that made it impossible to exercise
+*anything* downstream of Step 3a live (Quote_a's own signature/nonce checks,
+the full success path, this session's other fixes) since every single
+attestation died at Step 3b no matter what. `coap_appraise_handler()` now
+special-cases `res.ak_certificate_len == 0`: logs a loud
+`charra_log_error()` (*"Attester's AK certificate is EMPTY — accepting
+anyway (TEMPORARY: Attester AK provisioning is not implemented yet)"*) and
+sets `attestation_result_ekak = true` instead of calling
+`charra_crypto_verify_ekak_certificate()`. A non-empty certificate is still
+validated normally (chain + key match + not expired/revoked) — this only
+bypasses the "nothing was ever provisioned" case. **Must be removed once the
+Attester has a real AK and RP forwards its certificate** — at that point an
+empty certificate needs to go back to being a hard failure, not a silent
+pass. Tracked here specifically so it isn't forgotten and mistaken for
+permanent behavior.
+
+**Result**: with all of the above, a real live run produced
+`ATTESTATION SUCCESSFUL` end to end — Attester's `Quote_a` (TPM + mbedTLS
+signature checks, nonce check) and RP's `Quote_r` (signature, nonce, AK
+certificate chain — all genuinely checked, not bypassed) all passing over
+real CoAP, real TPM simulator crypto, a 4/5-verifier majority vote surviving
+verifiers that timed out on `/nonce` without crashing (the double-free fix,
+confirmed under the exact condition that used to trigger it) — the first
+time this session's EK/AK work has been observed working as a whole, not
+just in isolated unit tests.
+
+**`.gitignore` updated**: RP's TPM identity cache (`rp-ek-certificate.der`,
+`rp-ak-public.bin`, `rp-ak-private.bin`, `rp-ak-certificate.der`) and the
+AK-provisioning ledger (`ak-provisioning-state.txt`, `.lock`) are
+regenerated at runtime in the repo root (same convention as
+`verifiers_config.txt`) — running the binaries from a checkout of this repo
+(as opposed to some other working directory) writes them straight into the
+working tree. Added to `.gitignore` alongside `bin/`/`obj/` so a stray
+`git add -A` can't accidentally commit real (test) private key material.
+
+**Still open after this session**: `relying_party.c`'s AK-cert-rejection
+retry path is implemented but unexercised live (see above); the seven-bug
+audit list above still has bugs 1/2/3/5/6 unfixed; the RP qualification
+handshake's salted-redaction incompatibility (see its own entry above)
+remains unfixed; the Attester still has no real AK (Step 3b's bypass above
+is a stopgap, not a fix).

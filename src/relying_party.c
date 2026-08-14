@@ -52,6 +52,11 @@ static bool processing_trust_manager_response = false;
 int verifier_list[5];
 // size_t num_verifiers = sizeof(verifier_list) / sizeof(verifier_list[0]);
 bool attestation_results[MAX_VERIFIERS];
+/* Set by coap_verifier_handler_appraisal() when a Verifier's /appraise
+ * response is specifically "your AK certificate is invalid or expired"
+ * (4.01 Unauthorized), as opposed to any other appraisal failure --
+ * distinguishes "go redo /certify_ak and retry" from a plain failed vote. */
+bool rp_ak_cert_rejected[MAX_VERIFIERS];
 typedef struct verifier_info {
     char ip_address[16];
     unsigned int port_number;
@@ -129,6 +134,18 @@ static CHARRA_RC certify_ak_rc = CHARRA_RC_ERROR;
  * This mutex keeps RP's own accesses serialized and, just as importantly,
  * keeps each one short-lived so other processes get a turn. */
 static pthread_mutex_t rp_tpm_mutex = PTHREAD_MUTEX_INITIALIZER;
+/* Guards re-provisioning RP's AK certificate after a Verifier rejects it as
+ * invalid/expired (see rp_ak_cert_rejected above). Several verifier threads
+ * can discover this at once; without serializing, each would independently
+ * wipe the cached AK and request a fresh /certify_ak, and since renewal
+ * always revokes the previous record for the same EK, they would keep
+ * invalidating each other's freshly-issued certificate. rp_ak_generation is
+ * bumped each time a fresh certificate is actually obtained; a thread only
+ * performs the re-provisioning itself if the generation hasn't moved since
+ * it observed the rejection -- otherwise another thread already refreshed
+ * it and this one just retries with what's now cached. */
+static pthread_mutex_t rp_ak_reprovision_mutex = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t rp_ak_generation = 0;
 /* Nonces received from each Verifier, indexed by verifier slot. */
 static uint8_t verifier_nonces[MAX_VERIFIERS][sizeof(TPMU_HA)] = {{0}};
 static uint32_t verifier_nonce_lens[MAX_VERIFIERS] = {0};
@@ -227,6 +244,17 @@ static coap_response_t coap_certify_ak_response_handler(
  */
 static CHARRA_RC ensure_rp_ak_certificate(
         const char* verifier_host, unsigned int verifier_port);
+
+/**
+ * @brief Discard RP's cached AK (public/private/certificate, both on disk
+ * and in memory) so the next ensure_rp_ak_certificate() call is forced to
+ * provision a fresh one via /certify_ak, instead of reloading what a
+ * Verifier just rejected as invalid or expired. The cached EK certificate
+ * is deliberately left alone -- the EK itself is not what expired, and
+ * charra_rp_key_mgr_create_ek() would just reproduce the identical key
+ * anyway.
+ */
+static void invalidate_cached_rp_ak_certificate(void);
 
 /** @brief See its own definition's docstring, above ensure_rp_ak_certificate()
  * in the .c file -- forward-declared here so charra_rp_build_evidence_
@@ -862,6 +890,17 @@ error:
     return result;
 }
 
+static void invalidate_cached_rp_ak_certificate(void) {
+    remove(rp_ak_public_path);
+    remove(rp_ak_private_path);
+    remove(rp_ak_cert_path);
+    charra_free_if_not_null(rp_ak_cert_der);
+    rp_ak_cert_der = NULL;
+    rp_ak_cert_der_len = 0;
+    rp_public_key_der_len = 0;
+    rp_identity_ready = false;
+}
+
 static CHARRA_RC ensure_rp_ak_certificate(
         const char* verifier_host, unsigned int verifier_port) {
     if (rp_identity_ready) {
@@ -1383,6 +1422,22 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
     processing_appraisal_response = true;
     int* current_thread_index = coap_session_get_app_data(session);
 
+    rp_ak_cert_rejected[*current_thread_index] = false;
+
+    if (coap_pdu_get_code(received) == COAP_RESPONSE_CODE_UNAUTHORIZED) {
+        /* Verifier rejected our AK certificate specifically (see
+         * verifier.c's coap_appraise_handler, Step 3a item 1), not the
+         * evidence itself -- signal the caller to re-provision via
+         * /certify_ak and retry, rather than just recording a failed
+         * vote a blind retry could never fix. */
+        charra_log_info("[" LOG_NAME "] Verifier n° %d rejected our AK "
+                        "certificate as invalid or expired.",
+                *current_thread_index + 1);
+        rp_ak_cert_rejected[*current_thread_index] = true;
+        attestation_results[*current_thread_index] = false;
+        goto cleanup;
+    }
+
     int coap_r = 0;
     size_t data_len = 0;
     const uint8_t* data = NULL;
@@ -1397,7 +1452,12 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
 
     const char* successful_message = "Attestation successful!\0";
 
-    if (strcmp((const char*)data, successful_message)) {
+    /* memcmp against the exact sent length, not strcmp on data: data points
+     * into the PDU buffer as received (data_len bytes, per
+     * coap_add_data_large_response()'s strlen()-based length on the
+     * Verifier's side), with no guaranteed NUL terminator past it. */
+    if (data_len == strlen(successful_message) &&
+            memcmp(data, successful_message, data_len) == 0) {
         attestation_results[*current_thread_index] = true;
     } else {
         charra_log_info("[" LOG_NAME "] False\n");
@@ -1813,6 +1873,26 @@ void* get_attestation_results_thread(void *arg) {
     coap_context_t* coap_context = NULL;
     coap_session_t* coap_session = NULL;
     coap_optlist_t* coap_options = NULL;
+    /* Declared here, not at first use further down, for the same reason as
+     * the three above: several earlier goto cleanup jumps in this function
+     * would otherwise skip their initializers, leaving cleanup's unconditional
+     * charra_free_if_not_null() calls to free() an indeterminate pointer.
+     * coap_context_verifier_appraisal/_session_/_options_ used to be
+     * declared only right before the appraisal-request section, well after
+     * the "Verifier did not supply a nonce" goto cleanup a few lines below
+     * this one -- a verifier that timed out on /nonce meant this function
+     * jumped straight to cleanup and called coap_free_context()/
+     * coap_session_release()/coap_delete_optlist() on garbage stack
+     * pointers, corrupting the heap (observed live as "double free or
+     * corruption (out)"). Hoisted here for the same reason as the other
+     * five. */
+    uint8_t* nonce_req_buf = NULL;
+    uint32_t nonce_req_buf_len = 0;
+    uint8_t* res_buf = NULL;
+    uint32_t res_buf_len = 0;
+    coap_context_t* coap_context_verifier_appraisal = NULL;
+    coap_session_t* coap_session_verifier_appraisal = NULL;
+    coap_optlist_t* coap_options_verifier_appraisal = NULL;
 
     if (use_dtls_psk && use_dtls_rpk) {
         charra_log_error(
@@ -1903,9 +1983,22 @@ void* get_attestation_results_thread(void *arg) {
         goto cleanup;
     }
 
-    /* Ask the Verifier for a nonce. The request carries no payload -- the
-     * Verifier contributes the challenge, which is the whole point: a nonce
-     * the RP generated could never prove freshness TO the Verifier. */
+    /* Ask the Verifier for a nonce: send the same attestation request RP
+     * already built for the Attester (last_request, stable and read-only by
+     * now -- populated once in get_evidence(), which always completes
+     * before get_attestation_results() spawns this thread). verifier.c's
+     * coap_nonce_handler() unmarshals this exact DTO and echoes req.nonce
+     * back as the response body -- an empty request body here made it fail
+     * unmarshaling immediately ("Could not get CoAP PDU data"), which is
+     * why RP never received a nonce and Quote_r could never be built. */
+    if ((result = charra_marshal_attestation_request(
+                 &last_request, &nonce_req_buf_len, &nonce_req_buf)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Could not marshal /nonce request body.");
+        goto cleanup;
+    }
+
     coap_session_set_app_data(coap_session, (void*)&current_thread_index);
     coap_register_response_handler(coap_context, coap_verifier_handler_nonce);
     verifier_nonce_lens[current_thread_index] = 0;
@@ -1932,7 +2025,7 @@ void* get_attestation_results_thread(void *arg) {
     }
 
     if ((pdu_n = charra_coap_new_request(coap_session, COAP_MESSAGE_TYPE_CON, COAP_REQUEST_FETCH,
-                 &coap_options, NULL, 0)) ==
+                 &coap_options, nonce_req_buf, nonce_req_buf_len)) ==
             NULL) {
         charra_log_error("[" LOG_NAME "] Cannot create request PDU.");
         result = CHARRA_RC_ERROR;
@@ -1982,12 +2075,6 @@ void* get_attestation_results_thread(void *arg) {
     }
 
     /* --- Interaction with the Verifier (sending Quote_r and log_r) * ---------------------------------------------------------------*/
-    /* set varaibles here such that they are valid in case of an 'goto cleanup'
-     */
-    coap_context_t* coap_context_verifier_appraisal = NULL;
-    coap_session_t* coap_session_verifier_appraisal = NULL;
-    coap_optlist_t* coap_options_verifier_appraisal = NULL;
-
     if (use_dtls_psk && use_dtls_rpk) {
         charra_log_error(
                 "[" LOG_NAME "] Configuration enables both DTSL with PSK "
@@ -2068,11 +2155,6 @@ void* get_attestation_results_thread(void *arg) {
         }
     }
 
-    coap_pdu_t* pdu_v = NULL;
-    coap_mid_t mid_v = COAP_INVALID_MID;
-    int coap_io_process_time_v = -1;
-
-    
     /* create CoAP option for content type */
     uint8_t coap_mediatype_cbor_buf_v[4] = {0};
     unsigned int coap_mediatype_cbor_buf_len_v = 0;
@@ -2085,24 +2167,9 @@ void* get_attestation_results_thread(void *arg) {
         goto cleanup;
     }
 
-    /* Build and marshal the RP evidence message: Quote_r bound to this
-     * Verifier's nonce, the RP public key, log_r, the nonce the RP sent to
-     * the Attester, and the Attester's evidence minus its raw event log. */
-    uint32_t res_buf_len = 0;
-    uint8_t* res_buf = NULL;
-    if ((charra_r = charra_rp_build_evidence_message(
-                 current_thread_index, &res_buf_len, &res_buf)) !=
-            CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Error building RP evidence message.");
-        goto error;
-    }
-    charra_log_info("[" LOG_NAME "] Sending %u bytes of RP evidence to "
-                    "Verifier n\u00b0 %d.",
-            res_buf_len, current_thread_index + 1);
-    //charra_log_info("[" LOG_NAME "] Size of marshaled response is %d bytes.",res_buf_len);
-
-    /* CoAP options */
-    //charra_log_info("[" LOG_NAME "] Adding CoAP option URI_PATH.");
+    /* CoAP options -- built once, reused for both the first attempt and any
+     * AK-certificate-rejection retry below: charra_coap_new_request() only
+     * reads from this list, it does not consume or free it. */
     if (coap_insert_optlist(
                 &coap_options_verifier_appraisal, coap_new_optlist(COAP_OPTION_URI_PATH, 8,
                                        (const uint8_t*)"appraise")) != 1) {
@@ -2110,7 +2177,6 @@ void* get_attestation_results_thread(void *arg) {
         result = CHARRA_RC_COAP_ERROR;
         goto cleanup;
     }
-    //charra_log_info("[" LOG_NAME "] Adding CoAP option CONTENT_TYPE.");
     if (coap_insert_optlist(&coap_options_verifier_appraisal,
                 coap_new_optlist(COAP_OPTION_CONTENT_TYPE,
                                        coap_mediatype_cbor_buf_len_v,
@@ -2120,53 +2186,112 @@ void* get_attestation_results_thread(void *arg) {
         goto cleanup;
     }
 
-    /* new CoAP request PDU */
-    //charra_log_info("[" LOG_NAME "] Creating request PDU.");
-    if ((pdu_v = charra_coap_new_request(coap_session_verifier_appraisal, COAP_MESSAGE_TYPE_CON, COAP_REQUEST_FETCH,
-                 &coap_options_verifier_appraisal, res_buf, res_buf_len)) ==
-            NULL) {
-        charra_log_error("[" LOG_NAME "] Cannot create request PDU.");
-        result = CHARRA_RC_ERROR;
-        goto cleanup;
-    }
-
-    /* set timeout length */
     coap_fixed_point_t coap_timeout_v = {verifier_response_timeout, 0};
     coap_session_set_ack_timeout(coap_session_verifier_appraisal, coap_timeout_v);
-
     coap_session_set_app_data(coap_session_verifier_appraisal, &current_thread_index);
-    
-    /* send CoAP PDU */
-    //charra_log_info("[" LOG_NAME "] Sending CoAP message.");
-    if ((mid_v = coap_send_large(coap_session_verifier_appraisal, pdu_v)) == COAP_INVALID_MID) {
-        charra_log_error("[" LOG_NAME "] Cannot send CoAP message.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
 
-    /* processing and waiting for response */
-    //charra_log_info("[" LOG_NAME "] Processing and waiting for response ...");
-    uint16_t response_wait_time_v = 0;  
-    while (!processing_appraisal_response && coap_io_pending(coap_context_verifier_appraisal)) {
-        /* process CoAP I/O */
-        if ((coap_io_process_time_v = coap_io_process(
-                     coap_context_verifier_appraisal, COAP_IO_PROCESS_TIME_MS)) == -1) {
+    /* Build and marshal the RP evidence message (Quote_r bound to this
+     * Verifier's nonce, the RP public key, log_r, the nonce the RP sent to
+     * the Attester, and the Attester's evidence minus its raw event log),
+     * send it, and wait for the Verifier's response. Retried once if the
+     * Verifier's only complaint was our AK certificate being invalid or
+     * expired (see coap_verifier_handler_appraisal and verifier.c's Step 3a
+     * item 1): re-provision via /certify_ak and try again with a fresh
+     * certificate, rather than just recording a failed vote a blind retry
+     * could never fix. Not retried for any other kind of failure. */
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        charra_free_if_not_null(res_buf);
+        res_buf = NULL;
+        res_buf_len = 0;
+
+        /* Held across the build so a concurrent re-provision (below, same
+         * mutex) can't free/replace rp_ak_cert_der/rp_public_key_der while
+         * this call is reading them. evidence_generation records which
+         * identity this attempt's evidence was built under. */
+        pthread_mutex_lock(&rp_ak_reprovision_mutex);
+        uint64_t evidence_generation = rp_ak_generation;
+        charra_r = charra_rp_build_evidence_message(
+                current_thread_index, &res_buf_len, &res_buf);
+        pthread_mutex_unlock(&rp_ak_reprovision_mutex);
+        if (charra_r != CHARRA_RC_SUCCESS) {
             charra_log_error(
-                    "[" LOG_NAME "] Error during CoAP I/O processing.");
+                    "[" LOG_NAME "] Error building RP evidence message.");
+            goto error;
+        }
+        charra_log_info("[" LOG_NAME "] Sending %u bytes of RP evidence to "
+                        "Verifier n\u00b0 %d.",
+                res_buf_len, current_thread_index + 1);
+
+        coap_pdu_t* pdu_v = NULL;
+        if ((pdu_v = charra_coap_new_request(coap_session_verifier_appraisal, COAP_MESSAGE_TYPE_CON, COAP_REQUEST_FETCH,
+                     &coap_options_verifier_appraisal, res_buf, res_buf_len)) ==
+                NULL) {
+            charra_log_error("[" LOG_NAME "] Cannot create request PDU.");
+            result = CHARRA_RC_ERROR;
+            goto cleanup;
+        }
+
+        if (coap_send_large(coap_session_verifier_appraisal, pdu_v) == COAP_INVALID_MID) {
+            charra_log_error("[" LOG_NAME "] Cannot send CoAP message.");
             result = CHARRA_RC_COAP_ERROR;
             goto cleanup;
         }
-        /* This wait time is not 100% accurate, it only includes the elapsed
-         * time inside the coap_io_process function. But should be good enough.
-         */
-        response_wait_time_v += coap_io_process_time_v;
-        if (response_wait_time_v >= (verifier_response_timeout * 1000)) {
-            charra_log_error("[" LOG_NAME
-                             "] Timeout after %d ms while waiting for or "
-                             "processing attestation response.",
-                    response_wait_time_v);
-            result = CHARRA_RC_TIMEOUT;
-            goto cleanup;
+
+        /* processing and waiting for response */
+        processing_appraisal_response = false;
+        uint16_t response_wait_time_v = 0;
+        while (!processing_appraisal_response && coap_io_pending(coap_context_verifier_appraisal)) {
+            int coap_io_process_time_v = coap_io_process(
+                    coap_context_verifier_appraisal, COAP_IO_PROCESS_TIME_MS);
+            if (coap_io_process_time_v == -1) {
+                charra_log_error(
+                        "[" LOG_NAME "] Error during CoAP I/O processing.");
+                result = CHARRA_RC_COAP_ERROR;
+                goto cleanup;
+            }
+            /* This wait time is not 100% accurate, it only includes the
+             * elapsed time inside the coap_io_process function. But should
+             * be good enough. */
+            response_wait_time_v += coap_io_process_time_v;
+            if (response_wait_time_v >= (verifier_response_timeout * 1000)) {
+                charra_log_error("[" LOG_NAME
+                                 "] Timeout after %d ms while waiting for or "
+                                 "processing attestation response.",
+                        response_wait_time_v);
+                result = CHARRA_RC_TIMEOUT;
+                goto cleanup;
+            }
+        }
+
+        if (!rp_ak_cert_rejected[current_thread_index] || attempt == 1) {
+            break;
+        }
+
+        charra_log_info("[" LOG_NAME "] Re-provisioning RP AK certificate "
+                        "after rejection by Verifier n\u00b0 %d ...",
+                current_thread_index + 1);
+        pthread_mutex_lock(&rp_ak_reprovision_mutex);
+        CHARRA_RC reprovision_rc = CHARRA_RC_SUCCESS;
+        if (rp_ak_generation == evidence_generation) {
+            /* Nobody else has refreshed the identity since this attempt's
+             * evidence was built -- this thread does it. */
+            invalidate_cached_rp_ak_certificate();
+            reprovision_rc = ensure_rp_ak_certificate(
+                    verifier_info.ip_address, verifier_info.port_number);
+            if (reprovision_rc == CHARRA_RC_SUCCESS) {
+                rp_ak_generation++;
+            }
+        }
+        /* else: another thread already refreshed it -- fall through to
+         * attempt 1, which will build evidence against the now-current
+         * (fresh) rp_ak_cert_der/rp_public_key_der. */
+        pthread_mutex_unlock(&rp_ak_reprovision_mutex);
+
+        if (reprovision_rc != CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Could not re-provision RP AK "
+                             "certificate; giving up on Verifier n\u00b0 %d.",
+                    current_thread_index + 1);
+            break;
         }
     }
 
@@ -2185,6 +2310,7 @@ cleanup:
     charra_free_if_not_null_ex(coap_context_verifier_appraisal, coap_free_context);
     /* free variables */
     charra_free_if_not_null(res_buf);
+    charra_free_if_not_null(nonce_req_buf);
 
     coap_cleanup();
 

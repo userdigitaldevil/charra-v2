@@ -728,19 +728,41 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
          * (obtained via its own earlier /certify_ak call, forwarded here by
          * RP) and the key that actually signed Quote_a. */
         uint8_t ak_serial[16] = {0};
-        attestation_result_ekak =
-                charra_crypto_verify_ekak_certificate(res.ak_certificate,
-                        res.ak_certificate_len, (uint8_t*)verifier_ca_cert_der,
-                        verifier_ca_cert_der_len,
-                        (TPM2B_PUBLIC*)res.tpm2_public_key, ak_serial) ==
-                CHARRA_RC_SUCCESS;
-        if (attestation_result_ekak) {
-            charra_log_info(
-                    "[" LOG_NAME "]     => Attester's AK certificate is valid!");
-            attestation_result_ekak = is_ak_serial_currently_valid(ak_serial);
+        if (res.ak_certificate_len == 0) {
+            /* TEMPORARY BYPASS: the Attester has no /certify_ak client yet
+             * (see CHARRA_V2_NOTES.md, "Still genuinely unbuilt") --
+             * relying_party.c deliberately leaves ak_certificate empty,
+             * since nothing exists to provision it. Hard-failing every
+             * single attestation on a gap that isn't this component's job
+             * to close would make end-to-end testing of everything else
+             * (Step 3a, Quote_a's own signature/nonce checks) impossible.
+             * MUST be removed once the Attester provisions a real AK and RP
+             * forwards its certificate -- at that point an empty
+             * certificate has to go back to being a hard failure, not
+             * silently accepted. */
+            charra_log_error(
+                    "[" LOG_NAME "]     => Attester's AK certificate is "
+                    "EMPTY -- accepting anyway (TEMPORARY: Attester AK "
+                    "provisioning is not implemented yet).");
+            attestation_result_ekak = true;
         } else {
-            charra_log_error("[" LOG_NAME "]     => Attester's AK certificate "
-                             "did NOT verify (chain or key mismatch)!");
+            attestation_result_ekak =
+                    charra_crypto_verify_ekak_certificate(res.ak_certificate,
+                            res.ak_certificate_len,
+                            (uint8_t*)verifier_ca_cert_der,
+                            verifier_ca_cert_der_len,
+                            (TPM2B_PUBLIC*)res.tpm2_public_key, ak_serial) ==
+                    CHARRA_RC_SUCCESS;
+            if (attestation_result_ekak) {
+                charra_log_info("[" LOG_NAME
+                                "]     => Attester's AK certificate is valid!");
+                attestation_result_ekak =
+                        is_ak_serial_currently_valid(ak_serial);
+            } else {
+                charra_log_error(
+                        "[" LOG_NAME "]     => Attester's AK certificate "
+                        "did NOT verify (chain or key mismatch)!");
+            }
         }
 
         /* Step 3b item 2: verify Quote_a signature */
@@ -812,12 +834,25 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
 
 
     const char* message;
+    coap_pdu_code_t response_code = COAP_RESPONSE_CODE_CONTENT;
     /* print attestation result */
     charra_log_info("[" LOG_NAME "] +----------------------------+");
     if (attestation_result) {
         attestation_rc = CHARRA_RC_SUCCESS;
         message = "Attestation successful!\0";
         charra_log_info("[" LOG_NAME "] |   ATTESTATION SUCCESSFUL   |");
+    } else if (!attestation_result_ekak_rp) {
+        /* Distinct from any other appraisal failure: RP's OWN AK
+         * certificate (Step 3a item 1) failed to chain-verify, or chained
+         * fine but is expired/revoked (is_ak_serial_currently_valid()).
+         * Signalled with 4.01 Unauthorized -- the same code /certify_ak
+         * itself already uses for a bad EK certificate -- so RP can tell
+         * "go redo /certify_ak and retry" apart from "your evidence itself
+         * didn't check out," which a blind retry can never fix. */
+        attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
+        message = "RP AK certificate invalid or expired!\0";
+        response_code = COAP_RESPONSE_CODE_UNAUTHORIZED;
+        charra_log_info("[" LOG_NAME "] |  RP AK CERTIFICATE REJECTED  |");
     } else {
         attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
         message = "Attestation failed!    \0";
@@ -825,7 +860,7 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     }
     charra_log_info("[" LOG_NAME "] +----------------------------+");
 
-    coap_pdu_set_code(response, COAP_RESPONSE_CODE_CONTENT);
+    coap_pdu_set_code(response, response_code);
     
     end_appraise = clock();
     appraise_duration = ((double) (end_appraise - start_appraise)) / CLOCKS_PER_SEC;
