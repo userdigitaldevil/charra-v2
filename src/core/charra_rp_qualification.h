@@ -114,10 +114,17 @@ CHARRA_RC charra_rp_qualification_check(rp_qualification_state* state,
         time_t now);
 
 /**
- * @brief Is this RP currently qualified to redact real evidence?
+ * @brief Is state's qualified/expires_at pair (as of the last charra_rp_
+ * qualification_check() call against it) still within its validity window?
  *
- * The gate a coap_appraise_handler-style caller is expected to apply: real
- * evidence is only accepted while this returns true.
+ * NOT what coap_appraise_handler() actually gates on -- state only ever
+ * describes one Verifier process's single in-flight challenge round, with
+ * no notion of which RP it was for (see rp_qualification_state's own
+ * docstring). The real, identity-bound, persisted-across-restarts gate is
+ * charra_qualification_state_is_valid() (charra_qualification_state.h),
+ * looked up by the RP's ek_fingerprint. This function is kept for what it
+ * actually is: a plain validity check on one state struct, exercised
+ * directly by tests.
  *
  * @param[in] state state to check
  * @param[in] now current time

@@ -1265,10 +1265,12 @@ now built and confirmed live:
   `rp_coap_fetch()` helper factors out the create-context/session/PDU/
   wait-loop boilerplate this and the two new endpoints share with the
   existing `/certify_ak` call.
-- **The gate**: `coap_appraise_handler` now checks
-  `charra_rp_qualification_is_valid(&qualification_state, time(NULL))`
-  before Step 3a/3b, rejecting with **`4.03 Forbidden`** — deliberately
-  *not* `4.01 Unauthorized`, which RP's own retry logic
+- **The gate**: `coap_appraise_handler` now checks the requesting RP's
+  persisted qualification record (see "RP qualification is now identity-
+  bound and persisted" below — this replaced an earlier, since-superseded
+  version that only checked a single in-memory `qualification_state` global
+  with no notion of which RP), rejecting with **`4.03 Forbidden`** —
+  deliberately *not* `4.01 Unauthorized`, which RP's own retry logic
   (`rp_ak_cert_rejected`) already treats as "go redo `/certify_ak`"; reusing
   it here would send a qualification failure into a pointless AK-
   reprovisioning loop instead of redoing `/qualify`.
@@ -1284,6 +1286,74 @@ output side by side, not by the build or `make test`. Fixed to `memcmp`
 the response body against the expected success message, mirroring
 `coap_verifier_handler_appraisal()`'s own `strcmp`→`memcmp` fix earlier
 this branch (bug #7).
+
+### RP qualification is now identity-bound and persisted (mirrors AK-provisioning state)
+
+The version of the gate described above originally checked a single global
+`qualification_state` in-memory only, with two real gaps once examined
+closely, both raised and fixed in the same session:
+
+1. **Not bound to any RP identity.** `qualification_state` only remembered
+   "the most recent `/qualify/submit` that passed, and when that expires" —
+   no EK/AK fingerprint, no session binding. Since `coap_appraise_handler`
+   checked it *before* even reading the incoming request's own AK
+   certificate, a passing qualification from RP A would silently also let
+   RP B's `/appraise` through, if B's request happened to land while A's
+   qualification was still within its 24h window.
+2. **Not persisted.** Unlike `ak-provisioning-state.txt`, it lived only in
+   process memory — a Verifier restart forgot every RP's qualification
+   instantly, no matter how much of the 24h window was left.
+
+**Fix**: a new module, `charra_qualification_state.h`/`.c`, deliberately
+mirrors `charra_ak_state.h`/`.c`'s shape (same hex-encoded-line file format,
+same `flock()`-guarded `_renew()` writer, same "records array, most-recent-
+wins on backward scan" lookup) but keeps a much smaller record — just
+`ek_fingerprint`, `qualified_at`, `expires_at`; qualification has no
+revocation concept the way AK certificates do, it only ever expires.
+
+Identity comes for free: nothing new travels over the wire.
+`coap_qualify_submit_handler()` already chain-verifies the submitter's AK
+certificate and extracts its serial (to check `is_ak_serial_currently_valid()`
+against `ak-provisioning-state.txt`); that function now also returns the
+matching record's `ek_fingerprint` — the *same* identity `charra_ak_state.h`
+already tracks — so a passing `/qualify/submit` can be persisted
+(`charra_qualification_state_renew()`) keyed by exactly that fingerprint,
+with no separate EK certificate needing to travel with the `/qualify`
+request itself. `coap_appraise_handler`'s gate mirrors this: Step 3a item 1
+already derives the requesting RP's `ek_fingerprint` while validating its AK
+certificate; a new item 1b immediately after it looks that fingerprint up in
+the qualification ledger and folds the result (`attestation_result_
+qualified`) into the overall pass/fail, with its own dedicated `4.03`
+message branch distinguishing "not qualified" from "AK certificate invalid"
+(still `4.01`, still checked first).
+
+**Deliberately still per-Verifier, not shared like the AK ledger.** Even
+though every `bin/verifier` instance `start_verifiers.sh` spawns runs from
+the same working directory (which is *why* `ak-provisioning-state.txt`
+ends up shared — it's one relative path, same cwd, same file, by
+construction, not a special case in the code), the qualification ledger's
+path is deliberately made unique per process:
+`qualification-state-<port>.txt`, built once `main()` knows its own port.
+This preserves the property that an RP must independently pass `/qualify` +
+`/qualify/submit` with *each* of the N Verifiers it submits evidence to —
+qualification is each Verifier's own independent assessment of the RP's
+redaction pipeline, not a Verifier-wide fact the way AK certification is
+(one CA, so one certificate is valid everywhere). Confirmed live: qualifying
+against a 2-verifier setup produces two separate, independently-populated
+`qualification-state-5684.txt` / `qualification-state-5685.txt` files, both
+correctly keyed by the same RP's `ek_fingerprint`; killing and restarting
+the Verifier on port 5684 mid-session left its file, and the RP's earned
+qualification, completely intact.
+
+**Not addressed here** (out of scope for this fix, tracked separately):
+`relying_party.c` still has no client-side cache of "already qualified with
+Verifier X until timestamp Y" — it re-runs the full `/qualify` +
+`/qualify/submit` round trip on every single attestation cycle against
+every Verifier, even ones it already holds a perfectly valid qualification
+with. The Verifier-side fix here means those redundant round trips are at
+least redundant *safely* now (correctly re-confirming the same identity)
+rather than papering over a shared, unbound global — but the wasted work
+itself is still there.
 
 ### Also found and fixed this session: synthetic-log generator was still emitting the pre-`afdde44` flat `template_data` layout
 

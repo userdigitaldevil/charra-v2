@@ -18,6 +18,7 @@
 #include "core/charra_helper.h"
 #include "core/charra_key_mgr.h"
 #include "core/charra_marshaling.h"
+#include "core/charra_qualification_state.h"
 #include "core/charra_rp_qualification.h"
 #include "util/cbor_util.h"
 #include "util/charra_util.h"
@@ -68,9 +69,11 @@ bool dtls_rpk_verify_peer_public_key = true;
 static msg_attestation_request_dto last_request = {0};
 
 /* config for /qualify + /qualify/submit (RP qualification handshake) --
- * see charra_rp_qualification.h. Single global, same one-RP-at-a-time
- * assumption last_request above already makes: the outstanding challenge
- * for whichever RP most recently called /qualify. */
+ * see charra_rp_qualification.h. Holds only the CURRENT outstanding
+ * challenge's golden answer -- single global, same one-in-flight-round-at-
+ * a-time assumption last_request above already makes. The durable verdict
+ * ("is EK X currently qualified, until when") is NOT kept here: see
+ * qualification_state_file_path below. */
 static rp_qualification_state qualification_state = {0};
 #define CHARRA_RP_QUALIFICATION_NUM_ENTRIES 5
 
@@ -86,6 +89,19 @@ static const char* ak_cert_not_after_utc = "20340101000000";
  * charra_ak_state.h. Shared across every `bin/verifier` instance
  * start_verifiers.sh spawns, since they all share one CA. */
 static char* ak_state_file_path = "ak-provisioning-state.txt";
+
+/* Persisted, per-RP-identity record of who has passed /qualify +
+ * /qualify/submit -- see charra_qualification_state.h. Deliberately NOT
+ * shared like ak_state_file_path above: unlike AK certification (one CA,
+ * so one issued certificate is valid Verifier-wide), qualification is each
+ * Verifier's own, independent assessment of this RP's redaction pipeline,
+ * and an RP is expected to qualify with each of the N Verifiers it submits
+ * evidence to separately. Keyed by this process's own port (set once
+ * command-line parsing determines it, see main()) so every `bin/verifier`
+ * instance -- even though they all run from the same working directory --
+ * keeps its own file rather than accidentally sharing one. */
+static char qualification_state_file_path_buf[64] = {0};
+static char* qualification_state_file_path = "qualification-state.txt";
 
 /**
  * @brief SIGINT handler: set quit to 1 for graceful termination.
@@ -183,6 +199,15 @@ int main(int argc, char** argv) {
     /* set CHARRA and libcoap log levels */
     charra_log_set_level(charra_log_level);
     coap_set_log_level(coap_log_level);
+
+    /* qualification_state_file_path is per-port (see its own comment
+     * above) -- port is only final once command-line parsing above has
+     * run, so this has to happen here, not at static-initialization time. */
+    snprintf(qualification_state_file_path_buf,
+            sizeof(qualification_state_file_path_buf),
+            "qualification-state-%u.txt", port);
+    qualification_state_file_path = qualification_state_file_path_buf;
+
     charra_log_debug("[" LOG_NAME "] Verifier Configuration:");
     charra_log_debug("[" LOG_NAME "]     Used local port: %d", port);
     charra_log_debug("[" LOG_NAME "]     DTLS-PSK enabled: %s",
@@ -399,12 +424,24 @@ static bool verify_quote_signature_mbedtls(TPM2B_PUBLIC* tpm2_public_key,
  * This closes that gap: looks serial up in ak-provisioning-state.txt and
  * requires charra_ak_state_is_valid() (not revoked, not expired) too.
  *
+ * Also the identity bridge the RP qualification handshake uses: an AK
+ * certificate's serial is the only identity a request carries on the
+ * wire, but charra_qualification_state.h's ledger is keyed by
+ * ek_fingerprint (same identity charra_ak_state_record already uses) --
+ * this is the one place that translates between the two, so
+ * coap_qualify_submit_handler() and coap_appraise_handler() don't each
+ * need their own copy of this lookup.
+ *
+ * @param[out] ek_fingerprint_out set to the matching record's
+ * ek_fingerprint iff this returns true; untouched otherwise. May be NULL
+ * if the caller only cares about validity, not identity.
  * @returns true iff serial names a currently-valid (unrevoked,
  * unexpired) record. False on any lookup/load failure as well as a
  * genuine miss -- a serial this function can't positively vouch for is
  * treated the same as one it knows is bad.
  */
-static bool is_ak_serial_currently_valid(const uint8_t serial[16]) {
+static bool is_ak_serial_currently_valid(
+        const uint8_t serial[16], uint8_t ek_fingerprint_out[32]) {
     charra_ak_state_record* records = NULL;
     uint32_t count = 0;
     if (charra_ak_state_load(ak_state_file_path, &records, &count) !=
@@ -418,7 +455,11 @@ static bool is_ak_serial_currently_valid(const uint8_t serial[16]) {
     uint32_t index = 0;
     if (charra_ak_state_find_by_serial(records, count, serial, &index)) {
         valid = charra_ak_state_is_valid(&records[index], time(NULL));
-        if (!valid) {
+        if (valid) {
+            if (ek_fingerprint_out != NULL) {
+                memcpy(ek_fingerprint_out, records[index].ek_fingerprint, 32);
+            }
+        } else {
             charra_log_error("[" LOG_NAME "]     => AK certificate's serial "
                              "is on record but revoked or expired!");
         }
@@ -546,34 +587,6 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
         goto cleanup;
     }
 
-    /* --- RP qualification gate: reject before doing any of the expensive
-     * Step 3a/3b work below if this RP hasn't proven its own redaction
-     * pipeline via /qualify + /qualify/submit -- see
-     * charra_rp_qualification.h. Deliberately a different response code
-     * (4.03 Forbidden) than the 4.01 Unauthorized the RP-AK-certificate-
-     * rejected path further down uses: RP's own retry logic
-     * (relying_party.c) treats 4.01 specifically as "go redo /certify_ak",
-     * which would be the wrong reaction to "you're not qualified" and
-     * could send it into a pointless AK-reprovisioning loop instead of
-     * redoing /qualify. */
-    if (!charra_rp_qualification_is_valid(&qualification_state, time(NULL))) {
-        charra_log_error(
-                "[" LOG_NAME "] RP is not currently qualified -- no "
-                "passing /qualify/submit on record, or it expired.");
-        const char* not_qualified_message = "RP not qualified!       \0";
-        coap_pdu_set_code(response, COAP_RESPONSE_CODE_FORBIDDEN);
-        if ((coap_r = coap_add_data_large_response(resource, session, request,
-                     response, query, COAP_MEDIATYPE_TEXT_PLAIN, -1, 0,
-                     strlen(not_qualified_message),
-                     (const uint8_t*)not_qualified_message, NULL,
-                     (void*)strlen(not_qualified_message))) == 0) {
-            charra_log_error("[" LOG_NAME "] Error invoking "
-                             "coap_add_data_large_response().");
-        }
-        attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
-        goto cleanup;
-    }
-
     /* --- verify TPM Quote --- */
     charra_log_info("[" LOG_NAME "] Starting verification.");
 
@@ -646,12 +659,53 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
             mbedtls_x509_crt_free(&ak_cert_rp_leaf);
         }
     }
+    uint8_t ek_fingerprint_rp[32] = {0};
     if (attestation_result_ekak_rp) {
         charra_log_info("[" LOG_NAME "]     => RP's AK certificate is valid!");
-        attestation_result_ekak_rp = is_ak_serial_currently_valid(ak_serial_rp);
+        attestation_result_ekak_rp =
+                is_ak_serial_currently_valid(ak_serial_rp, ek_fingerprint_rp);
     } else {
         charra_log_error("[" LOG_NAME "]     => RP's AK certificate did NOT "
                          "verify (chain or key mismatch)!");
+    }
+
+    /* Step 3a item 1b: RP qualification -- has THIS specific RP (identified
+     * by ek_fingerprint_rp above, the same identity charra_ak_state.h
+     * already tracks) passed /qualify + /qualify/submit within the last
+     * CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS? Only meaningful once the AK
+     * certificate itself checked out -- ek_fingerprint_rp is only valid
+     * when attestation_result_ekak_rp is true. Looked up in this Verifier's
+     * OWN qualification ledger (qualification_state_file_path), not shared
+     * with sibling Verifier instances -- see that variable's comment for
+     * why. */
+    bool attestation_result_qualified = false;
+    if (attestation_result_ekak_rp) {
+        charra_qualification_state_record* qual_records = NULL;
+        uint32_t qual_count = 0;
+        if (charra_qualification_state_load(qualification_state_file_path,
+                    &qual_records, &qual_count) == CHARRA_RC_SUCCESS) {
+            uint32_t qual_index = 0;
+            if (charra_qualification_state_find_by_ek_fingerprint(
+                        qual_records, qual_count, ek_fingerprint_rp,
+                        &qual_index)) {
+                attestation_result_qualified =
+                        charra_qualification_state_is_valid(
+                                &qual_records[qual_index], time(NULL));
+            }
+            free(qual_records);
+        } else {
+            charra_log_error(
+                    "[" LOG_NAME "] Could not load qualification state.");
+        }
+        if (attestation_result_qualified) {
+            charra_log_info(
+                    "[" LOG_NAME "]     => RP is currently qualified!");
+        } else {
+            charra_log_error(
+                    "[" LOG_NAME "]     => RP is NOT currently qualified "
+                    "(no passing /qualify/submit on record for this "
+                    "identity, or it expired)!");
+        }
     }
 
     /* Step 3a item 2: verify Quote_r signature -- RSA-PSS/SHA-256 over
@@ -809,7 +863,7 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
                 charra_log_info("[" LOG_NAME
                                 "]     => Attester's AK certificate is valid!");
                 attestation_result_ekak =
-                        is_ak_serial_currently_valid(ak_serial);
+                        is_ak_serial_currently_valid(ak_serial, NULL);
             } else {
                 charra_log_error(
                         "[" LOG_NAME "]     => Attester's AK certificate "
@@ -876,6 +930,7 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
      * Step 3b's results default to false whenever it was skipped. */
 
     bool attestation_result = attestation_result_ekak_rp &&
+                              attestation_result_qualified &&
                               attestation_result_signature_rp &&
                               attestation_result_signature_rp_mbedtls &&
                               attestation_result_nonce_rp &&
@@ -905,6 +960,18 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
         message = "RP AK certificate invalid or expired!\0";
         response_code = COAP_RESPONSE_CODE_UNAUTHORIZED;
         charra_log_info("[" LOG_NAME "] |  RP AK CERTIFICATE REJECTED  |");
+    } else if (!attestation_result_qualified) {
+        /* Also distinct: the RP's AK certificate itself is fine, but this
+         * specific identity hasn't passed /qualify + /qualify/submit
+         * against THIS Verifier recently (see charra_qualification_
+         * state.h). Deliberately 4.03 Forbidden, not 4.01 -- RP's retry
+         * logic treats 4.01 as "go redo /certify_ak", which would be the
+         * wrong reaction here; the fix is redoing /qualify, not AK
+         * reprovisioning. */
+        attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
+        message = "RP not qualified!       \0";
+        response_code = COAP_RESPONSE_CODE_FORBIDDEN;
+        charra_log_info("[" LOG_NAME "] |     RP NOT QUALIFIED       |");
     } else {
         attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
         message = "Attestation failed!    \0";
@@ -1552,6 +1619,10 @@ static void coap_qualify_submit_handler(struct coap_resource_t* resource,
         goto cleanup;
     }
 
+    /* ek_fingerprint identifies who this is, for the qualification-ledger
+     * write below -- declared here (not inside the block) so it survives
+     * past it, populated only when submitter_identity_ok ends up true. */
+    uint8_t ek_fingerprint[32] = {0};
     bool submitter_identity_ok = false;
     {
         mbedtls_x509_crt ak_cert_rp_leaf;
@@ -1568,7 +1639,7 @@ static void coap_qualify_submit_handler(struct coap_resource_t* resource,
                     charra_crypto_verify_cert_public_key_matches_der_key(
                             &ak_cert_rp_leaf, req.rp_public_key,
                             req.rp_public_key_len) == CHARRA_RC_SUCCESS &&
-                    is_ak_serial_currently_valid(ak_serial_rp);
+                    is_ak_serial_currently_valid(ak_serial_rp, ek_fingerprint);
             mbedtls_x509_crt_free(&ak_cert_rp_leaf);
         }
     }
@@ -1622,6 +1693,25 @@ static void coap_qualify_submit_handler(struct coap_resource_t* resource,
     if (charra_rp_qualification_check(&qualification_state,
                 req.submitted_redacted_log, req.submitted_redacted_log_len,
                 req.submitted_pcr_digest, time(NULL)) == CHARRA_RC_SUCCESS) {
+        /* Persist the verdict, keyed by this RP's identity -- this is what
+         * lets coap_appraise_handler() later confirm THIS SPECIFIC RP
+         * qualified, not just "someone did, recently". Deliberately done
+         * only here, once the check has actually passed -- a failed
+         * charra_qualification_state_renew() call below still leaves the
+         * RP correctly told it qualified (the check itself did pass), it
+         * just means the durable record didn't get written; logged, not
+         * fatal to this response. */
+        charra_qualification_state_record qual_record = {0};
+        memcpy(qual_record.ek_fingerprint, ek_fingerprint,
+                sizeof(qual_record.ek_fingerprint));
+        qual_record.qualified_at = time(NULL);
+        qual_record.expires_at = qualification_state.expires_at;
+        if (charra_qualification_state_renew(qualification_state_file_path,
+                    ek_fingerprint, &qual_record) != CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] /qualify/submit: could not "
+                             "persist qualification state.");
+        }
+
         charra_log_info(
                 "[" LOG_NAME "] /qualify/submit: RP qualified (valid until "
                 "%ld).",

@@ -20,6 +20,11 @@ rp-ak-certificate.der
 ak-provisioning-state.txt
 ak-provisioning-state.txt.lock
 
+# per-Verifier RP-qualification ledger (regenerated at runtime, one file
+# per port -- see qualification_state_file_path in verifier.c)
+qualification-state-*.txt
+qualification-state-*.txt.lock
+
 # per-component runtime logs (overwritten on every run)
 logs/*.log
 
