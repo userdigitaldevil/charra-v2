@@ -14,9 +14,10 @@
 #include "charra_synthetic_log.h"
 
 CHARRA_RC charra_rp_qualification_generate(uint32_t num_entries,
-        uint32_t seed, rp_qualification_state* state_out,
-        uint8_t** challenge_log_out, uint32_t* challenge_log_len_out) {
-    if (state_out == NULL || challenge_log_out == NULL ||
+        uint32_t seed, const uint8_t salt[CHARRA_SDK_PATH_SALT_LEN],
+        rp_qualification_state* state_out, uint8_t** challenge_log_out,
+        uint32_t* challenge_log_len_out) {
+    if (salt == NULL || state_out == NULL || challenge_log_out == NULL ||
             challenge_log_len_out == NULL) {
         return CHARRA_RC_BAD_ARGUMENT;
     }
@@ -30,7 +31,7 @@ CHARRA_RC charra_rp_qualification_generate(uint32_t num_entries,
     }
 
     memset(state_out, 0, sizeof(*state_out));
-    rc = charra_sdk_redact_ima_log(raw_log, raw_log_len,
+    rc = charra_sdk_redact_ima_log(raw_log, raw_log_len, salt,
             &state_out->golden_log, &state_out->golden_log_len);
     if (rc != CHARRA_RC_SUCCESS) {
         free(raw_log);

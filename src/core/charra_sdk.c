@@ -64,39 +64,100 @@ static bool split_ima_ng_fields(const charra_event_log_entry* entry,
 }
 
 /**
- * @brief redacted_path = SHA256(path || salt), with a fresh random salt.
- *
- * The salt is discarded: it exists to make the hash both irreversible
- * against guessed paths and non-correlatable across entries, neither of
- * which requires anyone to be able to recompute it.
+ * @brief redacted_path = SHA256(path || salt). salt is mandatory -- callers
+ * decide where it comes from: charra_sdk_redact_ima_log() generates a
+ * fresh one right before every call (never reused, never transmitted),
+ * charra_sdk_redact_ima_log_with_salt() passes the same caller-given salt
+ * to every call. This function itself has no notion of "no salt given".
  */
-static CHARRA_RC hash_path_salted(const uint8_t* path, uint32_t path_len,
+static CHARRA_RC hash_path_with_salt(const uint8_t* path, uint32_t path_len,
+        const uint8_t salt[CHARRA_SDK_PATH_SALT_LEN],
         uint8_t out[CHARRA_SDK_REDACTED_PATH_LEN]) {
-    uint8_t salt[CHARRA_SDK_PATH_SALT_LEN] = {0};
-    if (charra_random_bytes(CHARRA_SDK_PATH_SALT_LEN, salt) !=
-            CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not generate a path salt.");
-        return CHARRA_RC_CRYPTO_ERROR;
-    }
-
-    uint8_t* buf = malloc((size_t)path_len + sizeof(salt));
+    uint8_t* buf = malloc((size_t)path_len + CHARRA_SDK_PATH_SALT_LEN);
     if (buf == NULL) {
         return CHARRA_RC_ERROR;
     }
     if (path_len > 0) {
         memcpy(buf, path, path_len);
     }
-    memcpy(buf + path_len, salt, sizeof(salt));
+    memcpy(buf + path_len, salt, CHARRA_SDK_PATH_SALT_LEN);
 
-    CHARRA_RC charra_r = hash_sha256((size_t)path_len + sizeof(salt), buf, out);
+    CHARRA_RC charra_r = hash_sha256(
+            (size_t)path_len + CHARRA_SDK_PATH_SALT_LEN, buf, out);
     free(buf);
     return (charra_r == CHARRA_RC_SUCCESS) ? CHARRA_RC_SUCCESS
                                            : CHARRA_RC_CRYPTO_ERROR;
 }
 
+/**
+ * @brief Redact one already-parsed entry using entry_salt and append the
+ * result to buf at *out_offset, advancing it. Shared by both public
+ * redaction functions below -- they differ only in where entry_salt comes
+ * from for each entry (a fresh one every call, or always the same one).
+ */
+static CHARRA_RC redact_one_entry(const charra_event_log_entry* entry,
+        uint32_t entry_num,
+        const uint8_t entry_salt[CHARRA_SDK_PATH_SALT_LEN], uint8_t* buf,
+        uint32_t* out_offset) {
+    const uint8_t* d_field = NULL;
+    uint32_t d_field_len = 0;
+    const uint8_t* path = NULL;
+    uint32_t path_len = 0;
+    if (!split_ima_ng_fields(
+                entry, &d_field, &d_field_len, &path, &path_len)) {
+        charra_log_error("[" LOG_NAME "] Entry %u's template_data is not a "
+                         "well-formed ima-ng field pair.",
+                entry_num);
+        return CHARRA_RC_MARSHALING_ERROR;
+    }
+
+    uint8_t redacted_path[CHARRA_SDK_REDACTED_PATH_LEN] = {0};
+    CHARRA_RC charra_r =
+            hash_path_with_salt(path, path_len, entry_salt, redacted_path);
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        return charra_r;
+    }
+
+    /* new template_data = d-ng verbatim || u32(32) || redacted path */
+    const uint32_t new_td_len =
+            d_field_len + sizeof(uint32_t) + CHARRA_SDK_REDACTED_PATH_LEN;
+    uint8_t* new_template_data = malloc(new_td_len);
+    if (new_template_data == NULL) {
+        return CHARRA_RC_ERROR;
+    }
+    uint32_t td_offset = 0;
+    charra_event_log_append_bytes(
+            new_template_data, &td_offset, d_field, d_field_len);
+    charra_event_log_append_u32(
+            new_template_data, &td_offset, CHARRA_SDK_REDACTED_PATH_LEN);
+    charra_event_log_append_bytes(new_template_data, &td_offset,
+            redacted_path, CHARRA_SDK_REDACTED_PATH_LEN);
+
+    /* template_digest = SHA256(new template_data), recomputed from the
+     * REDACTED content -- never copied from the original entry. */
+    uint8_t new_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
+    charra_r = hash_sha256(new_td_len, new_template_data, new_digest);
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        free(new_template_data);
+        return CHARRA_RC_CRYPTO_ERROR;
+    }
+
+    charra_event_log_append_u32(buf, out_offset, entry->pcr_index);
+    charra_event_log_append_bytes(
+            buf, out_offset, new_digest, sizeof(new_digest));
+    charra_event_log_append_u32(buf, out_offset, entry->template_name_len);
+    charra_event_log_append_bytes(
+            buf, out_offset, entry->template_name, entry->template_name_len);
+    charra_event_log_append_u32(buf, out_offset, new_td_len);
+    charra_event_log_append_bytes(
+            buf, out_offset, new_template_data, new_td_len);
+    free(new_template_data);
+    return CHARRA_RC_SUCCESS;
+}
+
 CHARRA_RC charra_sdk_redact_ima_log(const uint8_t* raw_log,
-        uint32_t raw_log_len, uint8_t** redacted_log_out,
-        uint32_t* redacted_log_len_out) {
+        uint32_t raw_log_len, const uint8_t salt[CHARRA_SDK_PATH_SALT_LEN],
+        uint8_t** redacted_log_out, uint32_t* redacted_log_len_out) {
     if (redacted_log_out == NULL || redacted_log_len_out == NULL) {
         return CHARRA_RC_BAD_ARGUMENT;
     }
@@ -153,61 +214,25 @@ CHARRA_RC charra_sdk_redact_ima_log(const uint8_t* raw_log,
             goto error;
         }
 
-        const uint8_t* d_field = NULL;
-        uint32_t d_field_len = 0;
-        const uint8_t* path = NULL;
-        uint32_t path_len = 0;
-        if (!split_ima_ng_fields(
-                    &entry, &d_field, &d_field_len, &path, &path_len)) {
-            charra_log_error("[" LOG_NAME "] Entry %u's template_data is not "
-                             "a well-formed ima-ng field pair.",
-                    entry_num);
-            charra_r = CHARRA_RC_MARSHALING_ERROR;
-            goto error;
-        }
-
-        uint8_t redacted_path[CHARRA_SDK_REDACTED_PATH_LEN] = {0};
-        charra_r = hash_path_salted(path, path_len, redacted_path);
-        if (charra_r != CHARRA_RC_SUCCESS) {
-            goto error;
-        }
-
-        /* new template_data = d-ng verbatim || u32(32) || redacted path */
-        const uint32_t new_td_len =
-                d_field_len + sizeof(uint32_t) + CHARRA_SDK_REDACTED_PATH_LEN;
-        uint8_t* new_template_data = malloc(new_td_len);
-        if (new_template_data == NULL) {
-            charra_r = CHARRA_RC_ERROR;
-            goto error;
-        }
-        uint32_t td_offset = 0;
-        charra_event_log_append_bytes(
-                new_template_data, &td_offset, d_field, d_field_len);
-        charra_event_log_append_u32(
-                new_template_data, &td_offset, CHARRA_SDK_REDACTED_PATH_LEN);
-        charra_event_log_append_bytes(new_template_data, &td_offset,
-                redacted_path, CHARRA_SDK_REDACTED_PATH_LEN);
-
-        /* template_digest = SHA256(new template_data), recomputed from the
-         * REDACTED content -- never copied from the original entry. */
-        uint8_t new_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
-        charra_r = hash_sha256(new_td_len, new_template_data, new_digest);
-        if (charra_r != CHARRA_RC_SUCCESS) {
-            free(new_template_data);
+        /* entry_salt is either the one caller-given salt (every entry, so
+         * output is reproducible -- the qualification-handshake case) or a
+         * fresh one generated right here for just this entry, never reused
+         * or transmitted (the real-evidence case) -- see charra_sdk.h. */
+        uint8_t entry_salt[CHARRA_SDK_PATH_SALT_LEN] = {0};
+        if (salt != NULL) {
+            memcpy(entry_salt, salt, CHARRA_SDK_PATH_SALT_LEN);
+        } else if (charra_random_bytes(CHARRA_SDK_PATH_SALT_LEN, entry_salt) !=
+                CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Could not generate a path salt.");
             charra_r = CHARRA_RC_CRYPTO_ERROR;
             goto error;
         }
 
-        charra_event_log_append_u32(buf, &out_offset, entry.pcr_index);
-        charra_event_log_append_bytes(
-                buf, &out_offset, new_digest, sizeof(new_digest));
-        charra_event_log_append_u32(buf, &out_offset, entry.template_name_len);
-        charra_event_log_append_bytes(buf, &out_offset, entry.template_name,
-                entry.template_name_len);
-        charra_event_log_append_u32(buf, &out_offset, new_td_len);
-        charra_event_log_append_bytes(
-                buf, &out_offset, new_template_data, new_td_len);
-        free(new_template_data);
+        charra_r = redact_one_entry(
+                &entry, entry_num, entry_salt, buf, &out_offset);
+        if (charra_r != CHARRA_RC_SUCCESS) {
+            goto error;
+        }
         entry_num++;
     }
 

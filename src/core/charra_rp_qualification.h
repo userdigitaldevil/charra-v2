@@ -24,6 +24,7 @@
 #include <tss2/tss2_tpm2_types.h>
 
 #include "../common/charra_error.h"
+#include "charra_sdk.h"
 
 /** How long a passed qualification stays valid before re-check is required. */
 #define CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS (24 * 60 * 60)
@@ -52,16 +53,22 @@ typedef struct {
  * @brief Fabricate a qualification challenge and precompute the golden
  * answer.
  *
- * Generates a synthetic IMA log, redacts it locally to fill in *state_out
- * (golden_log, golden_pcr), and separately returns the raw (unredacted) log
- * for the caller to send to the RP -- the RP is expected to redact it and
- * submit the result back for charra_rp_qualification_check().
+ * Generates a synthetic IMA log, redacts it locally with salt to fill in
+ * *state_out (golden_log, golden_pcr), and separately returns the raw
+ * (unredacted) log for the caller to send to the RP -- the RP is expected
+ * to redact it (with the same salt, also sent to it) and submit the result
+ * back for charra_rp_qualification_check().
  *
  * *state_out starts unqualified (qualified = false, expires_at = 0).
  *
  * @param[in] num_entries synthetic log size; must be > 0
  * @param[in] seed determines the fabricated content; same seed -> same
  * challenge
+ * @param[in] salt exactly CHARRA_SDK_PATH_SALT_LEN bytes, passed straight
+ * to charra_sdk_redact_ima_log() -- the caller is expected to send this
+ * same salt to the RP, so its own redaction of challenge_log_out comes out
+ * byte-identical to golden_log here. See charra_sdk.h for why sharing a
+ * salt is only ever safe for this synthetic, Verifier-fabricated log.
  * @param[out] state_out golden answer for this challenge; caller must
  * eventually pass it to charra_rp_qualification_state_free()
  * @param[out] challenge_log_out receives a malloc'd buffer; caller must
@@ -73,8 +80,9 @@ typedef struct {
  * fails
  */
 CHARRA_RC charra_rp_qualification_generate(uint32_t num_entries,
-        uint32_t seed, rp_qualification_state* state_out,
-        uint8_t** challenge_log_out, uint32_t* challenge_log_len_out);
+        uint32_t seed, const uint8_t salt[CHARRA_SDK_PATH_SALT_LEN],
+        rp_qualification_state* state_out, uint8_t** challenge_log_out,
+        uint32_t* challenge_log_len_out);
 
 /**
  * @brief Check an RP's qualification submission against the golden answer.

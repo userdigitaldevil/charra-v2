@@ -130,6 +130,10 @@ static CHARRA_RC certify_ak_rc = CHARRA_RC_ERROR;
  * just verifiers[0] like AK provisioning above. */
 static uint8_t* qualify_challenge_log = NULL;
 static uint32_t qualify_challenge_log_len = 0;
+/* Salt to redact qualify_challenge_log with, sent alongside it -- see
+ * msg_qualify_response_dto's docstring in charra_dto.h for why sharing a
+ * salt is safe here (and only here). */
+static uint8_t qualify_challenge_salt[CHARRA_SDK_PATH_SALT_LEN] = {0};
 static CHARRA_RC qualify_response_rc = CHARRA_RC_ERROR;
 static bool processing_qualify_response = false;
 static bool qualify_submit_qualified = false;
@@ -688,7 +692,7 @@ static CHARRA_RC charra_rp_prepare_evidence(void) {
 
     /* --- redact: only the path of each entry is replaced --------------- */
     CHARRA_RC charra_r = charra_sdk_redact_ima_log(last_response.event_log,
-            last_response.event_log_len, &rp_log_r, &rp_log_r_len);
+            last_response.event_log_len, NULL, &rp_log_r, &rp_log_r_len);
     if (charra_r != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Redaction of the event log failed.");
         return charra_r;
@@ -1013,6 +1017,7 @@ static coap_response_t coap_qualify_response_handler(
     charra_free_if_not_null(qualify_challenge_log);
     qualify_challenge_log = resp.challenge_log;
     qualify_challenge_log_len = resp.challenge_log_len;
+    memcpy(qualify_challenge_salt, resp.salt, sizeof(qualify_challenge_salt));
 
 cleanup:
     processing_qualify_response = false;
@@ -1089,7 +1094,8 @@ static CHARRA_RC rp_perform_qualification_handshake(
 
     /* --- 2. redact it with the exact same pipeline real evidence uses --- */
     result = charra_sdk_redact_ima_log(qualify_challenge_log,
-            qualify_challenge_log_len, &redacted_log, &redacted_log_len);
+            qualify_challenge_log_len, qualify_challenge_salt, &redacted_log,
+            &redacted_log_len);
     if (result != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not redact the qualification "
                          "challenge log.");

@@ -41,7 +41,7 @@ static void test_redacted_log_is_valid_replay_input(void) {
     uint8_t* redacted = NULL;
     uint32_t redacted_len = 0;
     CHARRA_RC rc = charra_sdk_redact_ima_log(
-            raw_log, raw_log_len, &redacted, &redacted_len);
+            raw_log, raw_log_len, NULL, &redacted, &redacted_len);
     check("redaction succeeds", rc == CHARRA_RC_SUCCESS);
     check("redacted log is non-empty", redacted != NULL && redacted_len > 0);
 
@@ -64,7 +64,8 @@ static void test_redacted_pcr_differs_from_raw(void) {
 
     uint8_t* redacted = NULL;
     uint32_t redacted_len = 0;
-    charra_sdk_redact_ima_log(raw_log, raw_log_len, &redacted, &redacted_len);
+    charra_sdk_redact_ima_log(
+            raw_log, raw_log_len, NULL, &redacted, &redacted_len);
 
     uint8_t pcr_raw[TPM2_SHA256_DIGEST_SIZE] = {0};
     uint8_t pcr_redacted[TPM2_SHA256_DIGEST_SIZE] = {0};
@@ -93,12 +94,13 @@ static void test_salted_nondeterministic(void) {
 
     uint8_t *redacted_a = NULL, *redacted_b = NULL;
     uint32_t len_a = 0, len_b = 0;
-    charra_sdk_redact_ima_log(raw_log, raw_log_len, &redacted_a, &len_a);
-    charra_sdk_redact_ima_log(raw_log, raw_log_len, &redacted_b, &len_b);
+    charra_sdk_redact_ima_log(raw_log, raw_log_len, NULL, &redacted_a, &len_a);
+    charra_sdk_redact_ima_log(raw_log, raw_log_len, NULL, &redacted_b, &len_b);
 
-    /* the salt is fresh per call and never transmitted, so two redactions
-     * of the identical input must land on different path hashes -- this is
-     * what stops equal paths correlating across separate redactions. */
+    /* with salt == NULL, a fresh salt is generated per call and never
+     * transmitted, so two redactions of the identical input must land on
+     * different path hashes -- this is what stops equal paths correlating
+     * across separate redactions. */
     check("lengths match", len_a == len_b);
     check("bytes differ (salt is fresh per call, not reused)",
             len_a == len_b && memcmp(redacted_a, redacted_b, len_a) != 0);
@@ -106,6 +108,46 @@ static void test_salted_nondeterministic(void) {
     free(raw_log);
     free(redacted_a);
     free(redacted_b);
+}
+
+static void test_shared_salt_is_deterministic(void) {
+    printf("\nredacting the same log twice with the same explicit salt "
+           "gives identical bytes\n");
+
+    uint8_t* raw_log = NULL;
+    uint32_t raw_log_len = 0;
+    charra_synth_generate_ima_log(6, 123, &raw_log, &raw_log_len);
+
+    uint8_t salt[CHARRA_SDK_PATH_SALT_LEN];
+    memset(salt, 0x42, sizeof(salt));
+
+    uint8_t *redacted_a = NULL, *redacted_b = NULL;
+    uint32_t len_a = 0, len_b = 0;
+    charra_sdk_redact_ima_log(
+            raw_log, raw_log_len, salt, &redacted_a, &len_a);
+    charra_sdk_redact_ima_log(
+            raw_log, raw_log_len, salt, &redacted_b, &len_b);
+
+    /* this is the whole point of the salt parameter: the RP qualification
+     * handshake needs the RP's redaction to byte-match the Verifier's own
+     * golden-log redaction of the same challenge, which only works if both
+     * use the same salt. */
+    check("lengths match", len_a == len_b);
+    check("bytes match (same salt given explicitly both times)",
+            len_a == len_b && memcmp(redacted_a, redacted_b, len_a) == 0);
+
+    uint8_t* redacted_random = NULL;
+    uint32_t len_random = 0;
+    charra_sdk_redact_ima_log(
+            raw_log, raw_log_len, NULL, &redacted_random, &len_random);
+    check("differs from a NULL-salt (random) redaction of the same log",
+            len_random != len_a ||
+                    memcmp(redacted_random, redacted_a, len_a) != 0);
+
+    free(raw_log);
+    free(redacted_a);
+    free(redacted_b);
+    free(redacted_random);
 }
 
 static void test_different_entries_redact_differently(void) {
@@ -121,7 +163,8 @@ static void test_different_entries_redact_differently(void) {
 
     uint8_t* redacted = NULL;
     uint32_t redacted_len = 0;
-    charra_sdk_redact_ima_log(raw_log, raw_log_len, &redacted, &redacted_len);
+    charra_sdk_redact_ima_log(
+            raw_log, raw_log_len, NULL, &redacted, &redacted_len);
 
     /* Walk the redacted log and collect each entry's template_digest. */
     uint16_t digest_len = 0;
@@ -164,7 +207,8 @@ static void test_file_digest_preserved_path_redacted(void) {
 
     uint8_t* redacted = NULL;
     uint32_t redacted_len = 0;
-    charra_sdk_redact_ima_log(raw_log, raw_log_len, &redacted, &redacted_len);
+    charra_sdk_redact_ima_log(
+            raw_log, raw_log_len, NULL, &redacted, &redacted_len);
 
     /* pull the file-content digest straight out of the RAW entry's
      * template_data: u32(d_len) + "sha256:" (7 bytes) + digest (32 bytes)
@@ -231,7 +275,8 @@ static void test_empty_log(void) {
 
     uint8_t* redacted = NULL;
     uint32_t redacted_len = 999;
-    CHARRA_RC rc = charra_sdk_redact_ima_log(NULL, 0, &redacted, &redacted_len);
+    CHARRA_RC rc =
+            charra_sdk_redact_ima_log(NULL, 0, NULL, &redacted, &redacted_len);
 
     check("succeeds", rc == CHARRA_RC_SUCCESS);
     check("output is NULL", redacted == NULL);
@@ -246,13 +291,15 @@ static void test_bad_arguments(void) {
     uint8_t dummy[4] = {0};
 
     check("NULL redacted_log_out rejected",
-            charra_sdk_redact_ima_log(dummy, sizeof(dummy), NULL, &out_len) ==
+            charra_sdk_redact_ima_log(
+                    dummy, sizeof(dummy), NULL, NULL, &out_len) ==
                     CHARRA_RC_BAD_ARGUMENT);
     check("NULL redacted_log_len_out rejected",
-            charra_sdk_redact_ima_log(dummy, sizeof(dummy), &out, NULL) ==
+            charra_sdk_redact_ima_log(
+                    dummy, sizeof(dummy), NULL, &out, NULL) ==
                     CHARRA_RC_BAD_ARGUMENT);
     check("NULL raw_log with non-zero length rejected",
-            charra_sdk_redact_ima_log(NULL, 10, &out, &out_len) ==
+            charra_sdk_redact_ima_log(NULL, 10, NULL, &out, &out_len) ==
                     CHARRA_RC_BAD_ARGUMENT);
 }
 
@@ -263,7 +310,7 @@ static void test_malformed_log_rejected(void) {
     uint8_t* out = NULL;
     uint32_t out_len = 0;
     CHARRA_RC rc = charra_sdk_redact_ima_log(
-            garbage, sizeof(garbage), &out, &out_len);
+            garbage, sizeof(garbage), NULL, &out, &out_len);
     check("truncated/garbage log rejected", rc != CHARRA_RC_SUCCESS);
 }
 
@@ -274,6 +321,7 @@ int main(void) {
     test_redacted_log_is_valid_replay_input();
     test_redacted_pcr_differs_from_raw();
     test_salted_nondeterministic();
+    test_shared_salt_is_deterministic();
     test_different_entries_redact_differently();
     test_file_digest_preserved_path_redacted();
     test_empty_log();

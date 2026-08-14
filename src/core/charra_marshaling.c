@@ -1402,6 +1402,10 @@ static CHARRA_RC charra_marshal_qualify_response_internal(
             .len = qualify_response->challenge_log_len};
     QCBOREncode_AddBytes(&ec, challenge_log);
 
+    UsefulBufC salt = {.ptr = qualify_response->salt,
+            .len = sizeof(qualify_response->salt)};
+    QCBOREncode_AddBytes(&ec, salt);
+
     QCBOREncode_CloseArray(&ec);
 
     if (QCBOREncode_Finish(&ec, buf_out) == QCBOR_SUCCESS) {
@@ -1495,6 +1499,15 @@ CHARRA_RC charra_unmarshal_qualify_response(
     }
     res.challenge_log = challenge_log;
     memcpy(res.challenge_log, item.val.string.ptr, res.challenge_log_len);
+
+    /* parse "salt" (bytes) -- fixed size, checked exactly */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    if (item.val.string.len != sizeof(res.salt)) {
+        charra_log_error("CBOR parser: salt has the wrong size.");
+        goto cbor_parse_error;
+    }
+    memcpy(&(res.salt), item.val.string.ptr, sizeof(res.salt));
 
     if ((cborerr = QCBORDecode_Finish(&dc))) {
         charra_log_error("CBOR parser: expected end of input, but could not "

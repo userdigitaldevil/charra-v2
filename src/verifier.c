@@ -1436,8 +1436,20 @@ static void coap_qualify_handler(struct coap_resource_t* resource,
         goto cleanup;
     }
 
+    /* Shared with the RP in the response below, so its redaction of
+     * challenge_log comes out byte-identical to golden_log here -- the one
+     * deliberate exception to "salt is never transmitted", safe only
+     * because this log is synthetic. See charra_sdk.h. */
+    uint8_t salt[CHARRA_SDK_PATH_SALT_LEN] = {0};
+    if ((charra_r = charra_random_bytes(sizeof(salt), salt)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] /qualify: could not generate a salt.");
+        goto cleanup;
+    }
+
     if ((charra_r = charra_rp_qualification_generate(
-                 CHARRA_RP_QUALIFICATION_NUM_ENTRIES, seed,
+                 CHARRA_RP_QUALIFICATION_NUM_ENTRIES, seed, salt,
                  &qualification_state, &challenge_log,
                  &challenge_log_len)) != CHARRA_RC_SUCCESS) {
         charra_log_error(
@@ -1449,6 +1461,7 @@ static void coap_qualify_handler(struct coap_resource_t* resource,
             .challenge_log_len = challenge_log_len,
             .challenge_log = challenge_log,
     };
+    memcpy(resp.salt, salt, sizeof(resp.salt));
     if ((charra_r = charra_marshal_qualify_response(&resp,
                  &marshaled_response_len, &marshaled_response)) !=
             CHARRA_RC_SUCCESS) {

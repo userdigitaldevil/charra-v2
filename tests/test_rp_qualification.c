@@ -22,6 +22,15 @@
 static unsigned int tests_run = 0;
 static unsigned int tests_failed = 0;
 
+/* Stand-in for what coap_qualify_handler() generates fresh per challenge
+ * and sends alongside the log in msg_qualify_response_dto -- these tests
+ * play both Verifier and RP in-process, so one fixed salt is enough to
+ * exercise the shared-salt handshake. */
+static const uint8_t test_salt[CHARRA_SDK_PATH_SALT_LEN] = {
+        0x24, 0x68, 0xac, 0xf0, 0x13, 0x57, 0x9b, 0xdf, 0x02, 0x46, 0x8a, 0xce,
+        0x11, 0x55, 0x99, 0xdd, 0x21, 0x65, 0xa9, 0xed, 0x30, 0x74, 0xb8, 0xfc,
+        0x41, 0x85, 0xc9, 0x0d, 0x50, 0x94, 0xd8, 0x1c};
+
 static void check(const char* name, bool condition) {
     tests_run++;
     if (condition) {
@@ -32,12 +41,17 @@ static void check(const char* name, bool condition) {
     }
 }
 
-/** Redact + replay a log the way an honest RP would, to get its pcrDigest. */
+/**
+ * @brief Redact + replay a log the way an honest RP would, to get its
+ * pcrDigest -- using the same salt the Verifier sent alongside the
+ * challenge (test_salt here), the same way rp_perform_qualification_
+ * handshake() uses qualify_challenge_salt in relying_party.c.
+ */
 static void honest_rp_respond(const uint8_t* challenge_log,
         uint32_t challenge_log_len, uint8_t** rp_log_out,
         uint32_t* rp_log_len_out, uint8_t rp_pcr_out[TPM2_SHA256_DIGEST_SIZE]) {
-    charra_sdk_redact_ima_log(
-            challenge_log, challenge_log_len, rp_log_out, rp_log_len_out);
+    charra_sdk_redact_ima_log(challenge_log, challenge_log_len, test_salt,
+            rp_log_out, rp_log_len_out);
     charra_replay_ima_log(*rp_log_out, *rp_log_len_out, CHARRA_IMA_PCR_INDEX,
             rp_pcr_out);
 }
@@ -49,7 +63,7 @@ static void test_generate_produces_golden_state_and_challenge(void) {
     uint8_t* challenge_log = NULL;
     uint32_t challenge_log_len = 0;
     CHARRA_RC rc = charra_rp_qualification_generate(
-            5, 42, &state, &challenge_log, &challenge_log_len);
+            5, 42, test_salt, &state, &challenge_log, &challenge_log_len);
 
     check("generation succeeds", rc == CHARRA_RC_SUCCESS);
     check("challenge log is non-empty",
@@ -70,7 +84,7 @@ static void test_honest_rp_qualifies(void) {
     uint8_t* challenge_log = NULL;
     uint32_t challenge_log_len = 0;
     charra_rp_qualification_generate(
-            6, 7, &state, &challenge_log, &challenge_log_len);
+            6, 7, test_salt, &state, &challenge_log, &challenge_log_len);
 
     uint8_t* rp_log = NULL;
     uint32_t rp_log_len = 0;
@@ -104,7 +118,7 @@ static void test_rp_submitting_unredacted_log_rejected(void) {
     uint8_t* challenge_log = NULL;
     uint32_t challenge_log_len = 0;
     charra_rp_qualification_generate(
-            4, 99, &state, &challenge_log, &challenge_log_len);
+            4, 99, test_salt, &state, &challenge_log, &challenge_log_len);
 
     /* Dishonest/broken RP: submits the untouched challenge log instead of
      * redacting it -- still hashes to some PCR, just not the golden one. */
@@ -131,7 +145,7 @@ static void test_correct_log_but_wrong_pcr_rejected(void) {
     uint8_t* challenge_log = NULL;
     uint32_t challenge_log_len = 0;
     charra_rp_qualification_generate(
-            4, 5, &state, &challenge_log, &challenge_log_len);
+            4, 5, test_salt, &state, &challenge_log, &challenge_log_len);
 
     uint8_t* rp_log = NULL;
     uint32_t rp_log_len = 0;
@@ -160,7 +174,7 @@ static void test_is_valid_false_before_any_check(void) {
     uint8_t* challenge_log = NULL;
     uint32_t challenge_log_len = 0;
     charra_rp_qualification_generate(
-            3, 1, &state, &challenge_log, &challenge_log_len);
+            3, 1, test_salt, &state, &challenge_log, &challenge_log_len);
 
     check("not valid at time 0", !charra_rp_qualification_is_valid(&state, 0));
     check("not valid at a later time",
@@ -177,7 +191,7 @@ static void test_state_free_is_idempotent(void) {
     uint8_t* challenge_log = NULL;
     uint32_t challenge_log_len = 0;
     charra_rp_qualification_generate(
-            3, 2, &state, &challenge_log, &challenge_log_len);
+            3, 2, test_salt, &state, &challenge_log, &challenge_log_len);
 
     charra_rp_qualification_state_free(&state);
     check("golden_log cleared", state.golden_log == NULL);
@@ -197,14 +211,20 @@ static void test_bad_arguments(void) {
     uint32_t log_len = 0;
     uint8_t pcr[TPM2_SHA256_DIGEST_SIZE] = {0};
 
+    check("generate: NULL salt rejected",
+            charra_rp_qualification_generate(
+                    1, 1, NULL, &state, &log, &log_len) ==
+                    CHARRA_RC_BAD_ARGUMENT);
     check("generate: NULL state_out rejected",
-            charra_rp_qualification_generate(1, 1, NULL, &log, &log_len) ==
+            charra_rp_qualification_generate(
+                    1, 1, test_salt, NULL, &log, &log_len) ==
                     CHARRA_RC_BAD_ARGUMENT);
     check("generate: NULL challenge_log_out rejected",
-            charra_rp_qualification_generate(
-                    1, 1, &state, NULL, &log_len) == CHARRA_RC_BAD_ARGUMENT);
+            charra_rp_qualification_generate(1, 1, test_salt, &state, NULL,
+                    &log_len) == CHARRA_RC_BAD_ARGUMENT);
     check("generate: NULL challenge_log_len_out rejected",
-            charra_rp_qualification_generate(1, 1, &state, &log, NULL) ==
+            charra_rp_qualification_generate(
+                    1, 1, test_salt, &state, &log, NULL) ==
                     CHARRA_RC_BAD_ARGUMENT);
 
     check("check: NULL state rejected",

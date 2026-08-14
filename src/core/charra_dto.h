@@ -24,6 +24,7 @@
 #include <tss2/tss2_tpm2_types.h>
 
 #include "../util/crypto_util.h"
+#include "charra_sdk.h"
 
 #ifndef CHARRA_DTO_H
 #define CHARRA_DTO_H
@@ -263,13 +264,23 @@ typedef struct {
 } msg_certify_ak_response_dto;
 
 /**
- * /qualify response: Verifier -> RP, the raw fabricated log to redact --
- * see charra_rp_qualification.h for the full handshake this and
- * msg_qualify_submit_request_dto below implement the wire side of.
+ * /qualify response: Verifier -> RP, the raw fabricated log to redact plus
+ * the salt to redact it with -- see charra_rp_qualification.h for the full
+ * handshake this and msg_qualify_submit_request_dto below implement the
+ * wire side of.
+ *
+ * salt is the one deliberate exception to redaction's usual "salt is never
+ * transmitted" rule (see charra_sdk.h): the RP's redaction of this
+ * challenge log has to come out byte-identical to the Verifier's own
+ * golden-log redaction of it, which is only possible if both sides use the
+ * same salt. Safe here specifically because challenge_log is synthetic
+ * (fabricated paths, not a real device's) -- never do this for real
+ * evidence.
  */
 typedef struct {
     uint32_t challenge_log_len;
     uint8_t* challenge_log;
+    uint8_t salt[CHARRA_SDK_PATH_SALT_LEN];
 } msg_qualify_response_dto;
 
 /**
