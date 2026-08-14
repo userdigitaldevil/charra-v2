@@ -18,6 +18,7 @@
 #include "core/charra_helper.h"
 #include "core/charra_key_mgr.h"
 #include "core/charra_marshaling.h"
+#include "core/charra_rp_qualification.h"
 #include "util/cbor_util.h"
 #include "util/charra_util.h"
 #include "util/cli_util.h"
@@ -66,6 +67,13 @@ bool dtls_rpk_verify_peer_public_key = true;
 
 static msg_attestation_request_dto last_request = {0};
 
+/* config for /qualify + /qualify/submit (RP qualification handshake) --
+ * see charra_rp_qualification.h. Single global, same one-RP-at-a-time
+ * assumption last_request above already makes: the outstanding challenge
+ * for whichever RP most recently called /qualify. */
+static rp_qualification_state qualification_state = {0};
+#define CHARRA_RP_QUALIFICATION_NUM_ENTRIES 5
+
 /* config for /certify_ak (Verifier acting as Privacy CA) -- see
  * keys/gen-ak-pki.sh / keys/README.md for what these test-only files are */
 static char* manufacturer_root_cert_path = "keys/manufacturer-root.crt";
@@ -99,6 +107,18 @@ static void coap_nonce_handler(struct coap_resource_t* resource,
                                 struct coap_pdu_t* response);
 
 static void coap_certify_ak_handler(struct coap_resource_t* resource,
+                                struct coap_session_t* session,
+                                const struct coap_pdu_t* request,
+                                const struct coap_string_t* query,
+                                struct coap_pdu_t* response);
+
+static void coap_qualify_handler(struct coap_resource_t* resource,
+                                struct coap_session_t* session,
+                                const struct coap_pdu_t* request,
+                                const struct coap_string_t* query,
+                                struct coap_pdu_t* response);
+
+static void coap_qualify_submit_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
                                 const struct coap_pdu_t* request,
                                 const struct coap_string_t* query,
@@ -273,6 +293,10 @@ int main(int argc, char** argv) {
             coap_context, COAP_REQUEST_FETCH, "nonce", coap_nonce_handler);
     charra_coap_add_resource(coap_context, COAP_REQUEST_FETCH, "certify_ak",
             coap_certify_ak_handler);
+    charra_coap_add_resource(
+            coap_context, COAP_REQUEST_FETCH, "qualify", coap_qualify_handler);
+    charra_coap_add_resource(coap_context, COAP_REQUEST_FETCH,
+            "qualify_submit", coap_qualify_submit_handler);
 
     /* enter main loop */
     charra_log_debug("[" LOG_NAME "] Entering main loop.");
@@ -1345,4 +1369,244 @@ cleanup_success:
     if (req_unmarshaled) {
         charra_free_if_not_null(req.ek_certificate);
     }
+}
+
+/**
+ * @brief /qualify: fabricate a fresh RP-qualification challenge and hand
+ * back its raw (unredacted) log for the RP to redact and prove against via
+ * /qualify/submit -- see charra_rp_qualification.h for the full handshake
+ * this is the first half of.
+ *
+ * Ignores the request body: nothing about *which* challenge to generate is
+ * caller-supplied, only Verifier policy (CHARRA_RP_QUALIFICATION_NUM_
+ * ENTRIES) and a fresh random seed picked here.
+ */
+static void coap_qualify_handler(struct coap_resource_t* resource,
+                                struct coap_session_t* session,
+                                const struct coap_pdu_t* request,
+                                const struct coap_string_t* query,
+                                struct coap_pdu_t* response) {
+    int coap_r = 0;
+    CHARRA_RC charra_r = CHARRA_RC_ERROR;
+    coap_pdu_code_t response_code = COAP_RESPONSE_CODE_INTERNAL_ERROR;
+
+    uint8_t* challenge_log = NULL;
+    uint32_t challenge_log_len = 0;
+    uint8_t* marshaled_response = NULL;
+    uint32_t marshaled_response_len = 0;
+
+    /* discard the previous round's golden answer -- a fresh /qualify call
+     * always starts a new round; any /qualify/submit still in flight for
+     * the old one is now moot */
+    charra_rp_qualification_state_free(&qualification_state);
+
+    uint32_t seed = 0;
+    if ((charra_r = charra_random_bytes(
+                 sizeof(seed), (uint8_t*)&seed)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /qualify: could not generate a "
+                         "random challenge seed.");
+        goto cleanup;
+    }
+
+    if ((charra_r = charra_rp_qualification_generate(
+                 CHARRA_RP_QUALIFICATION_NUM_ENTRIES, seed,
+                 &qualification_state, &challenge_log,
+                 &challenge_log_len)) != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] /qualify: could not generate challenge.");
+        goto cleanup;
+    }
+
+    msg_qualify_response_dto resp = {
+            .challenge_log_len = challenge_log_len,
+            .challenge_log = challenge_log,
+    };
+    if ((charra_r = charra_marshal_qualify_response(&resp,
+                 &marshaled_response_len, &marshaled_response)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] /qualify: could not marshal response.");
+        goto cleanup;
+    }
+
+    charra_log_info(
+            "[" LOG_NAME "] /qualify: issued a %u-entry challenge (%u "
+            "bytes).",
+            CHARRA_RP_QUALIFICATION_NUM_ENTRIES, challenge_log_len);
+    response_code = COAP_RESPONSE_CODE_CONTENT;
+
+cleanup:
+    coap_pdu_set_code(response, response_code);
+    if (response_code == COAP_RESPONSE_CODE_CONTENT) {
+        if ((coap_r = coap_add_data_large_response(resource, session,
+                     request, response, query, COAP_MEDIATYPE_APPLICATION_CBOR,
+                     -1, 0, marshaled_response_len, marshaled_response, NULL,
+                     NULL)) == 0) {
+            charra_log_error("[" LOG_NAME "] /qualify: Error invoking "
+                             "coap_add_data_large_response().");
+        }
+    }
+    free(marshaled_response);
+    free(challenge_log);
+}
+
+/**
+ * @brief /qualify/submit: check the RP's redaction result against the
+ * outstanding /qualify challenge, gating whether coap_appraise_handler()
+ * will accept real evidence from this RP -- see charra_rp_qualification.h.
+ *
+ * Two things must hold before charra_rp_qualification_check() is even
+ * consulted: the submitter's AK certificate must chain to this Verifier's
+ * CA (the same check Step 3a item 1 in coap_appraise_handler() runs), and
+ * its signature over submitted_pcr_digest must verify under that certified
+ * key. Without both, an unauthenticated party could submit an arbitrary
+ * log and PCR digest with no proof it ever ran a real RP's redaction
+ * pipeline.
+ */
+static void coap_qualify_submit_handler(struct coap_resource_t* resource,
+                                struct coap_session_t* session,
+                                const struct coap_pdu_t* request,
+                                const struct coap_string_t* query,
+                                struct coap_pdu_t* response) {
+    int coap_r = 0;
+    CHARRA_RC charra_r = CHARRA_RC_ERROR;
+    coap_pdu_code_t response_code = COAP_RESPONSE_CODE_INTERNAL_ERROR;
+    const char* message = "Qualification check errored!\0";
+
+    /* declared/zeroed here so cleanup can always safely free them,
+     * regardless of which check below first failed -- same convention
+     * coap_certify_ak_handler() above uses */
+    msg_qualify_submit_request_dto req = {0};
+    char* verifier_ca_cert_der = NULL;
+    size_t verifier_ca_cert_der_len = 0;
+
+    size_t data_len = 0;
+    const uint8_t* data = NULL;
+    size_t data_offset = 0;
+    size_t data_total_len = 0;
+    if ((coap_r = coap_get_data_large(request, &data_len, &data, &data_offset,
+                 &data_total_len)) == 0) {
+        charra_log_error("[" LOG_NAME
+                         "] /qualify/submit: Could not get CoAP PDU data.");
+        response_code = COAP_RESPONSE_CODE_BAD_REQUEST;
+        goto cleanup;
+    }
+
+    if ((charra_r = charra_unmarshal_qualify_submit_request(
+                 data_len, data, &req)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME
+                         "] /qualify/submit: could not parse CBOR request.");
+        response_code = COAP_RESPONSE_CODE_BAD_REQUEST;
+        goto cleanup;
+    }
+
+    /* --- who is this: submitter's AK certificate must chain to our CA,
+     * same check Step 3a item 1 in coap_appraise_handler() runs --- */
+    if ((charra_r = charra_io_read_file(verifier_ca_cert_path,
+                 &verifier_ca_cert_der, &verifier_ca_cert_der_len)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /qualify/submit: could not read "
+                         "Verifier CA certificate ('%s').",
+                verifier_ca_cert_path);
+        goto cleanup;
+    }
+
+    bool submitter_identity_ok = false;
+    {
+        mbedtls_x509_crt ak_cert_rp_leaf;
+        uint8_t ak_serial_rp[16] = {0};
+        CHARRA_RC chain_rc = charra_crypto_verify_x509_cert_chain(
+                req.ak_certificate_rp, req.ak_certificate_rp_len,
+                (uint8_t*)verifier_ca_cert_der, verifier_ca_cert_der_len,
+                &ak_cert_rp_leaf);
+        if (chain_rc == CHARRA_RC_SUCCESS) {
+            if (ak_cert_rp_leaf.serial.len == 16) {
+                memcpy(ak_serial_rp, ak_cert_rp_leaf.serial.p, 16);
+            }
+            submitter_identity_ok =
+                    charra_crypto_verify_cert_public_key_matches_der_key(
+                            &ak_cert_rp_leaf, req.rp_public_key,
+                            req.rp_public_key_len) == CHARRA_RC_SUCCESS &&
+                    is_ak_serial_currently_valid(ak_serial_rp);
+            mbedtls_x509_crt_free(&ak_cert_rp_leaf);
+        }
+    }
+    if (!submitter_identity_ok) {
+        charra_log_error("[" LOG_NAME "] /qualify/submit: submitter's AK "
+                         "certificate did NOT verify (chain, key mismatch, "
+                         "or expired/revoked).");
+        response_code = COAP_RESPONSE_CODE_UNAUTHORIZED;
+        message = "Submitter AK certificate invalid or expired!\0";
+        goto cleanup;
+    }
+
+    /* --- Quote_R signature: proves the certified key above actually
+     * signed submitted_pcr_digest, not that some unrelated certificate was
+     * merely attached to the request --- */
+    bool signature_ok = false;
+    {
+        mbedtls_pk_context rp_pub_key_ctx;
+        mbedtls_pk_init(&rp_pub_key_ctx);
+        if (mbedtls_pk_parse_public_key(&rp_pub_key_ctx, req.rp_public_key,
+                    req.rp_public_key_len) == 0 &&
+                mbedtls_pk_get_type(&rp_pub_key_ctx) == MBEDTLS_PK_RSA &&
+                mbedtls_rsa_set_padding(mbedtls_pk_rsa(rp_pub_key_ctx),
+                        MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA256) == 0) {
+            signature_ok = charra_crypto_rsa_verify_signature(
+                                   mbedtls_pk_rsa(rp_pub_key_ctx),
+                                   MBEDTLS_MD_SHA256, req.submitted_pcr_digest,
+                                   sizeof(req.submitted_pcr_digest),
+                                   req.rp_signature) == CHARRA_RC_SUCCESS;
+        } else {
+            charra_log_error("[" LOG_NAME "] /qualify/submit: could not "
+                             "parse submitter's public key.");
+        }
+        mbedtls_pk_free(&rp_pub_key_ctx);
+    }
+    if (!signature_ok) {
+        charra_log_error("[" LOG_NAME "] /qualify/submit: signature over "
+                         "submitted PCR digest is NOT valid.");
+        response_code = COAP_RESPONSE_CODE_UNAUTHORIZED;
+        message = "Signature over submitted PCR digest invalid!\0";
+        goto cleanup;
+    }
+
+    /* --- the actual qualification comparison: golden answer vs.
+     * submission -- see charra_rp_qualification.h. Known issue (tracked in
+     * CHARRA_V2_NOTES.md): charra_sdk_redact_ima_log() salts each path
+     * freshly per call, so even a correctly-behaving RP's redacted log can
+     * never byte-match this Verifier's own golden_log -- this check is
+     * therefore expected to always fail for now, intentionally left as-is
+     * until that salt handling is redesigned. */
+    if (charra_rp_qualification_check(&qualification_state,
+                req.submitted_redacted_log, req.submitted_redacted_log_len,
+                req.submitted_pcr_digest, time(NULL)) == CHARRA_RC_SUCCESS) {
+        charra_log_info(
+                "[" LOG_NAME "] /qualify/submit: RP qualified (valid until "
+                "%ld).",
+                (long)qualification_state.expires_at);
+        response_code = COAP_RESPONSE_CODE_CONTENT;
+        message = "Qualification successful!\0";
+    } else {
+        charra_log_error("[" LOG_NAME "] /qualify/submit: submitted log/PCR "
+                         "did NOT match the golden answer.");
+        response_code = COAP_RESPONSE_CODE_CONTENT;
+        message = "Qualification failed!  \0";
+    }
+
+cleanup:
+    coap_pdu_set_code(response, response_code);
+    if ((coap_r = coap_add_data_large_response(resource, session, request,
+                 response, query, COAP_MEDIATYPE_TEXT_PLAIN, -1, 0,
+                 strlen(message), (const uint8_t*)message, NULL,
+                 (void*)strlen(message))) == 0) {
+        charra_log_error("[" LOG_NAME "] /qualify/submit: Error invoking "
+                         "coap_add_data_large_response().");
+    }
+    /* submitted_redacted_log/ak_certificate_rp are heap-allocated by
+     * charra_unmarshal_qualify_submit_request(), unlike msg_rp_evidence_
+     * dto's borrowed-pointer convention -- this handler's own to free */
+    charra_free_if_not_null(req.submitted_redacted_log);
+    charra_free_if_not_null(req.ak_certificate_rp);
+    charra_io_free_file_buffer(&verifier_ca_cert_der);
 }
