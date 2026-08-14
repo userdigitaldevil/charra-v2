@@ -11,6 +11,15 @@ obj/*
 # keep folders
 !.gitkeep
 
+# RP TPM identity cache + AK-provisioning state (regenerated at runtime,
+# same convention as bin/obj -- includes private key material, never commit)
+rp-ek-certificate.der
+rp-ak-public.bin
+rp-ak-private.bin
+rp-ak-certificate.der
+ak-provisioning-state.txt
+ak-provisioning-state.txt.lock
+
 # VSCode
 .vscode/
 
