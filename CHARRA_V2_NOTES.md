@@ -1018,10 +1018,18 @@ PEM NUL-termination requirements in mbedtls); keys stay PEM.
 `coap_certify_ak_handler()` was otherwise fully stateless: every call signed
 a fresh certificate with no memory of any previous one for that requester.
 `src/core/charra_ak_state.h`/`.c` gives it that memory, on disk, surviving
-both across separate `/certify_ak` calls and a server restart, and shared
-across the multiple `bin/verifier` processes `start_verifiers.sh` spawns
-(all of which share one CA, so a renewal or future revocation needs to be
-visible to all of them, not just whichever instance handled the request).
+both across separate `/certify_ak` calls and a server restart.
+
+**Update, later session — this is no longer shared across `bin/verifier`
+processes.** The description above ("shared across the multiple
+`bin/verifier` processes... visible to all of them") described the original
+design, where the RP fetched one AK certificate from `verifiers[0]` and
+reused it everywhere, so one ledger made sense. That's since changed — see
+"RP AK certification is now independent per-Verifier" below — the ledger
+is now per-port (`ak-provisioning-state-<port>.txt`), same as the
+qualification ledger. The CA key itself (`keys/verifier-ca.key`) is still
+shared, unchanged; only the *ledger* and the *certificate issuance* are now
+per-Verifier.
 
 **Renewal policy (decided)**: requesting a new AK certificate for an EK that
 already has one on file always issues a fresh certificate and revokes the
@@ -1354,6 +1362,97 @@ with. The Verifier-side fix here means those redundant round trips are at
 least redundant *safely* now (correctly re-confirming the same identity)
 rather than papering over a shared, unbound global — but the wasted work
 itself is still there.
+
+### RP AK certification is now independent per-Verifier (mirrors the qualification fix above)
+
+Even after the qualification fix above made *qualification* genuinely
+per-Verifier, AK *certification* itself still wasn't: `relying_party.c`
+fetched exactly one AK certificate, from `verifiers[0]`, via one
+`/certify_ak` call, and reused that same certificate in every evidence
+message sent to every Verifier — contradicting the whole premise that
+Verifiers are independent (if they were, there's no reason RP's identity
+should be vouched for by only one of them and blindly trusted by the rest).
+
+**Fix**: split RP-side AK provisioning into two phases:
+1. **Keypair** (`ensure_rp_ak_keypair()`) — the actual TPM-resident EK+AK
+   keypair. Created once per RP process, verifier-agnostic (an RSA keypair
+   isn't tied to who certifies it), cached at `rp-ak-public.bin`/
+   `rp-ak-private.bin` same as before.
+2. **Certificate** (`ensure_rp_ak_certificate(int verifier_index)`) — now
+   requested via its own `/certify_ak` call to *each* Verifier separately,
+   cached per-port (`rp-ak-certificate-<port>.der`), tracked in new
+   per-Verifier arrays (`rp_ak_cert_ready[]`, `rp_ak_cert_der[]`,
+   `rp_ak_cert_der_len[]`) instead of one shared global. Called from inside
+   `get_attestation_results_thread()`, so it naturally runs once per
+   Verifier thread rather than once before the thread fan-out.
+
+**A second, latent bug this surfaced (caught before it shipped, not by
+live testing)**: making certificate *issuance* per-Verifier is pointless if
+the Verifier-side *ledger* recording those issuances is still shared —
+`charra_ak_state_renew()`'s policy revokes any existing record for the same
+`ek_fingerprint` before appending a new one, so if all Verifiers wrote to
+one `ak-provisioning-state.txt`, the second Verifier to certify RP would
+immediately revoke the first Verifier's freshly-issued certificate for that
+same RP, and so on down the line — multi-Verifier operation would be
+actively broken, not just redundant. Fixed by making `ak_state_file_path`
+per-port too (see the rename/reorg entry directly below), the same fix
+already applied to `qualification_state_file_path` in the previous entry.
+
+**A pre-existing leak/race surfaced by making this concurrent**: the shared
+`certify_ak_response` global (populated by
+`charra_unmarshal_certify_ak_response()`) was safe under the old
+call-once-per-process design but not under N per-Verifier threads
+potentially calling `/certify_ak` around the same time — each unmarshal
+overwrites `.ak_certificate` (a heap pointer) without freeing the previous
+value. Fixed with a snapshot-then-null-out pattern: under the (repurposed)
+`rp_ak_reprovision_mutex`, the response is copied to a local
+`response_snapshot` and the global's pointer is zeroed before unlocking, so
+ownership transfers cleanly to the local copy and every exit path frees it
+exactly once.
+
+**What's still shared, deliberately, and why that's fine**: the CA key
+itself (`keys/verifier-ca.key`) is unchanged — every Verifier still signs
+with the same key. That's a separate layer from what this fix addresses:
+the *ledger* and the *issuance* are now genuinely per-Verifier (separate
+`/certify_ak` calls, separate certificates, separate serials, separate
+records), even though cryptographically they all chain to one shared CA.
+Making the CA itself per-Verifier (N independent CAs, N independent trust
+roots) is a materially bigger change, out of scope here.
+
+**Verified**: clean rebuild + full test suite (all 8 suites, same pass
+counts as before, 0 regressions). Live 2-Verifier run: `rp-ak-certificate-
+5684.der` and `rp-ak-certificate-5685.der` are separate files; their
+ledger entries share the same `ek_fingerprint` but have distinct serials
+(confirming one RP identity, two independently-issued certificates); the
+RP log shows two separate `/certify_ak` → `ActivateCredential` → decrypt
+sequences, one per Verifier port, not one call reused everywhere.
+
+### Rename/reorg: state ledgers moved under `state/`, renamed `rp-ak-provisioning-state` / `rp-qualification-state`
+
+Both per-Verifier ledgers above (`ak-provisioning-state-<port>.txt`,
+`qualification-state-<port>.txt`) lived as loose files directly in the repo
+root. Two problems once the Attester's own EK/AK entered the discussion:
+"ak-provisioning-state" doesn't say *whose* AK it's tracking, and the
+Attester may reasonably need an analogous provisioning ledger of its own
+someday — a bare `ak-provisioning-state-<port>.txt` name would then be
+ambiguous between the two.
+
+**Fix**: renamed both to make the subject explicit (`rp-ak-provisioning-
+state`, `rp-qualification-state`) and moved each into its own subfolder
+under one parent, so the full paths are now:
+```
+state/rp-ak-provisioning/rp-ak-provisioning-state-<port>.txt(.lock)
+state/rp-qualification/rp-qualification-state-<port>.txt(.lock)
+```
+`verifier.c`'s `main()` now `mkdir()`s all three directories (`state/`,
+`state/rp-ak-provisioning/`, `state/rp-qualification/`) right before
+building the per-port paths — `fopen(path, "w")` fails outright if a parent
+directory is missing, and nothing else in the codebase created these
+before now (they're gitignored, runtime-only, same as the old flat files
+were). `.gitignore` now just ignores `state/` wholesale rather than two
+separate glob patterns. No change to `charra_ak_state.h`/`.c` or
+`charra_qualification_state.h`/`.c` themselves — both already took an
+arbitrary path string, so this is purely a `verifier.c`-side path change.
 
 ### Also found and fixed this session: synthetic-log generator was still emitting the pre-`afdde44` flat `template_data` layout
 

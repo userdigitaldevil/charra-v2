@@ -114,12 +114,13 @@ static const char* rp_ek_cert_not_after_utc = "20340101000000";
 /* Cache files -- created on first successful provisioning, reused (skipping
  * the whole /certify_ak round trip) on every later run. Relative to
  * whatever directory bin/relying_party is started from, same convention
- * verifier.c's ak-provisioning-state.txt uses. rp_ak_public_path/
- * rp_ak_private_path hold the one TPM-resident keypair (verifier-agnostic);
- * the AK *certificate* is per-Verifier (see rp_ak_cert_der below) and has
- * no single fixed path -- ensure_rp_ak_certificate() computes
- * "rp-ak-certificate-<port>.der" per call, mirroring verifier.c's own
- * per-port qualification-state-<port>.txt. */
+ * verifier.c's state/rp-ak-provisioning/rp-ak-provisioning-state-<port>.txt
+ * uses. rp_ak_public_path/rp_ak_private_path hold the one TPM-resident
+ * keypair (verifier-agnostic); the AK *certificate* is per-Verifier (see
+ * rp_ak_cert_der below) and has no single fixed path --
+ * ensure_rp_ak_certificate() computes "rp-ak-certificate-<port>.der" per
+ * call, mirroring verifier.c's own per-port
+ * state/rp-qualification/rp-qualification-state-<port>.txt. */
 static char* rp_ek_cert_cache_path = "rp-ek-certificate.der";
 static char* rp_ak_public_path = "rp-ak-public.bin";
 static char* rp_ak_private_path = "rp-ak-private.bin";
