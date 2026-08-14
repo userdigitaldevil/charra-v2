@@ -86,14 +86,25 @@ static char* verifier_ca_key_path = "keys/verifier-ca.key";
 static const char* ak_cert_not_before_utc = "20240101000000";
 static const char* ak_cert_not_after_utc = "20340101000000";
 /* Persisted record of AK certificates issued via /certify_ak -- see
- * charra_ak_state.h. Shared across every `bin/verifier` instance
- * start_verifiers.sh spawns, since they all share one CA. */
+ * charra_ak_state.h. Deliberately per-Verifier, NOT shared across every
+ * `bin/verifier` instance start_verifiers.sh spawns, even though they all
+ * sign with one shared CA key: each Verifier now independently certifies
+ * (via its own /certify_ak call, see relying_party.c's ensure_rp_ak_
+ * certificate()) and independently tracks RP's AK, since Verifiers are
+ * meant to be independent (see CHARRA_V2_NOTES.md). This also isn't
+ * optional bookkeeping -- charra_ak_state_renew()'s policy revokes any
+ * EXISTING record for the same ek_fingerprint before appending the new
+ * one, so if every Verifier's issuance shared one ledger, one Verifier
+ * certifying RP would immediately revoke every OTHER Verifier's own,
+ * separately-issued certificate for the same RP in that shared file.
+ * Keyed by this process's own port, same mechanism (and same comment) as
+ * qualification_state_file_path below. */
+static char ak_state_file_path_buf[64] = {0};
 static char* ak_state_file_path = "ak-provisioning-state.txt";
 
 /* Persisted, per-RP-identity record of who has passed /qualify +
- * /qualify/submit -- see charra_qualification_state.h. Deliberately NOT
- * shared like ak_state_file_path above: unlike AK certification (one CA,
- * so one issued certificate is valid Verifier-wide), qualification is each
+ * /qualify/submit -- see charra_qualification_state.h. Per-Verifier for
+ * the same reason as ak_state_file_path above: qualification is each
  * Verifier's own, independent assessment of this RP's redaction pipeline,
  * and an RP is expected to qualify with each of the N Verifiers it submits
  * evidence to separately. Keyed by this process's own port (set once
@@ -200,9 +211,14 @@ int main(int argc, char** argv) {
     charra_log_set_level(charra_log_level);
     coap_set_log_level(coap_log_level);
 
-    /* qualification_state_file_path is per-port (see its own comment
-     * above) -- port is only final once command-line parsing above has
-     * run, so this has to happen here, not at static-initialization time. */
+    /* ak_state_file_path/qualification_state_file_path are per-port (see
+     * their own comments above) -- port is only final once command-line
+     * parsing above has run, so this has to happen here, not at static-
+     * initialization time. */
+    snprintf(ak_state_file_path_buf, sizeof(ak_state_file_path_buf),
+            "ak-provisioning-state-%u.txt", port);
+    ak_state_file_path = ak_state_file_path_buf;
+
     snprintf(qualification_state_file_path_buf,
             sizeof(qualification_state_file_path_buf),
             "qualification-state-%u.txt", port);

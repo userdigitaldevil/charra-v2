@@ -11,14 +11,22 @@ obj/*
 # keep folders
 !.gitkeep
 
-# RP TPM identity cache + AK-provisioning state (regenerated at runtime,
-# same convention as bin/obj -- includes private key material, never commit)
+# RP TPM identity cache (regenerated at runtime, same convention as
+# bin/obj -- includes private key material, never commit). rp-ak-public/
+# private.bin hold the one TPM-resident keypair; rp-ak-certificate-*.der is
+# per-Verifier (one file per port -- each Verifier independently certifies
+# RP's AK now, see ensure_rp_ak_certificate() in relying_party.c).
 rp-ek-certificate.der
 rp-ak-public.bin
 rp-ak-private.bin
-rp-ak-certificate.der
-ak-provisioning-state.txt
-ak-provisioning-state.txt.lock
+rp-ak-certificate-*.der
+
+# per-Verifier AK-provisioning ledger (regenerated at runtime, one file per
+# port -- see ak_state_file_path in verifier.c; each Verifier independently
+# tracks the certificates it has issued, same reasoning as the RP-
+# qualification ledger below)
+ak-provisioning-state-*.txt
+ak-provisioning-state-*.txt.lock
 
 # per-Verifier RP-qualification ledger (regenerated at runtime, one file
 # per port -- see qualification_state_file_path in verifier.c)
