@@ -112,13 +112,16 @@ static const char* ak_cert_not_after_utc = "20340101000000";
  * certifying RP would immediately revoke every OTHER Verifier's own,
  * separately-issued certificate for the same RP in that shared file.
  * Keyed by this process's own port, same mechanism (and same comment) as
- * qualification_state_file_path below. Named "rp-..." and kept in its own
- * subfolder (rather than plain "ak-provisioning-state.txt") because this
- * ledger is specifically about the RP's AK -- the Attester has its own
- * EK/AK that may need an analogous ledger of its own one day, and the two
- * must never be mistaken for each other. */
-static char ak_state_file_path_buf[80] = {0};
-static char* ak_state_file_path = "state/rp-ak-provisioning/rp-ak-provisioning-state.txt";
+ * qualification_state_file_path below. Named "rp-..." because this ledger
+ * is specifically about the RP's AK -- the Attester has its own EK/AK that
+ * may need an analogous ledger of its own one day, and the two must never
+ * be mistaken for each other. Lives under state/verifier/ak-provisioning/
+ * -- every piece of THIS process's own runtime state lives under
+ * state/verifier/, split by purpose, mirroring how relying_party.c
+ * organizes its own runtime state under state/relying-party/. */
+static char ak_state_file_path_buf[96] = {0};
+static char* ak_state_file_path =
+        "state/verifier/ak-provisioning/rp-ak-provisioning-state.txt";
 
 /* Persisted, per-RP-identity record of who has passed /qualify +
  * /qualify/submit -- see charra_qualification_state.h. Per-Verifier for
@@ -128,12 +131,12 @@ static char* ak_state_file_path = "state/rp-ak-provisioning/rp-ak-provisioning-s
  * evidence to separately. Keyed by this process's own port (set once
  * command-line parsing determines it, see main()) so every `bin/verifier`
  * instance -- even though they all run from the same working directory --
- * keeps its own file rather than accidentally sharing one. Named "rp-..."
- * and kept in its own subfolder for the same reason as
- * ak_state_file_path above. */
-static char qualification_state_file_path_buf[80] = {0};
+ * keeps its own file rather than accidentally sharing one. Lives under
+ * state/verifier/qualification/, same reasoning as ak_state_file_path
+ * above. */
+static char qualification_state_file_path_buf[96] = {0};
 static char* qualification_state_file_path =
-        "state/rp-qualification/rp-qualification-state.txt";
+        "state/verifier/qualification/rp-qualification-state.txt";
 
 /**
  * @brief SIGINT handler: set quit to 1 for graceful termination.
@@ -241,16 +244,19 @@ int main(int argc, char** argv) {
      * state, not checked in). Ignore EEXIST -- both are expected to already
      * exist on every run after the first. */
     mkdir("state", 0755);
-    mkdir("state/rp-ak-provisioning", 0755);
-    mkdir("state/rp-qualification", 0755);
+    mkdir("state/verifier", 0755);
+    mkdir("state/verifier/ak-provisioning", 0755);
+    mkdir("state/verifier/qualification", 0755);
 
     snprintf(ak_state_file_path_buf, sizeof(ak_state_file_path_buf),
-            "state/rp-ak-provisioning/rp-ak-provisioning-state-%u.txt", port);
+            "state/verifier/ak-provisioning/rp-ak-provisioning-state-%u.txt",
+            port);
     ak_state_file_path = ak_state_file_path_buf;
 
     snprintf(qualification_state_file_path_buf,
             sizeof(qualification_state_file_path_buf),
-            "state/rp-qualification/rp-qualification-state-%u.txt", port);
+            "state/verifier/qualification/rp-qualification-state-%u.txt",
+            port);
     qualification_state_file_path = qualification_state_file_path_buf;
 
     charra_log_debug("[" LOG_NAME "] Verifier Configuration:");

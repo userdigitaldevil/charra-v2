@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Full live end-to-end run: fresh TPM simulator state, clean rebuild,
+# trust_manager + attester + 5 verifiers (ports 5684-5688) + relying_party,
+# with DEBUG logging. Run this from the repo root, in a real terminal (it
+# uses `docker run -it`, so it needs one).
+#
+# What it does, step by step:
+#   1. Removes any leftover container named "charra" from a previous run
+#      (docker run --name would otherwise refuse to start with a name
+#      already in use).
+#   2. Starts a fresh charra-dev-env container (same image docker-compose.yml
+#      builds/uses), mounting this repo into /home/bob/charra, with
+#      --group-add tss so the container user can talk to the TPM simulator
+#      device group.
+#   3. Inside the container: kills any stray bin/* processes and tpm_server
+#      from a previous run, wipes the TPM simulator's persistent NVRAM
+#      (NVChip) and restarts it fresh, then TPM2_Startup(CLEAR) -- a genuine
+#      cold TPM, nothing measured yet.
+#   4. Deletes all of state/ -- RP's own cached TPM identity
+#      (state/relying-party/identity/), its per-Verifier AK certificates and
+#      qualification cache, and both Verifier-side ledgers
+#      (state/verifier/). This step matters: step 3 just re-randomized the
+#      TPM simulator's storage-hierarchy seeds, so any *old* cached AK
+#      private blob no longer loads under the *new* TPM state (Esys_Load
+#      fails) -- skipping this step is what made the first run of this
+#      script fail every single attestation, cascading from one TPM load
+#      error into "no AK certificate" into every evidence build failing. A
+#      stale ledger would be similarly meaningless against a freshly-reset
+#      TPM's identities.
+#   5. Sanity-checks that PCRs 0-7 and 10 read back all-zero -- confirms the
+#      TPM really is freshly reset before anything starts touching it.
+#   6. Clean rebuild (make clean && make -j).
+#   7. Wipes logs/ entirely and recreates it empty -- so logs/ always
+#      reflects exactly this run, nothing left over from some earlier
+#      one-off script with a different naming scheme (that's how
+#      rp_run1.log/rp_run2.log/rp_run3.log/verifier_5684_restarted.log
+#      ended up sitting there stale after unrelated scratch-test scripts).
+#   8. Launches trust_manager, attester, and verifier instances on ports
+#      5684-5688 (all 5, matching relying_party's own num_verifiers=1..5
+#      benchmark loop -- with fewer than 5 real Verifiers running, that loop
+#      hangs waiting on whichever ports aren't listening, see
+#      CHARRA_V2_NOTES.md), all backgrounded with DEBUG logging to logs/.
+#   9. Runs relying_party in the foreground (tee'd to logs/relying_party.log
+#      too), which is the actual multi-verifier attestation run.
+#
+# Logs land in logs/*.log either way; Ctrl-C stops relying_party, the
+# container itself is --rm'd on exit but the background bin/* processes
+# inside it are not explicitly killed by this script if you Ctrl-C early --
+# re-running the script kills them itself (step 3) before starting fresh.
+
+set -e
+
+docker rm -f charra >/dev/null 2>&1 || true
+
+docker run -v "$PWD/:/home/bob/charra" -it --rm --init \
+  --name charra --group-add tss \
+  fraunhofer-sit/charra-dev-env:1.9.0 \
+  bash -lc '
+    set -e
+    pkill -9 -f "^bin/" || true
+    pkill tpm_server || true
+
+    cd /tmp && rm -f NVChip
+    (tpm_server > /tmp/tpm_server.log 2>&1 &)
+    sleep 3
+    tpm2_startup --clear
+    cd ~/charra
+
+    # All of state/ is meaningless (and breaks outright, Esys_Load failing)
+    # against a TPM state that was just re-randomized above -- see this
+    # script's own comment block.
+    rm -rf state
+
+    echo "--- PCRs before anything starts (expect all zero) ---"
+    tpm2_pcrread sha256:0,1,2,3,4,5,6,7,10
+
+    cd ~/charra
+    make clean
+    make -j
+
+    rm -rf logs
+    mkdir -p logs
+
+    LOG_LEVEL_CHARRA=DEBUG bin/trust_manager > logs/trust_manager.log 2>&1 &
+    LOG_LEVEL_CHARRA=DEBUG bin/attester      > logs/attester.log      2>&1 &
+    for p in 5684 5685 5686 5687 5688; do
+      LOG_LEVEL_CHARRA=DEBUG bin/verifier --port $p > logs/verifier_$p.log 2>&1 &
+    done
+    sleep 2
+
+    LOG_LEVEL_CHARRA=DEBUG bin/relying_party 2>&1 | tee logs/relying_party.log
+  '

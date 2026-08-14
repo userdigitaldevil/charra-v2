@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <tss2/tss2_tctildr.h>
 #include <tss2/tss2_tpm2_types.h>
 #include <unistd.h>
@@ -113,18 +114,22 @@ static char* manufacturer_root_key_path = "keys/manufacturer-root.key";
 static const char* rp_ek_cert_not_before_utc = "20240101000000";
 static const char* rp_ek_cert_not_after_utc = "20340101000000";
 /* Cache files -- created on first successful provisioning, reused (skipping
- * the whole /certify_ak round trip) on every later run. Relative to
- * whatever directory bin/relying_party is started from, same convention
- * verifier.c's state/rp-ak-provisioning/rp-ak-provisioning-state-<port>.txt
- * uses. rp_ak_public_path/rp_ak_private_path hold the one TPM-resident
- * keypair (verifier-agnostic); the AK *certificate* is per-Verifier (see
- * rp_ak_cert_der below) and has no single fixed path --
- * ensure_rp_ak_certificate() computes "rp-ak-certificate-<port>.der" per
- * call, mirroring verifier.c's own per-port
- * state/rp-qualification/rp-qualification-state-<port>.txt. */
-static char* rp_ek_cert_cache_path = "rp-ek-certificate.der";
-static char* rp_ak_public_path = "rp-ak-public.bin";
-static char* rp_ak_private_path = "rp-ak-private.bin";
+ * the whole /certify_ak round trip) on every later run. All of RP's own
+ * runtime state lives under state/relying-party/ -- mkdir'd by main() --
+ * split by purpose the same way verifier.c splits its own state under
+ * state/verifier/: identity/ holds the one TPM-resident EK/AK keypair
+ * (verifier-agnostic), ak-certificates/ holds the per-Verifier AK
+ * certificates that keypair has been issued (see rp_ak_cert_der below;
+ * ensure_rp_ak_certificate() computes
+ * "state/relying-party/ak-certificates/rp-ak-certificate-<port>.der" per
+ * call), and qualification-cache/ holds RP's own per-Verifier belief about
+ * whether it's still qualified (rp_qualification_cache_path() above). */
+static char* rp_ek_cert_cache_path =
+        "state/relying-party/identity/rp-ek-certificate.der";
+static char* rp_ak_public_path =
+        "state/relying-party/identity/rp-ak-public.bin";
+static char* rp_ak_private_path =
+        "state/relying-party/identity/rp-ak-private.bin";
 
 /* True once the TPM-resident EK+AK keypair exists and rp_public_key_der is
  * populated -- set once by ensure_rp_ak_keypair(), never per-Verifier. */
@@ -419,6 +424,17 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
     charra_log_level_from_str(
             (const char*)getenv("LOG_LEVEL_CHARRA"), &charra_log_level);
     charra_log_set_level(charra_log_level);
+
+    /* RP's own runtime state (TPM identity, per-Verifier AK certificates,
+     * per-Verifier qualification cache) lives under state/relying-party/ --
+     * mkdir() it once, up front, same reasoning verifier.c's main() already
+     * documents: fopen(path, "w") fails outright if a parent directory is
+     * missing, and nothing else creates these (gitignored, runtime-only). */
+    mkdir("state", 0755);
+    mkdir("state/relying-party", 0755);
+    mkdir("state/relying-party/identity", 0755);
+    mkdir("state/relying-party/ak-certificates", 0755);
+    mkdir("state/relying-party/qualification-cache", 0755);
 
     double verifier_durations[NUM_RUNS];
     double evidence_durations[NUM_RUNS];
@@ -1125,12 +1141,15 @@ static coap_response_t coap_qualify_submit_response_handler(
 
 /**
  * @brief Path of verifier_index's qualification cache file
- * (rp-qualification-until-<port>.txt), same per-port-filename convention
- * invalidate_cached_rp_ak_certificate() uses for the AK certificate cache.
+ * (state/relying-party/qualification-cache/rp-qualification-until-<port>.txt),
+ * same per-port-filename convention invalidate_cached_rp_ak_certificate()
+ * uses for the AK certificate cache.
  */
 static void rp_qualification_cache_path(
         int verifier_index, char* path_out, size_t path_out_len) {
-    snprintf(path_out, path_out_len, "rp-qualification-until-%u.txt",
+    snprintf(path_out, path_out_len,
+            "state/relying-party/qualification-cache/"
+            "rp-qualification-until-%u.txt",
             verifiers[verifier_index].port_number);
 }
 
@@ -1142,7 +1161,7 @@ static void rp_qualification_cache_path(
  * deployment or a first run simply hasn't qualified yet).
  */
 static time_t rp_qualification_cache_load(int verifier_index) {
-    char path[64] = {0};
+    char path[96] = {0};
     rp_qualification_cache_path(verifier_index, path, sizeof(path));
     FILE* f = fopen(path, "r");
     if (f == NULL) {
@@ -1163,7 +1182,7 @@ static time_t rp_qualification_cache_load(int verifier_index) {
  * still valid.
  */
 static void rp_qualification_cache_save(int verifier_index, time_t expires_at) {
-    char path[64] = {0};
+    char path[96] = {0};
     rp_qualification_cache_path(verifier_index, path, sizeof(path));
     FILE* f = fopen(path, "w");
     if (f == NULL) {
@@ -1177,7 +1196,7 @@ static void rp_qualification_cache_save(int verifier_index, time_t expires_at) {
 }
 
 static void invalidate_cached_rp_qualification(int verifier_index) {
-    char path[64] = {0};
+    char path[96] = {0};
     rp_qualification_cache_path(verifier_index, path, sizeof(path));
     remove(path);
     rp_qualified_until[verifier_index] = 0;
@@ -1432,8 +1451,9 @@ error:
 }
 
 static void invalidate_cached_rp_ak_certificate(int verifier_index) {
-    char cert_path[64] = {0};
-    snprintf(cert_path, sizeof(cert_path), "rp-ak-certificate-%u.der",
+    char cert_path[96] = {0};
+    snprintf(cert_path, sizeof(cert_path),
+            "state/relying-party/ak-certificates/rp-ak-certificate-%u.der",
             verifiers[verifier_index].port_number);
     remove(cert_path);
     charra_free_if_not_null(rp_ak_cert_der[verifier_index]);
@@ -1703,8 +1723,9 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
                     "(Verifier %s:%u) --------------+",
             verifier_host, verifier_port);
 
-    char cert_path[64] = {0};
-    snprintf(cert_path, sizeof(cert_path), "rp-ak-certificate-%u.der",
+    char cert_path[96] = {0};
+    snprintf(cert_path, sizeof(cert_path),
+            "state/relying-party/ak-certificates/rp-ak-certificate-%u.der",
             verifier_port);
 
     if (charra_io_file_exists(cert_path) == CHARRA_RC_SUCCESS) {
@@ -3063,9 +3084,13 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
     }
 
     if (2 * num_true > num_verifiers) {
-        charra_log_info("[" LOG_NAME "] Attestation successful by majority vote!");
+        charra_log_info("[" LOG_NAME "] Attestation successful by majority "
+                        "vote! (%d/%d Verifiers passed)",
+                num_true, num_verifiers);
     } else {
-        charra_log_info("[" LOG_NAME "] Attestation failed by majority vote!");
+        charra_log_info("[" LOG_NAME "] Attestation failed by majority "
+                        "vote! (%d/%d Verifiers passed)",
+                num_true, num_verifiers);
     }
 
     result = CHARRA_RC_SUCCESS;

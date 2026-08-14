@@ -11,28 +11,24 @@ obj/*
 # keep folders
 !.gitkeep
 
-# RP TPM identity cache (regenerated at runtime, same convention as
-# bin/obj -- includes private key material, never commit). rp-ak-public/
-# private.bin hold the one TPM-resident keypair; rp-ak-certificate-*.der is
-# per-Verifier (one file per port -- each Verifier independently certifies
-# RP's AK now, see ensure_rp_ak_certificate() in relying_party.c).
-rp-ek-certificate.der
-rp-ak-public.bin
-rp-ak-private.bin
-rp-ak-certificate-*.der
-
-# RP's own client-side cache of "qualified with this Verifier until when"
-# (one file per Verifier port -- see rp_qualified_until in relying_party.c)
-rp-qualification-until-*.txt
-
-# per-Verifier runtime state ledgers (regenerated at runtime and mkdir'd by
-# verifier.c's main() -- one file per Verifier port in each subfolder.
-# state/rp-ak-provisioning/ holds AK-certificate issuance records (see
-# ak_state_file_path in verifier.c: each Verifier independently tracks the
-# certificates it has issued). state/rp-qualification/ holds RP-
-# qualification records (see qualification_state_file_path in verifier.c).
-# Named "rp-..." since these track the RP's identity specifically, not the
-# Attester's -- which may get its own analogous ledger one day.
+# All runtime-generated state (regenerated at runtime, mkdir'd by each
+# binary's own main() -- never commit, includes private key material).
+# Split by owner, mirroring the code:
+#   state/verifier/ak-provisioning/       -- AK-certificate issuance ledger,
+#     one file per Verifier port (each Verifier independently certifies and
+#     tracks RP's AK -- see ak_state_file_path in verifier.c)
+#   state/verifier/qualification/         -- RP-qualification ledger, one
+#     file per Verifier port (see qualification_state_file_path in
+#     verifier.c)
+#   state/relying-party/identity/         -- RP's own TPM-resident EK
+#     certificate + AK keypair, verifier-agnostic (see rp_ek_cert_cache_path/
+#     rp_ak_public_path/rp_ak_private_path in relying_party.c)
+#   state/relying-party/ak-certificates/  -- per-Verifier AK certificates RP
+#     has been issued, one file per Verifier port (see rp_ak_cert_der in
+#     relying_party.c)
+#   state/relying-party/qualification-cache/ -- RP's own per-Verifier belief
+#     about whether it's still qualified, one file per Verifier port (see
+#     rp_qualified_until in relying_party.c)
 state/
 
 # per-component runtime logs (overwritten on every run)

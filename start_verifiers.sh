@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Script to start 10 instances of bin/verifier on ports 5684 to 5693
+# Script to start 5 instances of bin/verifier on ports 5684 to 5688
 
 # Define the starting port
 START_PORT=5684

@@ -1482,6 +1482,11 @@ separate glob patterns. No change to `charra_ak_state.h`/`.c` or
 `charra_qualification_state.h`/`.c` themselves — both already took an
 arbitrary path string, so this is purely a `verifier.c`-side path change.
 
+**Superseded, much later session** — these two folders moved again, and RP's
+own identity/certificate/qualification-cache files joined them under the
+same `state/` tree. See "`state/` reorganized: split by owner
+(`verifier/` vs `relying-party/`)" further down.
+
 ### Also found and fixed this session: synthetic-log generator was still emitting the pre-`afdde44` flat `template_data` layout
 
 `afdde44` rewrote `charra_sdk_redact_ima_log()` to expect real `ima-ng`'s two
@@ -1888,3 +1893,106 @@ Wired into `Makefile` the same way as every other test binary (`OBJECTS`
 already covers everything it links against — no new object needed, this is
 a pure test file). `make test` now runs 9 binaries, not 8. All 17 new
 assertions pass; full suite re-run afterward, 0 regressions elsewhere.
+
+### `state/` reorganized: split by owner (`verifier/` vs `relying-party/`)
+
+RP's own runtime identity/certificate/qualification-cache files
+(`rp-ek-certificate.der`, `rp-ak-public.bin`, `rp-ak-private.bin`,
+`rp-ak-certificate-<port>.der`, `rp-qualification-until-<port>.txt`) were
+still loose in the repo root — only the two *Verifier*-side ledgers had
+been moved under `state/` (see the entry above). Raised as "still
+scattered." Rather than just adding a third `state/` folder for RP's stuff
+alongside the existing two, went further: renamed the existing two for
+consistency too, so the whole tree is organized the same way top to bottom
+— split by *owner* (which binary writes it) first, then by *purpose*:
+
+```
+state/
+  verifier/
+    ak-provisioning/
+      rp-ak-provisioning-state-<port>.txt(.lock)
+    qualification/
+      rp-qualification-state-<port>.txt(.lock)
+  relying-party/
+    identity/
+      rp-ek-certificate.der
+      rp-ak-public.bin
+      rp-ak-private.bin
+    ak-certificates/
+      rp-ak-certificate-<port>.der
+    qualification-cache/
+      rp-qualification-until-<port>.txt
+```
+
+`state/verifier/ak-provisioning/` and `state/verifier/qualification/` are
+renamed from `state/rp-ak-provisioning/` and `state/rp-qualification/`
+(see the entry above) — same files, same content, same per-port keying,
+just relocated. `state/relying-party/` is new: `identity/` holds the one
+TPM-resident EK certificate + AK keypair (verifier-agnostic, one per RP
+process); `ak-certificates/` holds the per-Verifier AK certificates that
+keypair has been issued (`rp_ak_cert_der` in `relying_party.c`);
+`qualification-cache/` holds RP's own per-Verifier belief about whether
+it's still qualified (`rp_qualified_until`, see "RP now caches its own
+qualification client-side..." above) — three different *kinds* of thing
+RP tracks about itself and its Verifiers, kept separate rather than
+dumped into one flat folder.
+
+Both `verifier.c`'s and `relying_party.c`'s `main()` now `mkdir()` their
+own side of the tree up front (`state/`, then their own subfolders) before
+anything can `fopen()` into it — same reasoning as the original `state/`
+move. Several fixed-size path buffers needed bumping (`char path[64]` →
+`char path[96]`, `char cert_path[64]` → `char cert_path[96]`) to fit the
+deeper nesting; `.gitignore` collapsed the old per-file root-level patterns
+(`rp-ek-certificate.der`, `rp-ak-public.bin`, etc.) into the single
+existing `state/` wholesale ignore, since nothing lives outside it anymore.
+
+**Verified live**: a full cold-start run (fresh TPM simulator state, RP
+identity regenerated from scratch) with all 5 Verifier ports produced
+exactly the tree above — `find state -type f` matched it exactly, one set
+of files per Verifier port where expected, one shared identity where
+expected. `relying_party` exited 0, every one of the 5 benchmark cycles
+(`num_verifiers` 1 through 5) reached `Attestation successful by majority
+vote!` for every Verifier involved. Full rebuild + all 9 test suites still
+pass, 0 regressions.
+
+### RP's majority-vote log line now shows the actual tally
+
+`"Attestation successful/failed by majority vote!"` said nothing about
+*how* close the vote was — 3/5 and 5/5 both logged identically. Now reads
+`"... by majority vote! (%d/%d Verifiers passed)"`, e.g. `"Attestation
+successful by majority vote! (3/5 Verifiers passed)"`. Purely a log-message
+change (`relying_party.c`, the `num_true`/`num_verifiers` values were
+already computed right above the log call, just never printed) — no
+behavior change to the majority-vote decision itself.
+
+### `run_live_test.sh` — reusable full live-run script, and a real bug it surfaced
+
+Added a checked-in script wrapping the manual `docker run` + fresh-TPM +
+clean-rebuild + 5-Verifier + `relying_party` sequence used to live-verify
+changes throughout this session, so it doesn't need retyping each time.
+Mounts the repo the same way `docker-compose.yml` does, into the same
+`fraunhofer-sit/charra-dev-env:1.9.0` image, via a direct `docker run -it`
+(not `docker compose run`) so it also works as a normal interactive shell
+if invoked without the trailing command.
+
+**A real bug found on the first live run of this script, not a bug in the
+script itself**: the script does a genuine TPM reset (`rm -f NVChip`,
+fresh `tpm_server`, `tpm2_startup --clear` — re-randomizes the storage
+hierarchy's seeds) but the first version didn't also clear RP's cached TPM
+identity. Every earlier smoke test this session happened to always clear
+both together (part of each scratch script's own cleanup), so this
+never surfaced before. Result: every single attestation failed
+(`Esys_Load: 0x1df` trying to load the old AK private blob under the new
+TPM state, cascading into "no AK certificate" into every evidence build
+failing) — confirms the RP has no self-healing path today for "my cached
+AK no longer loads"; it just fails outright rather than detecting the
+mismatch and regenerating. Real, pre-existing gap, not introduced by this
+script — tracked here so it isn't lost, not yet worth fixing given how
+rarely a genuine TPM reset without a matching identity wipe happens outside
+of test scripts. Fixed for this script specifically by also `rm -rf
+state` right after the TPM reset (now covers the reorganized tree above)
+and wiping `logs/` fresh each run too, so stray files from unrelated
+one-off scripts can't accumulate the way `rp_run1.log`/`rp_run2.log`/
+`rp_run3.log`/`verifier_5684_restarted.log` had. Confirmed working: full
+5-Verifier run to completion, `relying_party exit: 0`, unanimous
+`Attestation successful!` across every cycle.
