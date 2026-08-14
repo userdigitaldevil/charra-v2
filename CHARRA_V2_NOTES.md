@@ -1199,3 +1199,44 @@ persistence:
    Outside `verifier.c` but directly consumes its output.
 
 None of these fixed yet; flagging here so they aren't lost.
+
+### Known issue: RP qualification handshake is structurally broken by salted redaction (found on `EK/AK_rp_verifier`, not fixed)
+
+`charra_rp_qualification_check()` (`charra_rp_qualification.c`) compares an
+RP's submitted redacted log against a locally-computed "golden log" with a
+byte-exact `memcmp()`. `charra_sdk_redact_ima_log()` was rewritten in
+`afdde44` ("RP privacy cleaning...") to hash each path with a **fresh random
+salt per call** (`hash_path_salted()`, deliberately never transmitted, so
+equal paths don't redact to equal values across separate redactions). Nobody
+updated the qualification check to account for this: **an RP running the
+exact correct, unmodified SDK can never produce byte-identical output to the
+Verifier's own golden-log redaction**, since both calls mint independent
+random salts. The check is not merely stale — it cannot pass for a correctly
+behaving RP anymore, by construction. This was caught because rebuilding this
+branch in Docker and running `make test` surfaced 4 failing assertions in
+`test_rp_qualification` (`"an RP that redacts correctly qualifies"`); not
+fixed yet, left for a future session. Fix needs a real design decision (e.g.
+a salt parameter so the qualification challenge can use a fixed/known salt
+while real `/appraise` redaction keeps using a random one — safe since
+qualification only ever touches fabricated synthetic paths — or dropping the
+byte-exact log comparison in favor of a structural/PCR-only check).
+
+### Also found and fixed this session: synthetic-log generator was still emitting the pre-`afdde44` flat `template_data` layout
+
+`afdde44` rewrote `charra_sdk_redact_ima_log()` to expect real `ima-ng`'s two
+length-prefixed sub-fields (d-ng: algo+digest, n-ng: path+NUL) but left
+`charra_synth_generate_ima_log()` (`charra_synthetic_log.c`) emitting the old
+flat `"sha256:" + digest + NUL + path` blob the *previous* SDK version
+expected. Every redaction of a synthetically-generated log therefore failed
+with `"Entry N's template_data is not a well-formed ima-ng field pair"` —
+caught via `make test` in Docker on this branch (`test_sdk`, 7/20 failing).
+Fixed: `charra_synth_generate_ima_log()` now builds the same two-field
+layout `charra_sdk.c` expects (`d_field = u32(39) + "sha256:" + 32-byte fake
+digest`, `n_field = u32(path_len+1) + path + NUL`), and
+`tests/test_sdk.c`'s byte-offset assertions were updated to account for the
+new 4-byte length prefixes (redacted `template_data` is now 79 bytes, not
+71). `test_sdk` is back to 20/20. One remaining test in that suite
+(`test_deterministic`, renamed `test_salted_nondeterministic`) was also
+updated: it previously asserted two redactions of the same log produce
+byte-identical output, which is now false by design per the salting above —
+it now asserts the opposite (same length, different bytes).

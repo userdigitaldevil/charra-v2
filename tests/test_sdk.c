@@ -83,8 +83,9 @@ static void test_redacted_pcr_differs_from_raw(void) {
     free(redacted);
 }
 
-static void test_deterministic(void) {
-    printf("\nredacting the same log twice gives identical output\n");
+static void test_salted_nondeterministic(void) {
+    printf("\nredacting the same log twice gives the same length but "
+           "different bytes (fresh salt per call)\n");
 
     uint8_t* raw_log = NULL;
     uint32_t raw_log_len = 0;
@@ -95,9 +96,12 @@ static void test_deterministic(void) {
     charra_sdk_redact_ima_log(raw_log, raw_log_len, &redacted_a, &len_a);
     charra_sdk_redact_ima_log(raw_log, raw_log_len, &redacted_b, &len_b);
 
+    /* the salt is fresh per call and never transmitted, so two redactions
+     * of the identical input must land on different path hashes -- this is
+     * what stops equal paths correlating across separate redactions. */
     check("lengths match", len_a == len_b);
-    check("bytes match exactly",
-            len_a == len_b && memcmp(redacted_a, redacted_b, len_a) == 0);
+    check("bytes differ (salt is fresh per call, not reused)",
+            len_a == len_b && memcmp(redacted_a, redacted_b, len_a) != 0);
 
     free(raw_log);
     free(redacted_a);
@@ -163,7 +167,8 @@ static void test_file_digest_preserved_path_redacted(void) {
     charra_sdk_redact_ima_log(raw_log, raw_log_len, &redacted, &redacted_len);
 
     /* pull the file-content digest straight out of the RAW entry's
-     * template_data: "sha256:" (7 bytes) + digest (32 bytes) + NUL + path */
+     * template_data: u32(d_len) + "sha256:" (7 bytes) + digest (32 bytes)
+     * + u32(n_len) + path + NUL -- the real ima-ng two-field layout */
     uint16_t raw_digest_len = 0;
     charra_event_log_ima_detect_digest_len(
             raw_log, raw_log_len, &raw_digest_len);
@@ -173,9 +178,12 @@ static void test_file_digest_preserved_path_redacted(void) {
             raw_log, raw_log_len, &raw_offset, raw_digest_len, &raw_entry);
     const char* prefix = "sha256:";
     uint32_t prefix_len = (uint32_t)strlen(prefix);
+    uint32_t d_len_prefix = (uint32_t)sizeof(uint32_t);
     check("raw template_data is at least prefix+digest long",
-            raw_entry.template_data_len >= prefix_len + TPM2_SHA256_DIGEST_SIZE);
-    const uint8_t* raw_file_digest = raw_entry.template_data + prefix_len;
+            raw_entry.template_data_len >=
+                    d_len_prefix + prefix_len + TPM2_SHA256_DIGEST_SIZE);
+    const uint8_t* raw_file_digest =
+            raw_entry.template_data + d_len_prefix + prefix_len;
 
     /* now pull the redacted entry's template_data apart the same way */
     uint16_t redacted_digest_len = 0;
@@ -186,15 +194,19 @@ static void test_file_digest_preserved_path_redacted(void) {
     charra_event_log_parse_entry(redacted, redacted_len, &red_offset,
             redacted_digest_len, &red_entry);
 
-    check("redacted template_data is exactly 71 bytes "
-          "(7-byte prefix + 32-byte file digest + 32-byte path hash)",
-            red_entry.template_data_len == 71);
-    check("redacted template_data starts with \"sha256:\"",
-            red_entry.template_data_len >= prefix_len &&
-                    memcmp(red_entry.template_data, prefix, prefix_len) == 0);
+    check("redacted template_data is exactly 79 bytes "
+          "(4-byte d-ng length + 7-byte prefix + 32-byte file digest "
+          "+ 4-byte n-ng length + 32-byte path hash)",
+            red_entry.template_data_len == 79);
+    check("redacted template_data starts with \"sha256:\" after its d-ng "
+          "length prefix",
+            red_entry.template_data_len >= d_len_prefix + prefix_len &&
+                    memcmp(red_entry.template_data + d_len_prefix, prefix,
+                            prefix_len) == 0);
     check("file-content digest is preserved byte-for-byte",
-            red_entry.template_data_len >= prefix_len + TPM2_SHA256_DIGEST_SIZE &&
-                    memcmp(red_entry.template_data + prefix_len,
+            red_entry.template_data_len >=
+                    d_len_prefix + prefix_len + TPM2_SHA256_DIGEST_SIZE &&
+                    memcmp(red_entry.template_data + d_len_prefix + prefix_len,
                             raw_file_digest, TPM2_SHA256_DIGEST_SIZE) == 0);
 
     /* the sensitive path must not appear anywhere in the redacted log */
@@ -261,7 +273,7 @@ int main(void) {
 
     test_redacted_log_is_valid_replay_input();
     test_redacted_pcr_differs_from_raw();
-    test_deterministic();
+    test_salted_nondeterministic();
     test_different_entries_redact_differently();
     test_file_digest_preserved_path_redacted();
     test_empty_log();

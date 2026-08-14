@@ -69,9 +69,13 @@ CHARRA_RC charra_synth_generate_ima_log(uint32_t num_entries, uint32_t seed,
             max_path_len = len;
         }
     }
-    uint32_t max_template_data_len = (uint32_t)(sizeof(ALGO_PREFIX) - 1) +
-                                      TPM2_SHA256_DIGEST_SIZE + 1 /* NUL */ +
-                                      max_path_len;
+    /* real ima-ng template_data is two length-prefixed fields:
+     * d-ng = u32 len + ("sha256:" + digest), n-ng = u32 len + (path + NUL) */
+    uint32_t max_d_field_len = (uint32_t)(sizeof(ALGO_PREFIX) - 1) +
+                                TPM2_SHA256_DIGEST_SIZE;
+    uint32_t max_n_field_len = max_path_len + 1 /* NUL */;
+    uint32_t max_template_data_len = sizeof(uint32_t) + max_d_field_len +
+                                      sizeof(uint32_t) + max_n_field_len;
     uint32_t max_entry_len = sizeof(uint32_t) /* pcr_index */
             + TPM2_SHA256_DIGEST_SIZE                 /* template_digest */
             + sizeof(uint32_t) + (sizeof(TEMPLATE_NAME) - 1) /* name */
@@ -94,22 +98,29 @@ CHARRA_RC charra_synth_generate_ima_log(uint32_t num_entries, uint32_t seed,
         const char* path = FAKE_SENSITIVE_PATHS[i % NUM_FAKE_PATHS];
         uint32_t path_len = (uint32_t)strlen(path);
 
-        /* template_data = "sha256:" + file_digest + '\0' + path */
-        uint32_t template_data_len = (uint32_t)(sizeof(ALGO_PREFIX) - 1) +
-                                      TPM2_SHA256_DIGEST_SIZE + 1 + path_len;
+        /* template_data = u32(d_len) + "sha256:" + file_digest
+         *               + u32(n_len) + path + '\0'
+         * -- real ima-ng's two length-prefixed field pair, not a flat blob */
+        uint32_t d_content_len =
+                (uint32_t)(sizeof(ALGO_PREFIX) - 1) + TPM2_SHA256_DIGEST_SIZE;
+        uint32_t n_content_len = path_len + 1 /* NUL */;
+        uint32_t template_data_len = sizeof(uint32_t) + d_content_len +
+                                      sizeof(uint32_t) + n_content_len;
         uint8_t* template_data = malloc(template_data_len);
         if (template_data == NULL) {
             free(buf);
             return CHARRA_RC_ERROR;
         }
         uint32_t td_off = 0;
+        charra_event_log_append_u32(template_data, &td_off, d_content_len);
         memcpy(template_data + td_off, ALGO_PREFIX, sizeof(ALGO_PREFIX) - 1);
         td_off += (uint32_t)(sizeof(ALGO_PREFIX) - 1);
         memcpy(template_data + td_off, file_digest, TPM2_SHA256_DIGEST_SIZE);
         td_off += TPM2_SHA256_DIGEST_SIZE;
-        template_data[td_off++] = '\0';
+        charra_event_log_append_u32(template_data, &td_off, n_content_len);
         memcpy(template_data + td_off, path, path_len);
         td_off += path_len;
+        template_data[td_off++] = '\0';
 
         /* template_digest = SHA256(template_data), exactly as IMA computes
          * it -- this is what makes the generated log valid replay input */
