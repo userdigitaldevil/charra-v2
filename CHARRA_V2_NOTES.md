@@ -1113,18 +1113,10 @@ instead.
 
 ### Not yet built (tracked here so nothing gets lost between sessions)
 
-- The two new CoAP endpoints for the qualification handshake
-  (`/qualify`-style request, `/qualify/submit`-style response) — the SDK
-  (`charra_sdk_redact_ima_log()`), the synthetic data
-  (`charra_synth_generate_ima_log()`), and the qualification state/compare
-  logic (`charra_rp_qualification.c`) it would send/use all exist and are
-  tested; nothing sends them over the wire yet
-- The gate added to `coap_appraise_handler` (`qualified && !expired`) — and
-  per a scoping decision, deliberately deferred: assume RP is trusted for
-  now, build out the real-evidence-appraisal workflow first, wire the
-  qualification gate in at the end. (It also can't usefully be wired in
-  today anyway -- nothing populates `rp_qualification_state` yet either,
-  since the `/qualify` endpoints below don't exist.)
+- ~~The two new CoAP endpoints for the qualification handshake~~ **Built**
+  (see "RP qualification handshake wired end-to-end" below) — `/qualify`
+  and `/qualify_submit` now exist on the Verifier, with a matching RP
+  client and the gate wired into `coap_appraise_handler`.
 - RP-side (Step 2a + 2b of the DRA-TLS spec), nothing started: EK/AK
   validation of the Attester (can reuse `charra_crypto_verify_ekak_certificate()`
   as-is — see "Step 3a/3b item 1" entry in Part 3); calling the relocated
@@ -1221,6 +1213,68 @@ a salt parameter so the qualification challenge can use a fixed/known salt
 while real `/appraise` redaction keeps using a random one — safe since
 qualification only ever touches fabricated synthetic paths — or dropping the
 byte-exact log comparison in favor of a structural/PCR-only check).
+
+**Update: this is now enforced live, not just in `test_rp_qualification`
+(see "RP qualification handshake wired end-to-end" below).** As of the
+`coap_appraise_handler` gate landing, this known-broken comparison means
+**every `/appraise` call is currently rejected with `4.03 Forbidden`,
+regardless of how correct the RP's evidence is** — confirmed live: a full
+attester → RP → verifier run now ends in "Attestation failed!" purely
+because `/qualify/submit` never passes, never reaching Step 3a/3b at all.
+This is the intended, explicitly-requested state of this branch for now
+(the wiring was built ahead of the salt fix, deliberately) — but it is a
+real behavior change from the previous session's "`ATTESTATION SUCCESSFUL`
+end to end" result, and the salt-handling design decision above is now the
+sole blocker on `/appraise` passing again, not a nice-to-have.
+
+### RP qualification handshake wired end-to-end (built this session, salt issue above deliberately left unfixed)
+
+The four pieces the "Not yet built" list used to describe as missing are
+now built and confirmed live:
+
+- **Wire protocol**: `msg_qualify_response_dto` / `msg_qualify_submit_
+  request_dto` (`charra_dto.h`) + matching CBOR marshal/unmarshal
+  (`charra_marshaling.c`).
+- **Verifier endpoints**: `coap_qualify_handler()` (`/qualify` — fabricates
+  a fresh challenge via `charra_rp_qualification_generate()`, a random seed
+  each call) and `coap_qualify_submit_handler()` (`/qualify_submit` —
+  chain-verifies the submitter's AK certificate against the Verifier's own
+  CA, same check Step 3a item 1 uses, then verifies an RSA-PSS/SHA-256
+  signature over the submitted PCR digest before ever calling
+  `charra_rp_qualification_check()`) — both in `verifier.c`, backed by a
+  new global `qualification_state` (single-RP assumption, same convention
+  `last_request` already uses).
+- **RP client**: `rp_perform_qualification_handshake()` in
+  `relying_party.c` — fetches the challenge, redacts it through the exact
+  same `charra_sdk_redact_ima_log()` pipeline real evidence uses, replays
+  it into a PCR digest, signs that digest with RP's TPM-resident AK (same
+  short-lived-connection pattern `charra_rp_build_evidence_message()`
+  uses for Quote_r), and submits. Run once per Verifier per attestation
+  cycle from `get_attestation_results_thread()`, before `/appraise` —
+  Verifier-local state, unlike AK provisioning, so it can't be done once
+  against `verifiers[0]` the way `ensure_rp_ak_certificate()` is. A new
+  `rp_coap_fetch()` helper factors out the create-context/session/PDU/
+  wait-loop boilerplate this and the two new endpoints share with the
+  existing `/certify_ak` call.
+- **The gate**: `coap_appraise_handler` now checks
+  `charra_rp_qualification_is_valid(&qualification_state, time(NULL))`
+  before Step 3a/3b, rejecting with **`4.03 Forbidden`** — deliberately
+  *not* `4.01 Unauthorized`, which RP's own retry logic
+  (`rp_ak_cert_rejected`) already treats as "go redo `/certify_ak`"; reusing
+  it here would send a qualification failure into a pointless AK-
+  reprovisioning loop instead of redoing `/qualify`.
+
+One live bug found and fixed during this work: `coap_qualify_submit_
+handler()` responds with `2.05 Content` for *both* "qualified" and "not
+qualified" (same convention `/appraise` already uses — the message text
+carries the verdict, not the response code). The first version of RP's
+`coap_qualify_submit_response_handler()` treated any `2.05` as "qualified,"
+so the RP logged "RP QUALIFIED" immediately after the Verifier's own log
+said "Qualification failed!" — caught by actually reading the live log
+output side by side, not by the build or `make test`. Fixed to `memcmp`
+the response body against the expected success message, mirroring
+`coap_verifier_handler_appraisal()`'s own `strcmp`→`memcmp` fix earlier
+this branch (bug #7).
 
 ### Also found and fixed this session: synthetic-log generator was still emitting the pre-`afdde44` flat `template_data` layout
 
@@ -1380,11 +1434,27 @@ anyway (TEMPORARY: Attester AK provisioning is not implemented yet)"*) and
 sets `attestation_result_ekak = true` instead of calling
 `charra_crypto_verify_ekak_certificate()`. A non-empty certificate is still
 validated normally (chain + key match + not expired/revoked) — this only
-bypasses the "nothing was ever provisioned" case. **Must be removed once the
-Attester has a real AK and RP forwards its certificate** — at that point an
-empty certificate needs to go back to being a hard failure, not a silent
-pass. Tracked here specifically so it isn't forgotten and mistaken for
-permanent behavior.
+bypasses the "nothing was ever provisioned" case.
+
+**Planned end state (as of 2026-08-14, not yet implemented): the Verifier is
+*not* meant to grow its own independent Attester EK/AK check to replace this
+bypass.** The intended final design has the RP perform EK/AK verification of
+the Attester itself (mirroring how Verifiers currently validate the RP's own
+AK cert), then forward a verified/not-verified signal to the Verifier(s),
+who trust that the RP already did the check rather than re-validating the
+Attester's certificate chain themselves. So this bypass's *current* form
+(unconditionally accepting an empty cert with a loud warning) is still
+wrong — nothing is checked by *either* party today — but the fix is
+"RP gains a real EK/AK + `/certify_ak` client and does this check," not
+"Verifier re-implements independent Attester-AK validation." Worth being
+explicit about this because it's a deliberate trust-boundary shift: once
+built, Verifier security for the Attester-identity leg becomes fully
+dependent on the RP's honesty/correctness, with no independent check left on
+that leg at all — a bigger concession than the shared-CA-key caveat noted
+elsewhere in this doc, and one to keep in mind when reasoning about the
+system's overall threat model. Tracked here specifically so the bypass isn't
+mistaken for permanent behavior, and so the eventual fix isn't built in the
+wrong place.
 
 **Result**: with all of the above, a real live run produced
 `ATTESTATION SUCCESSFUL` end to end — Attester's `Quote_a` (TPM + mbedTLS
