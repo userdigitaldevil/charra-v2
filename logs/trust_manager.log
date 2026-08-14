@@ -1,8 +1,0 @@
-[32mINFO [0m[trust manager] Initializing CoAP in block-wise mode.
-[32mINFO [0m[trust manager] Creating CoAP server endpoint using UDP.
-[32mINFO [0m[trust manager] Registering CoAP resources.
-[32mINFO [0m[trust manager] Entering main loop.
-[32mINFO [0m[trust manager] Received data of length 4.
-[32mINFO [0m[trust manager] Received data of total length 4.
-[32mINFO [0m[trust manager] Found Verifier ID 1: 127.0.0.1:5684
-[32mINFO [0m[trust manager] Adding marshaled data to CoAP response PDU and send it.
