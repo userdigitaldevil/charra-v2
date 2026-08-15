@@ -1229,6 +1229,11 @@ static bool parse_utc_yyyymmddhhmmss(const char* s, time_t* out) {
  * that completes ActivateCredential with the matching EK/AK pair can ever
  * recover it.
  */
+static void release_response_data(
+        struct coap_session_t* session CHARRA_UNUSED, void* app_ptr) {
+    charra_free_and_null(app_ptr);
+}
+
 static void coap_certify_ak_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
                                 const struct coap_pdu_t* request,
@@ -1503,17 +1508,25 @@ static void coap_certify_ak_handler(struct coap_resource_t* resource,
     coap_pdu_set_code(response, response_code);
     if ((coap_r = coap_add_data_large_response(resource, session, request,
                  response, query, COAP_MEDIATYPE_APPLICATION_CBOR, -1, 0,
-                 marshaled_response_len, marshaled_response, NULL,
-                 NULL)) == 0) {
+                 marshaled_response_len, marshaled_response,
+                 release_response_data, marshaled_response)) == 0) {
         charra_log_error("[" LOG_NAME "] /certify_ak: Error invoking "
                          "coap_add_data_large_response().");
+        /* libcoap did not accept ownership -- still ours to free */
+        free(marshaled_response);
     }
+    marshaled_response = NULL;
     goto cleanup_success;
 
 cleanup:
     coap_pdu_set_code(response, response_code);
 
 cleanup_success:
+    /* marshaled_response: NULL here on the success path -- ownership
+     * transferred to libcoap above (freed via release_response_data once
+     * every block has actually been transmitted, not synchronously here).
+     * Still non-NULL (and still ours to free) on every path that goto's
+     * cleanup/cleanup_success before ever reaching that call. */
     free(marshaled_response);
     free(ak_cert_der);
     /* ak_cert_ciphertext: owned by resp.ak_certificate once assigned above;
@@ -1630,13 +1643,21 @@ cleanup:
     if (response_code == COAP_RESPONSE_CODE_CONTENT) {
         if ((coap_r = coap_add_data_large_response(resource, session,
                      request, response, query, COAP_MEDIATYPE_APPLICATION_CBOR,
-                     -1, 0, marshaled_response_len, marshaled_response, NULL,
-                     NULL)) == 0) {
+                     -1, 0, marshaled_response_len, marshaled_response,
+                     release_response_data, marshaled_response)) == 0) {
             charra_log_error("[" LOG_NAME "] /qualify: Error invoking "
                              "coap_add_data_large_response().");
+            /* libcoap did not accept ownership -- still ours to free */
+            free(marshaled_response);
         }
+        /* else: ownership transferred to libcoap -- freed via
+         * release_response_data() once every block has actually been
+         * transmitted, not synchronously here (see its own docstring,
+         * and coap_certify_ak_handler() above, for why that distinction
+         * matters for a block-wise response). */
+    } else {
+        free(marshaled_response);
     }
-    free(marshaled_response);
     free(challenge_log);
 }
 
