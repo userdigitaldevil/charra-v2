@@ -59,32 +59,18 @@ bool attestation_results[MAX_VERIFIERS];
  * (4.01 Unauthorized), as opposed to any other appraisal failure --
  * distinguishes "go redo /certify_ak and retry" from a plain failed vote. */
 bool rp_ak_cert_rejected[MAX_VERIFIERS];
-/* Populated for the end-of-run summary report only -- not read anywhere
- * else. was_cached: true if this run reused an on-disk AK cert instead of
- * running /certify_ak; latency_ms: appraisal round-trip time. */
+/* Summary-report only: was_cached (cert reused vs. freshly /certify_ak'd),
+ * appraisal round-trip latency, and rejection reason text. */
 static bool rp_ak_cert_was_cached[MAX_VERIFIERS];
 static long verifier_latency_ms[MAX_VERIFIERS];
-/* The specific reason text a rejection carried (Verifier's own /appraise
- * response), captured once at the point of rejection so the retry log
- * line below and the end-of-run summary can both quote it instead of the
- * reader having to scroll back to find the original rejection message. */
 static char rejection_reason[MAX_VERIFIERS][128];
 typedef struct verifier_info {
     char ip_address[16];
     unsigned int port_number;
 } verifier_info;
 verifier_info verifiers[MAX_VERIFIERS];
-/* Was 6000 -- 1000x too large. This is libcoap's ack_timeout base (seconds,
- * see coap_session_set_ack_timeout() below), not a plain "give up after N"
- * ceiling: an oversized base occasionally makes a routine retransmission
- * (any single UDP packet under concurrent multi-Verifier load can need
- * one) take tens of seconds instead of a fraction of one, even though
- * nothing is actually wrong -- caught via the per-Verifier latency
- * logging above surfacing a suspiciously consistent ~40s stall on
- * whichever Verifier happened to need a retransmit that run, then
- * confirmed by dropping this to a sane value and watching the stall
- * disappear entirely. Matches trust_manager_response_timeout's existing
- * (correct) convention of being a small number of seconds. */
+/* Was 6000 -- 1000x too large: this feeds libcoap's ack_timeout (seconds),
+ * so a stray retransmission could take tens of real seconds to resolve. */
 uint16_t verifier_response_timeout = 6;  // timeout when waiting for verifier's answer (attestation results) in seconds
 static bool processing_appraisal_response = false;
 
@@ -449,9 +435,6 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
             (const char*)getenv("LOG_LEVEL_CHARRA"), &charra_log_level);
     charra_log_set_level(charra_log_level);
 
-    /* Self-describing log: the verifier-count sweep (1..5, below) and
-     * per-exchange timeouts never appear again once startup is done, so a
-     * reader of just this log file has no other way to know them. */
     charra_log_info("[" LOG_NAME "] Effective configuration: "
                     "verifier_sweep=1..5 runs_per_step=%d "
                     "verifier_response_timeout=%us "
@@ -1090,7 +1073,11 @@ static CHARRA_RC rp_coap_fetch(const char* ip_address, unsigned int port,
     }
 
     *processing_flag = false;
-    uint16_t response_wait_time = 0;
+    /* Real elapsed time (CLOCK_MONOTONIC), not a sum of coap_io_process()'s
+     * self-reported per-call durations -- that undercounts time spent
+     * scheduled out under concurrent load. */
+    struct timespec wait_start, wait_now;
+    clock_gettime(CLOCK_MONOTONIC, &wait_start);
     int coap_io_process_time = -1;
     result = CHARRA_RC_SUCCESS;
     while (!(*processing_flag) && coap_io_pending(coap_context)) {
@@ -1102,11 +1089,14 @@ static CHARRA_RC rp_coap_fetch(const char* ip_address, unsigned int port,
             result = CHARRA_RC_COAP_ERROR;
             break;
         }
-        response_wait_time += coap_io_process_time;
-        if (response_wait_time >= (verifier_response_timeout * 1000)) {
+        clock_gettime(CLOCK_MONOTONIC, &wait_now);
+        double elapsed_ms = (wait_now.tv_sec - wait_start.tv_sec) * 1000.0 +
+                             (wait_now.tv_nsec - wait_start.tv_nsec) / 1e6;
+        if (elapsed_ms >= (verifier_response_timeout * 1000)) {
             charra_log_error(
-                    "[" LOG_NAME "] Timeout waiting for /%s response.",
-                    uri_path);
+                    "[" LOG_NAME "] Timeout after %.0f ms waiting for /%s "
+                    "response.",
+                    elapsed_ms, uri_path);
             result = CHARRA_RC_TIMEOUT;
             break;
         }
@@ -1762,11 +1752,7 @@ static CHARRA_RC ensure_rp_ak_keypair(void) {
 
 static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
     if (rp_ak_cert_ready[verifier_index]) {
-        /* Already provisioned (this run's own /certify_ak, an on-disk
-         * cache-hit from a prior process, or -- as here -- simply carried
-         * over in memory from an earlier sweep iteration this same
-         * process already did) -- no work happens on this path, so it's
-         * "cached" as far as the summary report is concerned. */
+        /* No work happens on this path, so it's "cached" for the summary. */
         rp_ak_cert_was_cached[verifier_index] = true;
         return CHARRA_RC_SUCCESS;
     }
@@ -1805,10 +1791,7 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
         memcpy(cert_der, cert_buf, cert_buf_len);
         charra_io_free_file_buffer(&cert_buf);
 
-        /* Days-until-expiry is purely informational here -- just parsed
-         * back out of the cached cert for the log line below, not itself
-         * an enforcement point (the Verifier is the one that actually
-         * rejects an expired cert, on the next /appraise). */
+        /* Informational only -- the Verifier enforces expiry, not this. */
         mbedtls_x509_crt cached_cert;
         mbedtls_x509_crt_init(&cached_cert);
         if (mbedtls_x509_crt_parse(&cached_cert, cert_der, cert_buf_len) ==
@@ -1978,7 +1961,10 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
         return CHARRA_RC_COAP_ERROR;
     }
 
-    uint16_t response_wait_time = 0;
+    /* Real wall-clock elapsed time -- see rp_coap_fetch()'s docstring
+     * comment above for why this replaced a self-reported-duration sum. */
+    struct timespec wait_start, wait_now;
+    clock_gettime(CLOCK_MONOTONIC, &wait_start);
     int coap_io_process_time = -1;
     certify_ak_rc = CHARRA_RC_ERROR;
     result = CHARRA_RC_SUCCESS;
@@ -1992,11 +1978,14 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
             result = CHARRA_RC_COAP_ERROR;
             break;
         }
-        response_wait_time += coap_io_process_time;
-        if (response_wait_time >= (verifier_response_timeout * 1000)) {
+        clock_gettime(CLOCK_MONOTONIC, &wait_now);
+        double elapsed_ms = (wait_now.tv_sec - wait_start.tv_sec) * 1000.0 +
+                             (wait_now.tv_nsec - wait_start.tv_nsec) / 1e6;
+        if (elapsed_ms >= (verifier_response_timeout * 1000)) {
             charra_log_error(
-                    "[" LOG_NAME "] Timeout waiting for /certify_ak "
-                    "response.");
+                    "[" LOG_NAME "] Timeout after %.0f ms waiting for "
+                    "/certify_ak response.",
+                    elapsed_ms);
             result = CHARRA_RC_TIMEOUT;
             break;
         }
@@ -2090,10 +2079,7 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
     charra_print_hex(CHARRA_LOG_INFO, sizeof(response_snapshot.aes_gcm_tag),
             response_snapshot.aes_gcm_tag, "[DEBUG] received tag = 0x", "\n",
             false);
-    /* Same permanent fingerprint the Verifier logs before sending -- if a
-     * decrypt ever fails again, diff these two short hex strings first
-     * (matching sha256 + failed decrypt narrows it back to a key/nonce/tag
-     * bug; mismatched sha256 narrows it to transport, as it once was). */
+    /* Matches the Verifier's own fingerprint -- diff these if decrypt fails. */
     uint8_t received_ciphertext_fingerprint[32] = {0};
     if (hash_sha256(response_snapshot.ak_certificate_len,
                 response_snapshot.ak_certificate,
@@ -2426,7 +2412,14 @@ CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers) {
     int coap_io_process_time = -1;
     /* processing and waiting for response */
     charra_log_info("[" LOG_NAME "] Processing and waiting for response ...");
-    uint16_t response_wait_time = 0;
+    /* Real wall-clock elapsed time, not a sum of coap_io_process()'s own
+     * self-reported per-call durations -- that undercounts real time under
+     * concurrent load (see rp_coap_fetch()'s docstring comment for the
+     * full explanation; this replaces the previous "not 100% accurate...
+     * should be good enough" comment that turned out not to be, once
+     * actually exercised under 5-way Verifier contention). */
+    struct timespec wait_start, wait_now;
+    clock_gettime(CLOCK_MONOTONIC, &wait_start);
     while (!processing_trust_manager_response && coap_io_pending(coap_context)) {
         /* process CoAP I/O */
         if ((coap_io_process_time = coap_io_process(
@@ -2436,15 +2429,14 @@ CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers) {
             result = CHARRA_RC_COAP_ERROR;
             goto cleanup;
         }
-        /* This wait time is not 100% accurate, it only includes the elapsed
-         * time inside the coap_io_process function. But should be good enough.
-         */
-        response_wait_time += coap_io_process_time;
-        if (response_wait_time >= (trust_manager_response_timeout * 1000)) {
+        clock_gettime(CLOCK_MONOTONIC, &wait_now);
+        double elapsed_ms = (wait_now.tv_sec - wait_start.tv_sec) * 1000.0 +
+                             (wait_now.tv_nsec - wait_start.tv_nsec) / 1e6;
+        if (elapsed_ms >= (trust_manager_response_timeout * 1000)) {
             charra_log_error("[" LOG_NAME
-                             "] Timeout after %d ms while waiting for or "
+                             "] Timeout after %.0f ms while waiting for or "
                              "processing attestation response.",
-                    response_wait_time);
+                    elapsed_ms);
             result = CHARRA_RC_TIMEOUT;
             goto cleanup;
         }
@@ -2642,7 +2634,10 @@ CHARRA_RC get_evidence() {
 
     /* processing and waiting for response */
     charra_log_info("[" LOG_NAME "] Processing and waiting for response ...");
-    uint16_t response_wait_time = 0; 
+    /* Real wall-clock elapsed time -- see rp_coap_fetch()'s docstring
+     * comment for why this replaced a self-reported-duration sum. */
+    struct timespec wait_start, wait_now;
+    clock_gettime(CLOCK_MONOTONIC, &wait_start);
     while (!processing_attestation_response && coap_io_pending(coap_context)) {
         /* process CoAP I/O */
         if ((coap_io_process_time = coap_io_process(
@@ -2652,15 +2647,14 @@ CHARRA_RC get_evidence() {
             result = CHARRA_RC_COAP_ERROR;
             goto cleanup;
         }
-        /* This wait time is not 100% accurate, it only includes the elapsed
-         * time inside the coap_io_process function. But should be good enough.
-         */
-        response_wait_time += coap_io_process_time;
-        if (response_wait_time >= (attester_response_timeout * 1000)) {
+        clock_gettime(CLOCK_MONOTONIC, &wait_now);
+        double elapsed_ms = (wait_now.tv_sec - wait_start.tv_sec) * 1000.0 +
+                             (wait_now.tv_nsec - wait_start.tv_nsec) / 1e6;
+        if (elapsed_ms >= (attester_response_timeout * 1000)) {
             charra_log_error("[" LOG_NAME
-                             "] Timeout after %d ms while waiting for or "
+                             "] Timeout after %.0f ms while waiting for or "
                              "processing attestation response.",
-                    response_wait_time);
+                    elapsed_ms);
             result = CHARRA_RC_TIMEOUT;
             goto cleanup;
         }
@@ -2689,14 +2683,19 @@ void* get_attestation_results_thread(void *arg) {
     int current_thread_index = *(int*)arg;
     verifier_info verifier_info = verifiers[current_thread_index];
 
-    /* Tags every log line this thread emits for the rest of its lifetime --
-     * without this, all Verifier threads' output interleaves into one
-     * indistinguishable stream (see CHARRA_V2_NOTES.md for the debugging
-     * session this made painful). */
+    /* Tags this thread's log lines so 5 concurrent Verifier threads don't
+     * interleave into one indistinguishable stream. */
     char log_prefix[32] = {0};
     snprintf(log_prefix, sizeof(log_prefix), "[V%d:%u]",
             current_thread_index + 1, verifier_info.port_number);
     charra_log_set_thread_prefix(log_prefix);
+
+    /* cleanup/error below never sets attestation_results[] explicitly, so
+     * without this reset an early failure would silently keep a stale PASS
+     * from a previous run and get counted toward the vote. Fail closed. */
+    attestation_results[current_thread_index] = false;
+    rejection_reason[current_thread_index][0] = '\0';
+    verifier_latency_ms[current_thread_index] = -1;
 
      /* set varaibles here such that they are valid in case of an 'goto cleanup'
      */
@@ -2895,7 +2894,10 @@ void* get_attestation_results_thread(void *arg) {
     }
 
 
-    uint16_t response_wait_time_n = 0;
+    /* Real wall-clock elapsed time -- see rp_coap_fetch()'s docstring
+     * comment for why this replaced a self-reported-duration sum. */
+    struct timespec wait_start_n, wait_now_n;
+    clock_gettime(CLOCK_MONOTONIC, &wait_start_n);
     while (processing_nonce_response && coap_io_pending(coap_context)) {
         /* process CoAP I/O */
         if ((coap_io_process_time_n = coap_io_process(
@@ -2905,15 +2907,15 @@ void* get_attestation_results_thread(void *arg) {
             result = CHARRA_RC_COAP_ERROR;
             goto cleanup;
         }
-        /* This wait time is not 100% accurate, it only includes the elapsed
-         * time inside the coap_io_process function. But should be good enough.
-         */
-        response_wait_time_n += coap_io_process_time_n;
-        if (response_wait_time_n >= (verifier_response_timeout * 1000)) {
+        clock_gettime(CLOCK_MONOTONIC, &wait_now_n);
+        double elapsed_ms_n =
+                (wait_now_n.tv_sec - wait_start_n.tv_sec) * 1000.0 +
+                (wait_now_n.tv_nsec - wait_start_n.tv_nsec) / 1e6;
+        if (elapsed_ms_n >= (verifier_response_timeout * 1000)) {
             charra_log_error("[" LOG_NAME
-                             "] Timeout after %d ms while waiting for or "
+                             "] Timeout after %.0f ms while waiting for or "
                              "processing attestation response.",
-                    response_wait_time_n);
+                    elapsed_ms_n);
             result = CHARRA_RC_TIMEOUT;
             goto cleanup;
         }
@@ -3099,7 +3101,11 @@ void* get_attestation_results_thread(void *arg) {
 
         /* processing and waiting for response */
         processing_appraisal_response = false;
-        uint16_t response_wait_time_v = 0;
+        /* Real elapsed time, not a self-reported-duration sum -- see
+         * rp_coap_fetch() above. */
+        struct timespec wait_start_v, wait_now_v;
+        clock_gettime(CLOCK_MONOTONIC, &wait_start_v);
+        double elapsed_ms_v = 0;
         while (!processing_appraisal_response && coap_io_pending(coap_context_verifier_appraisal)) {
             int coap_io_process_time_v = coap_io_process(
                     coap_context_verifier_appraisal, COAP_IO_PROCESS_TIME_MS);
@@ -3109,21 +3115,20 @@ void* get_attestation_results_thread(void *arg) {
                 result = CHARRA_RC_COAP_ERROR;
                 goto cleanup;
             }
-            /* This wait time is not 100% accurate, it only includes the
-             * elapsed time inside the coap_io_process function. But should
-             * be good enough. */
-            response_wait_time_v += coap_io_process_time_v;
-            if (response_wait_time_v >= (verifier_response_timeout * 1000)) {
+            clock_gettime(CLOCK_MONOTONIC, &wait_now_v);
+            elapsed_ms_v = (wait_now_v.tv_sec - wait_start_v.tv_sec) * 1000.0 +
+                           (wait_now_v.tv_nsec - wait_start_v.tv_nsec) / 1e6;
+            if (elapsed_ms_v >= (verifier_response_timeout * 1000)) {
                 charra_log_error("[" LOG_NAME
-                                 "] Timeout after %d ms while waiting for or "
+                                 "] Timeout after %.0f ms while waiting for or "
                                  "processing attestation response.",
-                        response_wait_time_v);
+                        elapsed_ms_v);
                 result = CHARRA_RC_TIMEOUT;
                 goto cleanup;
             }
         }
 
-        total_appraisal_wait_ms += response_wait_time_v;
+        total_appraisal_wait_ms += (long)elapsed_ms_v;
         verifier_latency_ms[current_thread_index] = total_appraisal_wait_ms;
 
         bool rejected = rp_ak_cert_rejected[current_thread_index] ||
@@ -3242,13 +3247,7 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
                 num_true, num_verifiers);
     }
 
-    /* --- one-screen run summary ------------------------------------------
-     * log_r/redaction is shared across every Verifier thread (see
-     * charra_rp_prepare_evidence()'s docstring), so it's reported once
-     * here rather than per row below. Per-Verifier reason strings are
-     * derived from the same flags coap_verifier_handler_appraisal() /
-     * rp_perform_qualification_handshake() already set for the retry
-     * logic above -- this is just their first human-readable summary. */
+    /* --- one-screen run summary --------------------------------------- */
     charra_log_info("[" LOG_NAME "]  +------------ Run Summary --------------+");
     charra_log_info(
             "[" LOG_NAME "] log_r: %u bytes redacted from a %u-byte raw log.",
@@ -3258,20 +3257,23 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
         if (attestation_results[i]) {
             reason = "OK";
         } else if (rejection_reason[i][0] != '\0') {
-            /* Persists across the retry -- if the retry itself then also
-             * failed, this still shows the original rejection reason
-             * rather than nothing. */
             reason = rejection_reason[i];
         } else {
             reason = "appraisal failed (see per-Verifier log above)";
         }
+        char latency_str[16];
+        if (verifier_latency_ms[i] < 0) {
+            snprintf(latency_str, sizeof(latency_str), "  n/a");
+        } else {
+            snprintf(latency_str, sizeof(latency_str), "%5ld", verifier_latency_ms[i]);
+        }
         charra_log_info("[" LOG_NAME
-                        "] Verifier %d (%s:%u): %-4s | AK %-6s | %5ld ms | "
+                        "] Verifier %d (%s:%u): %-4s | AK %-6s | %s ms | "
                         "%s",
                 i + 1, verifiers[i].ip_address, verifiers[i].port_number,
                 attestation_results[i] ? "PASS" : "FAIL",
                 rp_ak_cert_was_cached[i] ? "cached" : "fresh",
-                verifier_latency_ms[i], reason);
+                latency_str, reason);
     }
 
     result = CHARRA_RC_SUCCESS;

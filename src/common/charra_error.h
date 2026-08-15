@@ -37,13 +37,7 @@ typedef uint32_t CHARRA_RC;
 #define CHARRA_RC_COAP_ERROR ((CHARRA_RC)0x0000C0AF)
 #define CHARRA_RC_TIMEOUT ((CHARRA_RC)0x0000000f)
 
-/**
- * @brief Human-readable name for a CHARRA_RC, for log lines like
- * "charra_r=255 (CHARRA_RC_VERIFICATION_FAILED)" instead of a bare number
- * that means nothing without looking up this header. static inline (header-
- * only, no charra_error.c) since it's a fixed small switch over the macros
- * above -- not worth a whole extra translation unit and Makefile entry.
- */
+/** @brief Human-readable name for a CHARRA_RC. */
 static inline const char* charra_rc_describe(CHARRA_RC rc) {
     switch (rc) {
     case CHARRA_RC_SUCCESS:

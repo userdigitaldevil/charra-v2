@@ -413,13 +413,7 @@ finish:
 
 static void handle_sigint(int signum CHARRA_UNUSED) { quit = true; }
 
-/**
- * @brief Logs subject/issuer/serial/expiry for a certificate that just
- * PASSED chain verification -- until now only failures got this level of
- * X.509 detail (via mbedtls_x509_crt_verify_info()); a success just said
- * "verified!" with nothing to look at if you needed to confirm *which*
- * cert, or notice one that's about to expire.
- */
+/** @brief Logs subject/issuer/serial/expiry for a cert that passed chain verification. */
 static void log_cert_chain_success(
         const char* label, const mbedtls_x509_crt* cert) {
     char subject[256] = {0};
@@ -1462,11 +1456,8 @@ static void coap_certify_ak_handler(struct coap_resource_t* resource,
     if (charra_r != CHARRA_RC_SUCCESS) {
         goto cleanup;
     }
-    /* Permanent (not ad-hoc) integrity fingerprint of the ciphertext as
-     * sent -- cheap enough to always log, and lets a receiver-side mismatch
-     * be diagnosed by comparing two short hex strings instead of the
-     * multi-hour manual hex-diff a transport-layer corruption bug (see
-     * CHARRA_V2_NOTES.md) required before this existed. */
+    /* Permanent integrity fingerprint of the ciphertext as sent -- lets a
+     * receiver-side mismatch be diagnosed by diffing two short hashes. */
     uint8_t ak_ciphertext_fingerprint[32] = {0};
     if (hash_sha256(ak_cert_der_len, ak_cert_ciphertext,
                 ak_ciphertext_fingerprint) == CHARRA_RC_SUCCESS) {
@@ -1577,11 +1568,8 @@ cleanup:
     coap_pdu_set_code(response, response_code);
 
 cleanup_success:
-    /* marshaled_response: NULL here on the success path -- ownership
-     * transferred to libcoap above (freed via release_response_data once
-     * every block has actually been transmitted, not synchronously here).
-     * Still non-NULL (and still ours to free) on every path that goto's
-     * cleanup/cleanup_success before ever reaching that call. */
+    /* NULL on the success path (ownership transferred above); non-NULL
+     * (and still ours to free) on every other path. */
     free(marshaled_response);
     free(ak_cert_der);
     /* ak_cert_ciphertext: owned by resp.ak_certificate once assigned above;
@@ -1705,11 +1693,7 @@ cleanup:
             /* libcoap did not accept ownership -- still ours to free */
             free(marshaled_response);
         }
-        /* else: ownership transferred to libcoap -- freed via
-         * release_response_data() once every block has actually been
-         * transmitted, not synchronously here (see its own docstring,
-         * and coap_certify_ak_handler() above, for why that distinction
-         * matters for a block-wise response). */
+        /* else: ownership transferred to libcoap, freed later */
     } else {
         free(marshaled_response);
     }

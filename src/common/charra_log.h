@@ -71,15 +71,10 @@ void charra_log_set_level(charra_log_t level);
 void charra_log_set_quiet(int enable);
 
 /**
- * @brief Tags every subsequent log line from *this thread* with the given
- * prefix (e.g. "[V3:5686]"), until cleared. Purely a readability aid for
- * processes that fan work out across multiple threads whose output would
- * otherwise interleave into one indistinguishable stream (relying_party's
- * one thread per Verifier is the motivating case) -- single-threaded
- * processes have no need to call this.
+ * @brief Tags this thread's subsequent log lines with prefix (e.g.
+ * "[V3:5686]"), until cleared with NULL/"".
  *
- * @param[in] prefix the prefix to prepend, or NULL/"" to clear it. Copied
- * (up to an internal fixed-size buffer), no ownership taken.
+ * @param[in] prefix copied into an internal fixed-size buffer.
  */
 void charra_log_set_thread_prefix(const char* prefix);
 
