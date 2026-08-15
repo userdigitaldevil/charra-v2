@@ -261,3 +261,39 @@ bool charra_ak_state_is_valid(
     }
     return !record->revoked && record->expires_at > now;
 }
+
+bool charra_ak_state_check_serial_valid(const char* ak_state_file_path,
+        const uint8_t serial[16], uint8_t ek_fingerprint_out[32]) {
+    charra_ak_state_record* records = NULL;
+    uint32_t count = 0;
+    if (charra_ak_state_load(ak_state_file_path, &records, &count) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Could not load AK-provisioning state.");
+        return false;
+    }
+    charra_log_info("[" LOG_NAME "] Checking AK serial against "
+                    "AK-provisioning state '%s' (%u issuance record(s)).",
+            ak_state_file_path, count);
+
+    bool valid = false;
+    uint32_t index = 0;
+    if (charra_ak_state_find_by_serial(records, count, serial, &index)) {
+        valid = charra_ak_state_is_valid(&records[index], time(NULL));
+        if (valid) {
+            if (ek_fingerprint_out != NULL) {
+                memcpy(ek_fingerprint_out, records[index].ek_fingerprint, 32);
+            }
+        } else {
+            charra_log_error("[" LOG_NAME "]     => AK certificate's serial "
+                             "is on record but revoked or expired!");
+        }
+    } else {
+        charra_log_error("[" LOG_NAME "]     => AK certificate's serial has "
+                         "no issuance record (never issued by this "
+                         "Verifier, or state file lost)!");
+    }
+
+    free(records);
+    return valid;
+}

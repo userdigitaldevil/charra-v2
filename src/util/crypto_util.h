@@ -21,8 +21,10 @@
 #ifndef CRYPTO_UTIL_H
 #define CRYPTO_UTIL_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 
 #include <tss2/tss2_tpm2_types.h>
 
@@ -82,6 +84,20 @@ CHARRA_RC charra_crypto_rsa_verify_signature(
         mbedtls_rsa_context* mbedtls_rsa_pub_key, mbedtls_md_type_t hash_algo,
         const unsigned char* data, size_t data_len,
         const unsigned char* signature);
+
+/**
+ * @brief Verify a TPM Quote's signature with mbedTLS (defense in depth,
+ * independent of any TPM-based check).
+ *
+ * @param[out] out_valid the signature's actual validity; only meaningful
+ * when this function itself returns true.
+ * @returns false only on a hard error converting tpm2_public_key to an
+ * mbedTLS key; true otherwise (check *out_valid for the actual result).
+ */
+bool charra_crypto_verify_quote_signature_mbedtls(
+        TPM2B_PUBLIC* tpm2_public_key, const uint8_t* attestation_data,
+        uint32_t attestation_data_len, TPMT_SIGNATURE* signature,
+        bool* out_valid);
 
 /* --- software RSA keypair (no TPM involved) ------------------------------
  *
@@ -203,6 +219,22 @@ CHARRA_RC charra_crypto_verify_x509_cert_chain(const uint8_t* leaf_cert_der,
  * @returns days until expiry (negative if already expired).
  */
 long charra_crypto_x509_days_until_expiry(const mbedtls_x509_crt* cert);
+
+/**
+ * @brief Log a successfully chain-verified certificate's subject, issuer,
+ * serial, and days-until-expiry at INFO level.
+ */
+void charra_crypto_log_cert_summary(
+        const char* label, const mbedtls_x509_crt* cert);
+
+/**
+ * @brief Parse a "YYYYMMDDHHMMSS" UTC timestamp (the format
+ * charra_crypto_sign_ak_certificate()'s not_before_utc/not_after_utc take)
+ * into a time_t.
+ *
+ * @returns true and sets *out on success, false on a malformed string.
+ */
+bool charra_crypto_parse_utc_yyyymmddhhmmss(const char* s, time_t* out);
 
 /**
  * @brief Confirm a certificate's embedded RSA public key is the same key

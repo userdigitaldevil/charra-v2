@@ -66,6 +66,14 @@ CHARRA_RC charra_verify_tpm2_quote_signature_with_tpm(ESYS_CONTEXT* ctx,
         const TPM2B_ATTEST* attest_buf, TPMT_SIGNATURE* signature,
         TPMT_TK_VERIFIED** validation);
 
+/**
+ * @brief Same as charra_verify_tpm2_quote_signature_with_tpm() (fixed to
+ * TPM2_ALG_SHA256), but logs the attempt/result and returns a plain bool.
+ */
+bool charra_verify_tpm2_quote_signature_with_tpm_logged(ESYS_CONTEXT* esys_ctx,
+        ESYS_TR sig_key_handle, const TPM2B_ATTEST* attest,
+        TPMT_SIGNATURE* signature, TPMT_TK_VERIFIED** validation);
+
 CHARRA_RC charra_unmarshal_tpm2_quote(size_t attest_buf_len,
         const uint8_t* attest_buf, TPMS_ATTEST* attest_struct);
 

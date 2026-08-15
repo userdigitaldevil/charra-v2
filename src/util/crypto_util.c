@@ -22,6 +22,7 @@
 
 /* system includes */
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 
@@ -336,6 +337,37 @@ error:
     return charra_r;
 }
 
+bool charra_crypto_verify_quote_signature_mbedtls(
+        TPM2B_PUBLIC* tpm2_public_key, const uint8_t* attestation_data,
+        uint32_t attestation_data_len, TPMT_SIGNATURE* signature,
+        bool* out_valid) {
+    *out_valid = false;
+
+    charra_log_info(
+            "[crypto_util] Converting TPM public key to mbedTLS public key ...");
+    mbedtls_rsa_context mbedtls_rsa_pub_key = {0};
+    if (charra_crypto_tpm_pub_key_to_mbedtls_pub_key(
+                tpm2_public_key, &mbedtls_rsa_pub_key) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[crypto_util] mbedTLS RSA error");
+        return false;
+    }
+
+    charra_log_info(
+            "[crypto_util] Verifying TPM Quote signature with mbedTLS ...");
+    if (charra_crypto_rsa_verify_signature(&mbedtls_rsa_pub_key,
+                MBEDTLS_MD_SHA256, attestation_data,
+                (size_t)attestation_data_len,
+                signature->signature.rsapss.sig.buffer) == CHARRA_RC_SUCCESS) {
+        charra_log_info("[crypto_util]     => TPM Quote signature is valid!");
+        *out_valid = true;
+    } else {
+        charra_log_error(
+                "[crypto_util]     => TPM Quote signature is NOT valid!");
+    }
+    mbedtls_rsa_free(&mbedtls_rsa_pub_key);
+    return true;
+}
+
 CHARRA_RC compute_and_check_PCR_digest(uint8_t** pcr_values,
         uint32_t pcr_values_len, const TPMS_ATTEST* const attest_struct) {
     uint8_t pcr_composite_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
@@ -541,6 +573,37 @@ long charra_crypto_x509_days_until_expiry(const mbedtls_x509_crt* cert) {
     time_t expiry = timegm(&tm);
     double diff_seconds = difftime(expiry, time(NULL));
     return (long)(diff_seconds / 86400.0);
+}
+
+void charra_crypto_log_cert_summary(
+        const char* label, const mbedtls_x509_crt* cert) {
+    char subject[256] = {0};
+    char issuer[256] = {0};
+    mbedtls_x509_dn_gets(subject, sizeof(subject), &cert->subject);
+    mbedtls_x509_dn_gets(issuer, sizeof(issuer), &cert->issuer);
+
+    char serial_hex[41] = {0};
+    size_t n = cert->serial.len < 20 ? cert->serial.len : 20;
+    for (size_t i = 0; i < n; ++i) {
+        snprintf(serial_hex + (i * 2), 3, "%02x", cert->serial.p[i]);
+    }
+
+    charra_log_info("[crypto_util]     %s: subject=\"%s\" issuer=\"%s\" "
+                    "serial=0x%s expires in %ld day(s).",
+            label, subject, issuer, serial_hex,
+            charra_crypto_x509_days_until_expiry(cert));
+}
+
+bool charra_crypto_parse_utc_yyyymmddhhmmss(const char* s, time_t* out) {
+    struct tm tm = {0};
+    if (sscanf(s, "%4d%2d%2d%2d%2d%2d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
+                &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6) {
+        return false;
+    }
+    tm.tm_year -= 1900;
+    tm.tm_mon -= 1;
+    *out = timegm(&tm);
+    return *out != (time_t)-1;
 }
 
 CHARRA_RC charra_crypto_seeded_rng_init(

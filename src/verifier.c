@@ -414,150 +414,6 @@ finish:
 static void handle_sigint(int signum CHARRA_UNUSED) { quit = true; }
 
 /** @brief Logs subject/issuer/serial/expiry for a cert that passed chain verification. */
-static void log_cert_chain_success(
-        const char* label, const mbedtls_x509_crt* cert) {
-    char subject[256] = {0};
-    char issuer[256] = {0};
-    mbedtls_x509_dn_gets(subject, sizeof(subject), &cert->subject);
-    mbedtls_x509_dn_gets(issuer, sizeof(issuer), &cert->issuer);
-
-    char serial_hex[41] = {0};
-    size_t n = cert->serial.len < 20 ? cert->serial.len : 20;
-    for (size_t i = 0; i < n; ++i) {
-        snprintf(serial_hex + (i * 2), 3, "%02x", cert->serial.p[i]);
-    }
-
-    charra_log_info("[" LOG_NAME "]     %s: subject=\"%s\" issuer=\"%s\" "
-                    "serial=0x%s expires in %ld day(s).",
-            label, subject, issuer, serial_hex,
-            charra_crypto_x509_days_until_expiry(cert));
-}
-
-/**
- * @brief Verify a TPM Quote's signature with the TPM itself. Sets the
- * file-scope attestation_rc as a side effect, same as this logic did when
- * it was inlined in coap_appraise_handler().
- */
-static bool verify_quote_signature_with_tpm(ESYS_CONTEXT* esys_ctx,
-        ESYS_TR sig_key_handle, const TPM2B_ATTEST* attest,
-        TPMT_SIGNATURE* signature, TPMT_TK_VERIFIED** validation) {
-    charra_log_info(
-            "[" LOG_NAME "] Verifying TPM Quote signature with TPM ...");
-    if ((attestation_rc = charra_verify_tpm2_quote_signature_with_tpm(
-                 esys_ctx, sig_key_handle, TPM2_ALG_SHA256, attest, signature,
-                 validation)) == CHARRA_RC_SUCCESS) {
-        charra_log_info("[" LOG_NAME "]     => TPM Quote signature is valid!");
-        return true;
-    }
-    charra_log_error("[" LOG_NAME "]     => TPM Quote signature is NOT valid!");
-    return false;
-}
-
-/**
- * @brief Verify a TPM Quote's signature with mbedTLS (defense in depth,
- * independent of the TPM-based check above).
- *
- * Two different failure modes, matching what this logic did before being
- * pulled out of coap_appraise_handler(): converting the TPM public key to
- * an mbedTLS key is a hard error the caller should abort on (returns
- * false, same as the original inline code's 'goto cleanup'); the signature
- * itself not matching is not fatal to the handler, just recorded via
- * *out_valid so the caller can fold it into the overall attestation result.
- */
-static bool verify_quote_signature_mbedtls(TPM2B_PUBLIC* tpm2_public_key,
-        const uint8_t* attestation_data, uint32_t attestation_data_len,
-        TPMT_SIGNATURE* signature, bool* out_valid) {
-    *out_valid = false;
-
-    charra_log_info("[" LOG_NAME
-                    "] Converting TPM public key to mbedTLS public key ...");
-    mbedtls_rsa_context mbedtls_rsa_pub_key = {0};
-    if ((attestation_rc = charra_crypto_tpm_pub_key_to_mbedtls_pub_key(
-                 tpm2_public_key, &mbedtls_rsa_pub_key)) != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] mbedTLS RSA error");
-        return false;
-    }
-
-    charra_log_info(
-            "[" LOG_NAME "] Verifying TPM Quote signature with mbedTLS ...");
-    if ((attestation_rc = charra_crypto_rsa_verify_signature(
-                 &mbedtls_rsa_pub_key, MBEDTLS_MD_SHA256, attestation_data,
-                 (size_t)attestation_data_len,
-                 signature->signature.rsapss.sig.buffer)) ==
-            CHARRA_RC_SUCCESS) {
-        charra_log_info("[" LOG_NAME "]     => TPM Quote signature is valid!");
-        *out_valid = true;
-    } else {
-        charra_log_error(
-                "[" LOG_NAME "]     => TPM Quote signature is NOT valid!");
-    }
-    mbedtls_rsa_free(&mbedtls_rsa_pub_key);
-    return true;
-}
-
-/**
- * @brief Step 3a/3b item 1's revocation half: charra_ak_state's rolling-
- * renewal policy (charra_ak_state_renew()) revokes a record's *previous*
- * serial the moment a fresh one is issued, but until now nothing ever
- * consulted that -- charra_crypto_verify_ekak_certificate() alone accepts
- * any certificate that still chains and matches its quote's key, even a
- * renewed-away one, since chain validity doesn't know about revocation.
- * This closes that gap: looks serial up in the rp-ak-provisioning-state
- * ledger and requires charra_ak_state_is_valid() (not revoked, not
- * expired) too.
- *
- * Also the identity bridge the RP qualification handshake uses: an AK
- * certificate's serial is the only identity a request carries on the
- * wire, but charra_qualification_state.h's ledger is keyed by
- * ek_fingerprint (same identity charra_ak_state_record already uses) --
- * this is the one place that translates between the two, so
- * coap_qualify_submit_handler() and coap_appraise_handler() don't each
- * need their own copy of this lookup.
- *
- * @param[out] ek_fingerprint_out set to the matching record's
- * ek_fingerprint iff this returns true; untouched otherwise. May be NULL
- * if the caller only cares about validity, not identity.
- * @returns true iff serial names a currently-valid (unrevoked,
- * unexpired) record. False on any lookup/load failure as well as a
- * genuine miss -- a serial this function can't positively vouch for is
- * treated the same as one it knows is bad.
- */
-static bool is_ak_serial_currently_valid(
-        const uint8_t serial[16], uint8_t ek_fingerprint_out[32]) {
-    charra_ak_state_record* records = NULL;
-    uint32_t count = 0;
-    if (charra_ak_state_load(ak_state_file_path, &records, &count) !=
-            CHARRA_RC_SUCCESS) {
-        charra_log_error(
-                "[" LOG_NAME "] Could not load AK-provisioning state.");
-        return false;
-    }
-    charra_log_info("[" LOG_NAME "] Checking AK serial against "
-                    "AK-provisioning state '%s' (%u issuance record(s)).",
-            ak_state_file_path, count);
-
-    bool valid = false;
-    uint32_t index = 0;
-    if (charra_ak_state_find_by_serial(records, count, serial, &index)) {
-        valid = charra_ak_state_is_valid(&records[index], time(NULL));
-        if (valid) {
-            if (ek_fingerprint_out != NULL) {
-                memcpy(ek_fingerprint_out, records[index].ek_fingerprint, 32);
-            }
-        } else {
-            charra_log_error("[" LOG_NAME "]     => AK certificate's serial "
-                             "is on record but revoked or expired!");
-        }
-    } else {
-        charra_log_error("[" LOG_NAME "]     => AK certificate's serial has "
-                         "no issuance record (never issued by this "
-                         "Verifier, or state file lost)!");
-    }
-
-    free(records);
-    return valid;
-}
-
 static void coap_appraise_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
                                 const struct coap_pdu_t* request,
@@ -742,7 +598,8 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
                             &ak_cert_rp_leaf, res.rp_public_key,
                             res.rp_public_key_len) == CHARRA_RC_SUCCESS;
             if (attestation_result_ekak_rp) {
-                log_cert_chain_success("RP's AK cert", &ak_cert_rp_leaf);
+                charra_crypto_log_cert_summary(
+                        "RP's AK cert", &ak_cert_rp_leaf);
             }
             mbedtls_x509_crt_free(&ak_cert_rp_leaf);
         }
@@ -750,8 +607,8 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     uint8_t ek_fingerprint_rp[32] = {0};
     if (attestation_result_ekak_rp) {
         charra_log_info("[" LOG_NAME "]     => RP's AK certificate is valid!");
-        attestation_result_ekak_rp =
-                is_ak_serial_currently_valid(ak_serial_rp, ek_fingerprint_rp);
+        attestation_result_ekak_rp = charra_ak_state_check_serial_valid(
+                ak_state_file_path, ak_serial_rp, ek_fingerprint_rp);
     } else {
         charra_log_error("[" LOG_NAME "]     => RP's AK certificate did NOT "
                          "verify (chain or key mismatch)!");
@@ -895,10 +752,10 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     fprintf(p_file, "verify nonce took %f seconds to execute \n", verify_nonce_duration);
 
     /* Quote_r has no mbedtls-vs-TPM double-check the way Quote_a's TPM
-     * quote does (verify_quote_signature_with_tpm() +
-     * verify_quote_signature_mbedtls() both running and being ANDed
-     * together) -- there is no TPM-side quote verification available for a
-     * software PCR replay, only the mbedtls RSA-PSS check above. */
+     * quote does (both a TPM-side and an mbedtls-side signature check
+     * running and being ANDed together) -- there is no TPM-side quote
+     * verification available for a software PCR replay, only the mbedtls
+     * RSA-PSS check above. */
     bool attestation_result_signature_rp_mbedtls = attestation_result_signature_rp;
 
     /* Step 3a gate: "If the verification is passed, proceed to Step 3b.
@@ -963,8 +820,8 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
             if (attestation_result_ekak) {
                 charra_log_info("[" LOG_NAME
                                 "]     => Attester's AK certificate is valid!");
-                attestation_result_ekak =
-                        is_ak_serial_currently_valid(ak_serial, NULL);
+                attestation_result_ekak = charra_ak_state_check_serial_valid(
+                        ak_state_file_path, ak_serial, NULL);
             } else {
                 charra_log_error(
                         "[" LOG_NAME "]     => Attester's AK certificate "
@@ -992,9 +849,10 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
         TPMT_SIGNATURE signature = {0};
         memcpy(&signature, res.tpm2_signature, res.tpm2_signature_len);
 
-        attestation_result_signature = verify_quote_signature_with_tpm(
-                esys_ctx, sig_key_handle, &attest, &signature, &validation);
-        if (!verify_quote_signature_mbedtls(tpm2_public_key,
+        attestation_result_signature =
+                charra_verify_tpm2_quote_signature_with_tpm_logged(esys_ctx,
+                        sig_key_handle, &attest, &signature, &validation);
+        if (!charra_crypto_verify_quote_signature_mbedtls(tpm2_public_key,
                     res.attestation_data, res.attestation_data_len,
                     &signature, &attestation_result_signature_mbedtls)) {
             goto cleanup;
@@ -1052,7 +910,7 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     } else if (!attestation_result_ekak_rp) {
         /* Distinct from any other appraisal failure: RP's OWN AK
          * certificate (Step 3a item 1) failed to chain-verify, or chained
-         * fine but is expired/revoked (is_ak_serial_currently_valid()).
+         * fine but is expired/revoked (charra_ak_state_check_serial_valid()).
          * Signalled with 4.01 Unauthorized -- the same code /certify_ak
          * itself already uses for a bad EK certificate -- so RP can tell
          * "go redo /certify_ak and retry" apart from "your evidence itself
@@ -1227,31 +1085,6 @@ error:
 }
 
 /**
- * @brief Parses a "YYYYMMDDHHMMSS" UTC timestamp -- the format
- * ak_cert_not_before_utc/ak_cert_not_after_utc are written in, which is
- * also what charra_crypto_sign_ak_certificate() takes -- into a time_t.
- *
- * Used to record an issued AK certificate's real expiry in the
- * AK-provisioning state (charra_ak_state.h) by parsing the exact same
- * string that was signed into the certificate, rather than approximating
- * it as "issued_at + some duration", which could drift from what the
- * certificate itself actually says.
- *
- * @returns true and sets *out on success, false on a malformed string.
- */
-static bool parse_utc_yyyymmddhhmmss(const char* s, time_t* out) {
-    struct tm tm = {0};
-    if (sscanf(s, "%4d%2d%2d%2d%2d%2d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
-                &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6) {
-        return false;
-    }
-    tm.tm_year -= 1900;
-    tm.tm_mon -= 1;
-    *out = timegm(&tm);
-    return *out != (time_t)-1;
-}
-
-/**
  * @brief /certify_ak: the Verifier, acting as Privacy CA, certifies a
  * requester's AK via TPM2_MakeCredential -- see msg_certify_ak_request_dto
  * / msg_certify_ak_response_dto in charra_dto.h for the wire format and
@@ -1353,7 +1186,7 @@ static void coap_certify_ak_handler(struct coap_resource_t* resource,
     ek_leaf_cert_inited = true;
     charra_log_info(
             "[" LOG_NAME "] /certify_ak: EK certificate verified.");
-    log_cert_chain_success("requester's EK cert", &ek_leaf_cert);
+    charra_crypto_log_cert_summary("requester's EK cert", &ek_leaf_cert);
 
     /* --- reconstruct the EK's full TPM2B_PUBLIC (Esys_MakeCredential needs
      * more than the bare RSA key the certificate carries) --- */
@@ -1528,7 +1361,8 @@ static void coap_certify_ak_handler(struct coap_resource_t* resource,
         goto cleanup;
     }
     time_t ak_cert_expires_at = 0;
-    if (!parse_utc_yyyymmddhhmmss(ak_cert_not_after_utc, &ak_cert_expires_at)) {
+    if (!charra_crypto_parse_utc_yyyymmddhhmmss(
+                ak_cert_not_after_utc, &ak_cert_expires_at)) {
         charra_log_error("[" LOG_NAME "] /certify_ak: could not parse AK "
                          "certificate expiry for state tracking.");
         charra_r = CHARRA_RC_ERROR;
@@ -1781,9 +1615,10 @@ static void coap_qualify_submit_handler(struct coap_resource_t* resource,
                     charra_crypto_verify_cert_public_key_matches_der_key(
                             &ak_cert_rp_leaf, req.rp_public_key,
                             req.rp_public_key_len) == CHARRA_RC_SUCCESS &&
-                    is_ak_serial_currently_valid(ak_serial_rp, ek_fingerprint);
+                    charra_ak_state_check_serial_valid(ak_state_file_path,
+                            ak_serial_rp, ek_fingerprint);
             if (submitter_identity_ok) {
-                log_cert_chain_success(
+                charra_crypto_log_cert_summary(
                         "/qualify/submit submitter's AK cert",
                         &ak_cert_rp_leaf);
             }

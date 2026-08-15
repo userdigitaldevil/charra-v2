@@ -181,6 +181,20 @@ error:
     return tss2_r;
 }
 
+bool charra_verify_tpm2_quote_signature_with_tpm_logged(ESYS_CONTEXT* esys_ctx,
+        ESYS_TR sig_key_handle, const TPM2B_ATTEST* attest,
+        TPMT_SIGNATURE* signature, TPMT_TK_VERIFIED** validation) {
+    charra_log_info("Verifying TPM Quote signature with TPM ...");
+    if (charra_verify_tpm2_quote_signature_with_tpm(esys_ctx, sig_key_handle,
+                TPM2_ALG_SHA256, attest, signature,
+                validation) == CHARRA_RC_SUCCESS) {
+        charra_log_info("    => TPM Quote signature is valid!");
+        return true;
+    }
+    charra_log_error("    => TPM Quote signature is NOT valid!");
+    return false;
+}
+
 CHARRA_RC charra_unmarshal_tpm2_quote(size_t attest_buf_len,
         const uint8_t* attest_buf, TPMS_ATTEST* attest_struct) {
     CHARRA_RC charra_rc = CHARRA_RC_SUCCESS;
