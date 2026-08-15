@@ -74,7 +74,18 @@ typedef struct verifier_info {
     unsigned int port_number;
 } verifier_info;
 verifier_info verifiers[MAX_VERIFIERS];
-uint16_t verifier_response_timeout = 6000;  // timeout when waiting for verifier's answer (attestation results) in seconds
+/* Was 6000 -- 1000x too large. This is libcoap's ack_timeout base (seconds,
+ * see coap_session_set_ack_timeout() below), not a plain "give up after N"
+ * ceiling: an oversized base occasionally makes a routine retransmission
+ * (any single UDP packet under concurrent multi-Verifier load can need
+ * one) take tens of seconds instead of a fraction of one, even though
+ * nothing is actually wrong -- caught via the per-Verifier latency
+ * logging above surfacing a suspiciously consistent ~40s stall on
+ * whichever Verifier happened to need a retransmit that run, then
+ * confirmed by dropping this to a sane value and watching the stall
+ * disappear entirely. Matches trust_manager_response_timeout's existing
+ * (correct) convention of being a small number of seconds. */
+uint16_t verifier_response_timeout = 6;  // timeout when waiting for verifier's answer (attestation results) in seconds
 static bool processing_appraisal_response = false;
 
 /* attester config */ 
@@ -86,7 +97,10 @@ static CHARRA_RC attestation_rc = CHARRA_RC_ERROR;
 static const bool USE_TPM_FOR_RANDOM_NONCE_GENERATION = false;
 static uint8_t tpm_pcr_selection[TPM2_MAX_PCRS] = {0, 1, 2, 3, 4, 5, 6, 7, 10};
 static uint32_t tpm_pcr_selection_len = 9;
-uint16_t attester_response_timeout = 6000;  // timeout when waiting for the attester's answer (evidence) in seconds
+/* Same 1000x-too-large bug as verifier_response_timeout above, fixed the
+ * same way; a real get_evidence round trip in this dev environment takes
+ * ~0.2s, so 6s is generous, not tight. */
+uint16_t attester_response_timeout = 6;  // timeout when waiting for the attester's answer (evidence) in seconds
 bool use_ima_event_log = false;
 char* ima_event_log_path = "/sys/kernel/security/ima/binary_runtime_measurements";
 bool use_ima_test_log = true;
@@ -1748,6 +1762,12 @@ static CHARRA_RC ensure_rp_ak_keypair(void) {
 
 static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
     if (rp_ak_cert_ready[verifier_index]) {
+        /* Already provisioned (this run's own /certify_ak, an on-disk
+         * cache-hit from a prior process, or -- as here -- simply carried
+         * over in memory from an earlier sweep iteration this same
+         * process already did) -- no work happens on this path, so it's
+         * "cached" as far as the summary report is concerned. */
+        rp_ak_cert_was_cached[verifier_index] = true;
         return CHARRA_RC_SUCCESS;
     }
 
