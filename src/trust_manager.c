@@ -49,6 +49,9 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
     coap_context_t* coap_context = NULL;
     coap_endpoint_t* coap_endpoint = NULL;
 
+    charra_log_info(
+            "[" LOG_NAME "] Effective configuration: port=%d", port);
+
     charra_log_info("[" LOG_NAME "] Initializing CoAP in block-wise mode.");
     if ((coap_context = charra_coap_new_context(true)) == NULL) {
         charra_log_error("[" LOG_NAME "] Cannot create CoAP context.");

@@ -259,6 +259,16 @@ int main(int argc, char** argv) {
             port);
     qualification_state_file_path = qualification_state_file_path_buf;
 
+    /* Self-describing log: everything below is derived from CLI flags/
+     * defaults that never appear again in the log stream once startup is
+     * done, so a reader coming to this log file cold has no other way to
+     * know, e.g., which state files or CA this run was actually using. */
+    charra_log_info("[" LOG_NAME "] Effective configuration: port=%d "
+                    "ak_state_file='%s' qualification_state_file='%s' "
+                    "manufacturer_root='%s' verifier_ca_cert='%s'",
+            port, ak_state_file_path, qualification_state_file_path,
+            manufacturer_root_cert_path, verifier_ca_cert_path);
+
     charra_log_debug("[" LOG_NAME "] Verifier Configuration:");
     charra_log_debug("[" LOG_NAME "]     Used local port: %d", port);
     charra_log_debug("[" LOG_NAME "]     DTLS-PSK enabled: %s",
@@ -404,6 +414,32 @@ finish:
 static void handle_sigint(int signum CHARRA_UNUSED) { quit = true; }
 
 /**
+ * @brief Logs subject/issuer/serial/expiry for a certificate that just
+ * PASSED chain verification -- until now only failures got this level of
+ * X.509 detail (via mbedtls_x509_crt_verify_info()); a success just said
+ * "verified!" with nothing to look at if you needed to confirm *which*
+ * cert, or notice one that's about to expire.
+ */
+static void log_cert_chain_success(
+        const char* label, const mbedtls_x509_crt* cert) {
+    char subject[256] = {0};
+    char issuer[256] = {0};
+    mbedtls_x509_dn_gets(subject, sizeof(subject), &cert->subject);
+    mbedtls_x509_dn_gets(issuer, sizeof(issuer), &cert->issuer);
+
+    char serial_hex[41] = {0};
+    size_t n = cert->serial.len < 20 ? cert->serial.len : 20;
+    for (size_t i = 0; i < n; ++i) {
+        snprintf(serial_hex + (i * 2), 3, "%02x", cert->serial.p[i]);
+    }
+
+    charra_log_info("[" LOG_NAME "]     %s: subject=\"%s\" issuer=\"%s\" "
+                    "serial=0x%s expires in %ld day(s).",
+            label, subject, issuer, serial_hex,
+            charra_crypto_x509_days_until_expiry(cert));
+}
+
+/**
  * @brief Verify a TPM Quote's signature with the TPM itself. Sets the
  * file-scope attestation_rc as a side effect, same as this logic did when
  * it was inlined in coap_appraise_handler().
@@ -502,6 +538,9 @@ static bool is_ak_serial_currently_valid(
                 "[" LOG_NAME "] Could not load AK-provisioning state.");
         return false;
     }
+    charra_log_info("[" LOG_NAME "] Checking AK serial against "
+                    "AK-provisioning state '%s' (%u issuance record(s)).",
+            ak_state_file_path, count);
 
     bool valid = false;
     uint32_t index = 0;
@@ -708,6 +747,9 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
                     charra_crypto_verify_cert_public_key_matches_der_key(
                             &ak_cert_rp_leaf, res.rp_public_key,
                             res.rp_public_key_len) == CHARRA_RC_SUCCESS;
+            if (attestation_result_ekak_rp) {
+                log_cert_chain_success("RP's AK cert", &ak_cert_rp_leaf);
+            }
             mbedtls_x509_crt_free(&ak_cert_rp_leaf);
         }
     }
@@ -1317,6 +1359,7 @@ static void coap_certify_ak_handler(struct coap_resource_t* resource,
     ek_leaf_cert_inited = true;
     charra_log_info(
             "[" LOG_NAME "] /certify_ak: EK certificate verified.");
+    log_cert_chain_success("requester's EK cert", &ek_leaf_cert);
 
     /* --- reconstruct the EK's full TPM2B_PUBLIC (Esys_MakeCredential needs
      * more than the bare RSA key the certificate carries) --- */
@@ -1418,6 +1461,18 @@ static void coap_certify_ak_handler(struct coap_resource_t* resource,
             "[DEBUG] /certify_ak: tag = 0x", "\n", false);
     if (charra_r != CHARRA_RC_SUCCESS) {
         goto cleanup;
+    }
+    /* Permanent (not ad-hoc) integrity fingerprint of the ciphertext as
+     * sent -- cheap enough to always log, and lets a receiver-side mismatch
+     * be diagnosed by comparing two short hex strings instead of the
+     * multi-hour manual hex-diff a transport-layer corruption bug (see
+     * CHARRA_V2_NOTES.md) required before this existed. */
+    uint8_t ak_ciphertext_fingerprint[32] = {0};
+    if (hash_sha256(ak_cert_der_len, ak_cert_ciphertext,
+                ak_ciphertext_fingerprint) == CHARRA_RC_SUCCESS) {
+        charra_print_hex(CHARRA_LOG_INFO, sizeof(ak_ciphertext_fingerprint),
+                ak_ciphertext_fingerprint,
+                "[DEBUG] /certify_ak: ciphertext sha256 = 0x", "\n", false);
     }
 
     /* --- wrap the AES key so only a TPM holding the EK/AK pair can
@@ -1743,6 +1798,11 @@ static void coap_qualify_submit_handler(struct coap_resource_t* resource,
                             &ak_cert_rp_leaf, req.rp_public_key,
                             req.rp_public_key_len) == CHARRA_RC_SUCCESS &&
                     is_ak_serial_currently_valid(ak_serial_rp, ek_fingerprint);
+            if (submitter_identity_ok) {
+                log_cert_chain_success(
+                        "/qualify/submit submitter's AK cert",
+                        &ak_cert_rp_leaf);
+            }
             mbedtls_x509_crt_free(&ak_cert_rp_leaf);
         }
     }

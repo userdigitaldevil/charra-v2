@@ -23,6 +23,7 @@
 /* system includes */
 #include <stdbool.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include <mbedtls/gcm.h>
 #include <mbedtls/pk.h>
@@ -526,6 +527,20 @@ cleanup:
         mbedtls_x509_crt_free(leaf_out);
     }
     return charra_r;
+}
+
+long charra_crypto_x509_days_until_expiry(const mbedtls_x509_crt* cert) {
+    const mbedtls_x509_time* t = &cert->valid_to;
+    struct tm tm = {0};
+    tm.tm_year = t->year - 1900;
+    tm.tm_mon = t->mon - 1;
+    tm.tm_mday = t->day;
+    tm.tm_hour = t->hour;
+    tm.tm_min = t->min;
+    tm.tm_sec = t->sec;
+    time_t expiry = timegm(&tm);
+    double diff_seconds = difftime(expiry, time(NULL));
+    return (long)(diff_seconds / 86400.0);
 }
 
 CHARRA_RC charra_crypto_seeded_rng_init(

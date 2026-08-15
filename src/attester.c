@@ -183,6 +183,10 @@ int main(int argc, char** argv) {
     charra_log_set_level(charra_log_level);
     coap_set_log_level(coap_log_level);
 
+    charra_log_info("[" LOG_NAME "] Effective configuration: port=%d "
+                    "ima_event_log='%s' ima_test_log='%s'",
+            port, ima_event_log_path, ima_test_log_path);
+
     charra_log_debug("[" LOG_NAME "] Attester Configuration:");
     charra_log_debug("[" LOG_NAME "]     Used local port: %d", port);
     charra_log_debug("[" LOG_NAME "]     DTLS-PSK enabled: %s",

@@ -37,4 +37,44 @@ typedef uint32_t CHARRA_RC;
 #define CHARRA_RC_COAP_ERROR ((CHARRA_RC)0x0000C0AF)
 #define CHARRA_RC_TIMEOUT ((CHARRA_RC)0x0000000f)
 
+/**
+ * @brief Human-readable name for a CHARRA_RC, for log lines like
+ * "charra_r=255 (CHARRA_RC_VERIFICATION_FAILED)" instead of a bare number
+ * that means nothing without looking up this header. static inline (header-
+ * only, no charra_error.c) since it's a fixed small switch over the macros
+ * above -- not worth a whole extra translation unit and Makefile entry.
+ */
+static inline const char* charra_rc_describe(CHARRA_RC rc) {
+    switch (rc) {
+    case CHARRA_RC_SUCCESS:
+        return "CHARRA_RC_SUCCESS";
+    case CHARRA_RC_ERROR:
+        return "CHARRA_RC_ERROR";
+    case CHARRA_RC_CRYPTO_ERROR:
+        return "CHARRA_RC_CRYPTO_ERROR";
+    case CHARRA_RC_NOT_YET_IMPLEMENTED:
+        return "CHARRA_RC_NOT_YET_IMPLEMENTED";
+    case CHARRA_RC_BAD_ARGUMENT:
+        return "CHARRA_RC_BAD_ARGUMENT";
+    case CHARRA_RC_MARSHALING_ERROR:
+        return "CHARRA_RC_MARSHALING_ERROR";
+    case CHARRA_RC_TPM:
+        return "CHARRA_RC_TPM";
+    case CHARRA_RC_VERIFICATION_FAILED:
+        return "CHARRA_RC_VERIFICATION_FAILED -- e.g. an AES-GCM "
+               "authentication tag mismatch or an X.509 chain that failed "
+               "to verify";
+    case CHARRA_RC_NO_MATCH:
+        return "CHARRA_RC_NO_MATCH";
+    case CHARRA_RC_CLI_ERROR:
+        return "CHARRA_RC_CLI_ERROR";
+    case CHARRA_RC_COAP_ERROR:
+        return "CHARRA_RC_COAP_ERROR";
+    case CHARRA_RC_TIMEOUT:
+        return "CHARRA_RC_TIMEOUT";
+    default:
+        return "unknown CHARRA_RC";
+    }
+}
+
 #endif /* CHARRA_ERROR_H */

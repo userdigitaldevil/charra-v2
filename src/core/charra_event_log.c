@@ -671,6 +671,11 @@ bool charra_verify_log_file_hashes_not_blacklisted(
         charra_log_info("[" LOG_NAME "] Blacklist '%s' is empty; no file "
                         "hash can be rejected.",
                 blacklist_path);
+    } else {
+        charra_log_info(
+                "[" LOG_NAME "] Checking file hashes against blacklist "
+                "'%s' (%u entries).",
+                blacklist_path, blacklist_count);
     }
 
     bool all_ok = true;

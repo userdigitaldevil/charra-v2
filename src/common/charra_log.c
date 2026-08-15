@@ -44,6 +44,18 @@ static const char* charra_level_colors[] = {
         "\x1b[94m", "\x1b[36m", "\x1b[32m", "\x1b[33m", "\x1b[31m", "\x1b[35m"};
 #endif
 
+/* per-thread, not global: each thread tags only its own output */
+static __thread char charra_log_thread_prefix[32] = {0};
+
+void charra_log_set_thread_prefix(const char* prefix) {
+    if (prefix == NULL) {
+        charra_log_thread_prefix[0] = '\0';
+        return;
+    }
+    snprintf(charra_log_thread_prefix, sizeof(charra_log_thread_prefix), "%s",
+            prefix);
+}
+
 static void charra_log_lock(void) {
     if (L.lock) {
         L.lock(L.udata, 1);
@@ -88,11 +100,13 @@ void charra_log_log(
         // fprintf(stderr, "%s %s%-5s\x1b[0m \x1b[90m%s:%d:\x1b[0m ", buf,
         //         charra_level_colors[level], charra_level_names[level], file,
         //         line);
-        fprintf(stderr, "%s%-5s\x1b[0m",
-                charra_level_colors[level], charra_level_names[level]);
+        fprintf(stderr, "%s%-5s\x1b[0m%s%s",
+                charra_level_colors[level], charra_level_names[level],
+                charra_log_thread_prefix[0] ? " " : "", charra_log_thread_prefix);
 #else
-        fprintf(stderr, "%s %-5s %s:%d: ", buf, charra_level_names[level], file,
-                line);
+        fprintf(stderr, "%s %-5s %s%s%s:%d: ", buf, charra_level_names[level],
+                charra_log_thread_prefix,
+                charra_log_thread_prefix[0] ? " " : "", file, line);
 #endif
         va_start(args, fmt);
         vfprintf(stderr, fmt, args);
@@ -106,8 +120,9 @@ void charra_log_log(
         va_list args;
         char buf[32];
         buf[strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", lt)] = '\0';
-        fprintf(L.fp, "%s %-5s %s:%d: ", buf, charra_level_names[level], file,
-                line);
+        fprintf(L.fp, "%s %-5s %s%s%s:%d: ", buf, charra_level_names[level],
+                charra_log_thread_prefix,
+                charra_log_thread_prefix[0] ? " " : "", file, line);
         va_start(args, fmt);
         vfprintf(L.fp, fmt, args);
         va_end(args);

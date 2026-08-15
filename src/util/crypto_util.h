@@ -196,6 +196,17 @@ CHARRA_RC charra_crypto_verify_x509_cert_chain(const uint8_t* leaf_cert_der,
         size_t trusted_root_len, mbedtls_x509_crt* leaf_out);
 
 /**
+ * @brief Days remaining until a certificate's "not after" date, for log
+ * lines like "cached AK cert, expires in N days" -- purely a readability
+ * aid, not itself a validity check (charra_crypto_verify_x509_cert_chain()
+ * above is what actually enforces expiry).
+ *
+ * @param[in] cert a parsed certificate.
+ * @returns days until expiry (negative if already expired).
+ */
+long charra_crypto_x509_days_until_expiry(const mbedtls_x509_crt* cert);
+
+/**
  * @brief Confirm a certificate's embedded RSA public key is the same key
  * as a TPM2B_PUBLIC -- ties "this certificate is valid" to "this
  * certificate actually vouches for the key that signed this specific

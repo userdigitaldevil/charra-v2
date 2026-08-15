@@ -59,6 +59,16 @@ bool attestation_results[MAX_VERIFIERS];
  * (4.01 Unauthorized), as opposed to any other appraisal failure --
  * distinguishes "go redo /certify_ak and retry" from a plain failed vote. */
 bool rp_ak_cert_rejected[MAX_VERIFIERS];
+/* Populated for the end-of-run summary report only -- not read anywhere
+ * else. was_cached: true if this run reused an on-disk AK cert instead of
+ * running /certify_ak; latency_ms: appraisal round-trip time. */
+static bool rp_ak_cert_was_cached[MAX_VERIFIERS];
+static long verifier_latency_ms[MAX_VERIFIERS];
+/* The specific reason text a rejection carried (Verifier's own /appraise
+ * response), captured once at the point of rejection so the retry log
+ * line below and the end-of-run summary can both quote it instead of the
+ * reader having to scroll back to find the original rejection message. */
+static char rejection_reason[MAX_VERIFIERS][128];
 typedef struct verifier_info {
     char ip_address[16];
     unsigned int port_number;
@@ -425,6 +435,18 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
             (const char*)getenv("LOG_LEVEL_CHARRA"), &charra_log_level);
     charra_log_set_level(charra_log_level);
 
+    /* Self-describing log: the verifier-count sweep (1..5, below) and
+     * per-exchange timeouts never appear again once startup is done, so a
+     * reader of just this log file has no other way to know them. */
+    charra_log_info("[" LOG_NAME "] Effective configuration: "
+                    "verifier_sweep=1..5 runs_per_step=%d "
+                    "verifier_response_timeout=%us "
+                    "attester_response_timeout=%us blacklist='%s' "
+                    "ima_test_log='%s' (use_ima_test_log=%s)",
+            NUM_RUNS, verifier_response_timeout, attester_response_timeout,
+            blacklist_hashes_path, ima_test_log_path,
+            use_ima_test_log ? "true" : "false");
+
     /* RP's own runtime state (TPM identity, per-Verifier AK certificates,
      * per-Verifier qualification cache) lives under state/relying-party/ --
      * mkdir() it once, up front, same reasoning verifier.c's main() already
@@ -477,6 +499,9 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
             clock_gettime(CLOCK_MONOTONIC, &end_time);
             duration = (end_time.tv_sec - start_time.tv_sec) + (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
             verifier_durations[run] = duration;
+            charra_log_info(
+                    "[" LOG_NAME "] Phase timing: get_verifiers took %.3fs.",
+                    duration);
 
             /* RP's AK certificate is no longer provisioned here: each
              * Verifier now independently certifies (and tracks) RP's AK --
@@ -494,6 +519,10 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
             clock_gettime(CLOCK_MONOTONIC, &end_time);
             duration = (end_time.tv_sec - start_time.tv_sec) + (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
             evidence_durations[run] = duration;
+            charra_log_info(
+                    "[" LOG_NAME "] Phase timing: get_evidence (Attester "
+                    "round trip + local appraisal) took %.3fs.",
+                    duration);
 
             /* Getting attestation results */
             charra_log_info("[" LOG_NAME "] Getting attestation results.");
@@ -505,6 +534,10 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
             clock_gettime(CLOCK_MONOTONIC, &end_time);
             duration = (end_time.tv_sec - start_time.tv_sec) + (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
             appraisal_durations[run] = duration;
+            charra_log_info(
+                    "[" LOG_NAME "] Phase timing: get_attestation_results "
+                    "(all Verifiers) took %.3fs.",
+                    duration);
 
             total_attestation_durations[run] = verifier_durations[run] + evidence_durations[run] + appraisal_durations[run];
             result = CHARRA_RC_SUCCESS;
@@ -766,14 +799,20 @@ static CHARRA_RC charra_rp_prepare_evidence(void) {
             "]  +------------ RP Privacy Cleaning --------------+");
 
     /* --- redact: only the path of each entry is replaced --------------- */
+    struct timespec redact_start, redact_end;
+    clock_gettime(CLOCK_MONOTONIC, &redact_start);
     CHARRA_RC charra_r = charra_sdk_redact_ima_log(last_response.event_log,
             last_response.event_log_len, NULL, &rp_log_r, &rp_log_r_len);
+    clock_gettime(CLOCK_MONOTONIC, &redact_end);
     if (charra_r != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Redaction of the event log failed.");
         return charra_r;
     }
-    charra_log_info("[" LOG_NAME "] log_r is %u bytes (raw log was %u).",
-            rp_log_r_len, last_response.event_log_len);
+    double redact_duration = (redact_end.tv_sec - redact_start.tv_sec) +
+                              (redact_end.tv_nsec - redact_start.tv_nsec) / 1e9;
+    charra_log_info("[" LOG_NAME "] log_r is %u bytes (raw log was %u), "
+                    "redaction took %.3fs.",
+            rp_log_r_len, last_response.event_log_len, redact_duration);
 
     /* --- replay log_r into the same PCR selection, then composite ------ */
     charra_pcr_accumulator replayed[TPM2_MAX_PCRS] = {{{0}}};
@@ -1460,6 +1499,7 @@ static void invalidate_cached_rp_ak_certificate(int verifier_index) {
     rp_ak_cert_der[verifier_index] = NULL;
     rp_ak_cert_der_len[verifier_index] = 0;
     rp_ak_cert_ready[verifier_index] = false;
+    rp_ak_cert_was_cached[verifier_index] = false;
 }
 
 static CHARRA_RC ensure_rp_ak_keypair(void) {
@@ -1729,8 +1769,6 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
             verifier_port);
 
     if (charra_io_file_exists(cert_path) == CHARRA_RC_SUCCESS) {
-        charra_log_info("[" LOG_NAME "] Reloading previously issued AK "
-                        "certificate for this Verifier.");
         char* cert_buf = NULL;
         size_t cert_buf_len = 0;
         if ((result = charra_io_read_file(cert_path, &cert_buf,
@@ -1746,9 +1784,29 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
         }
         memcpy(cert_der, cert_buf, cert_buf_len);
         charra_io_free_file_buffer(&cert_buf);
+
+        /* Days-until-expiry is purely informational here -- just parsed
+         * back out of the cached cert for the log line below, not itself
+         * an enforcement point (the Verifier is the one that actually
+         * rejects an expired cert, on the next /appraise). */
+        mbedtls_x509_crt cached_cert;
+        mbedtls_x509_crt_init(&cached_cert);
+        if (mbedtls_x509_crt_parse(&cached_cert, cert_der, cert_buf_len) ==
+                0) {
+            charra_log_info("[" LOG_NAME "] Reloading previously issued AK "
+                            "certificate for this Verifier (cached, expires "
+                            "in %ld day(s)).",
+                    charra_crypto_x509_days_until_expiry(&cached_cert));
+        } else {
+            charra_log_info("[" LOG_NAME "] Reloading previously issued AK "
+                            "certificate for this Verifier (cached).");
+        }
+        mbedtls_x509_crt_free(&cached_cert);
+
         rp_ak_cert_der[verifier_index] = cert_der;
         rp_ak_cert_der_len[verifier_index] = (uint32_t)cert_buf_len;
         rp_ak_cert_ready[verifier_index] = true;
+        rp_ak_cert_was_cached[verifier_index] = true;
         return CHARRA_RC_SUCCESS;
     }
 
@@ -1904,6 +1962,8 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
     int coap_io_process_time = -1;
     certify_ak_rc = CHARRA_RC_ERROR;
     result = CHARRA_RC_SUCCESS;
+    charra_log_info("[" LOG_NAME "] Waiting on network for /certify_ak "
+                    "response ...");
     while (!processing_certify_ak_response && coap_io_pending(coap_context)) {
         if ((coap_io_process_time = coap_io_process(
                      coap_context, COAP_IO_PROCESS_TIME_MS)) == -1) {
@@ -1950,10 +2010,14 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
 
     /* --- TPM session #2 (mutex-held): recover the AES key via
      * ActivateCredential, then decrypt the AK certificate ----------- */
+    charra_log_info("[" LOG_NAME "] Waiting on TPM mutex for ActivateCredential "
+                    "(TPM session #2) ...");
     pthread_mutex_lock(&rp_tpm_mutex);
     ESYS_TR ek_handle2 = ESYS_TR_NONE;
     ESYS_TR ak_handle2 = ESYS_TR_NONE;
     TPM2B_NAME* ak_name2 = NULL;
+    struct timespec activate_start, activate_end;
+    clock_gettime(CLOCK_MONOTONIC, &activate_start);
     if ((result = rp_open_tpm_and_load_ak(&esys_ctx, &tcti_ctx, &ek_handle2,
                  &ak_handle2, &ak_name2)) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not reopen TPM connection "
@@ -1987,11 +2051,16 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
     Esys_Finalize(&esys_ctx);
     Tss2_TctiLdr_Finalize(&tcti_ctx);
     pthread_mutex_unlock(&rp_tpm_mutex);
+    clock_gettime(CLOCK_MONOTONIC, &activate_end);
+    double activate_duration =
+            (activate_end.tv_sec - activate_start.tv_sec) +
+            (activate_end.tv_nsec - activate_start.tv_nsec) / 1e9;
 
     charra_log_info("[" LOG_NAME "] ActivateCredential recovered a %u-byte "
-                    "credential; decrypting %u-byte AK certificate "
+                    "credential in %.3fs; decrypting %u-byte AK certificate "
                     "ciphertext.",
-            credential->size, response_snapshot.ak_certificate_len);
+            credential->size, activate_duration,
+            response_snapshot.ak_certificate_len);
     charra_print_hex(CHARRA_LOG_INFO, credential->size, credential->buffer,
             "[DEBUG] recovered credential = 0x", "\n", false);
     charra_print_hex(CHARRA_LOG_INFO,
@@ -2001,22 +2070,43 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
     charra_print_hex(CHARRA_LOG_INFO, sizeof(response_snapshot.aes_gcm_tag),
             response_snapshot.aes_gcm_tag, "[DEBUG] received tag = 0x", "\n",
             false);
+    /* Same permanent fingerprint the Verifier logs before sending -- if a
+     * decrypt ever fails again, diff these two short hex strings first
+     * (matching sha256 + failed decrypt narrows it back to a key/nonce/tag
+     * bug; mismatched sha256 narrows it to transport, as it once was). */
+    uint8_t received_ciphertext_fingerprint[32] = {0};
+    if (hash_sha256(response_snapshot.ak_certificate_len,
+                response_snapshot.ak_certificate,
+                received_ciphertext_fingerprint) == CHARRA_RC_SUCCESS) {
+        charra_print_hex(CHARRA_LOG_INFO,
+                sizeof(received_ciphertext_fingerprint),
+                received_ciphertext_fingerprint,
+                "[DEBUG] received ciphertext sha256 = 0x", "\n", false);
+    }
 
     uint8_t* cert_der = NULL;
-    if ((result = charra_crypto_aes256gcm_decrypt(credential->buffer,
-                 response_snapshot.ak_certificate,
-                 response_snapshot.ak_certificate_len,
-                 response_snapshot.aes_gcm_nonce,
-                 response_snapshot.aes_gcm_tag, &cert_der)) !=
-            CHARRA_RC_SUCCESS) {
+    struct timespec decrypt_start, decrypt_end;
+    clock_gettime(CLOCK_MONOTONIC, &decrypt_start);
+    CHARRA_RC decrypt_rc = charra_crypto_aes256gcm_decrypt(
+            credential->buffer, response_snapshot.ak_certificate,
+            response_snapshot.ak_certificate_len,
+            response_snapshot.aes_gcm_nonce, response_snapshot.aes_gcm_tag,
+            &cert_der);
+    clock_gettime(CLOCK_MONOTONIC, &decrypt_end);
+    double decrypt_duration = (decrypt_end.tv_sec - decrypt_start.tv_sec) +
+                               (decrypt_end.tv_nsec - decrypt_start.tv_nsec) /
+                                       1e9;
+    if ((result = decrypt_rc) != CHARRA_RC_SUCCESS) {
         charra_log_error(
                 "[" LOG_NAME "] Could not decrypt AK certificate "
-                "(charra_r=%d).",
-                result);
+                "(charra_r=%d: %s) after %.3fs.",
+                result, charra_rc_describe(result), decrypt_duration);
         Esys_Free(credential);
         charra_free_if_not_null(response_snapshot.ak_certificate);
         return result;
     }
+    charra_log_info(
+            "[" LOG_NAME "] AES-GCM decrypt took %.3fs.", decrypt_duration);
     uint32_t cert_der_len = response_snapshot.ak_certificate_len;
     Esys_Free(credential);
     charra_free_if_not_null(response_snapshot.ak_certificate);
@@ -2032,9 +2122,19 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
     rp_ak_cert_der_len[verifier_index] = cert_der_len;
     rp_ak_cert_ready[verifier_index] = true;
 
-    charra_log_info("[" LOG_NAME "] RP AK certified by this Verifier "
-                    "(%u-byte certificate).",
-            cert_der_len);
+    mbedtls_x509_crt new_cert;
+    mbedtls_x509_crt_init(&new_cert);
+    if (mbedtls_x509_crt_parse(&new_cert, cert_der, cert_der_len) == 0) {
+        charra_log_info("[" LOG_NAME "] RP AK certified by this Verifier "
+                        "(freshly provisioned, %u-byte certificate, expires "
+                        "in %ld day(s)).",
+                cert_der_len, charra_crypto_x509_days_until_expiry(&new_cert));
+    } else {
+        charra_log_info("[" LOG_NAME "] RP AK certified by this Verifier "
+                        "(freshly provisioned, %u-byte certificate).",
+                cert_der_len);
+    }
+    mbedtls_x509_crt_free(&new_cert);
     return CHARRA_RC_SUCCESS;
 }
 
@@ -2091,6 +2191,9 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
         charra_log_info("[" LOG_NAME "] Verifier n° %d rejected our AK "
                         "certificate as invalid or expired.",
                 *current_thread_index + 1);
+        snprintf(rejection_reason[*current_thread_index],
+                sizeof(rejection_reason[*current_thread_index]),
+                "AK certificate rejected as invalid or expired");
         rp_ak_cert_rejected[*current_thread_index] = true;
         attestation_results[*current_thread_index] = false;
         goto cleanup;
@@ -2115,10 +2218,21 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
             charra_log_info("[" LOG_NAME "] Verifier n° %d: %.*s",
                     *current_thread_index + 1, (int)forbidden_data_len,
                     (const char*)forbidden_data);
+            int n = (int)forbidden_data_len <
+                                    (int)sizeof(
+                                            rejection_reason[0]) - 1
+                            ? (int)forbidden_data_len
+                            : (int)sizeof(rejection_reason[0]) - 1;
+            snprintf(rejection_reason[*current_thread_index],
+                    sizeof(rejection_reason[*current_thread_index]), "%.*s",
+                    n, (const char*)forbidden_data);
         } else {
             charra_log_info("[" LOG_NAME "] Verifier n° %d rejected our "
                             "qualification.",
                     *current_thread_index + 1);
+            snprintf(rejection_reason[*current_thread_index],
+                    sizeof(rejection_reason[*current_thread_index]),
+                    "qualification rejected");
         }
         rp_qualification_rejected[*current_thread_index] = true;
         attestation_results[*current_thread_index] = false;
@@ -2555,6 +2669,15 @@ void* get_attestation_results_thread(void *arg) {
     int current_thread_index = *(int*)arg;
     verifier_info verifier_info = verifiers[current_thread_index];
 
+    /* Tags every log line this thread emits for the rest of its lifetime --
+     * without this, all Verifier threads' output interleaves into one
+     * indistinguishable stream (see CHARRA_V2_NOTES.md for the debugging
+     * session this made painful). */
+    char log_prefix[32] = {0};
+    snprintf(log_prefix, sizeof(log_prefix), "[V%d:%u]",
+            current_thread_index + 1, verifier_info.port_number);
+    charra_log_set_thread_prefix(log_prefix);
+
      /* set varaibles here such that they are valid in case of an 'goto cleanup'
      */
     coap_context_t* coap_context = NULL;
@@ -2916,6 +3039,7 @@ void* get_attestation_results_thread(void *arg) {
      * reaching the qualification check), so at most one of
      * rp_ak_cert_rejected/rp_qualification_rejected is ever true here. Not
      * retried for any other kind of failure. */
+    long total_appraisal_wait_ms = 0;
     for (int attempt = 0; attempt < 2; ++attempt) {
         charra_free_if_not_null(res_buf);
         res_buf = NULL;
@@ -2979,6 +3103,9 @@ void* get_attestation_results_thread(void *arg) {
             }
         }
 
+        total_appraisal_wait_ms += response_wait_time_v;
+        verifier_latency_ms[current_thread_index] = total_appraisal_wait_ms;
+
         bool rejected = rp_ak_cert_rejected[current_thread_index] ||
                         rp_qualification_rejected[current_thread_index];
         if (!rejected || attempt == 1) {
@@ -2988,8 +3115,9 @@ void* get_attestation_results_thread(void *arg) {
         if (rp_ak_cert_rejected[current_thread_index]) {
             charra_log_info("[" LOG_NAME "] Re-provisioning RP AK "
                             "certificate after rejection by Verifier n\u00b0 "
-                            "%d ...",
-                    current_thread_index + 1);
+                            "%d (reason: %s) ...",
+                    current_thread_index + 1,
+                    rejection_reason[current_thread_index]);
             invalidate_cached_rp_ak_certificate(current_thread_index);
             CHARRA_RC reprovision_rc =
                     ensure_rp_ak_certificate(current_thread_index);
@@ -3003,8 +3131,9 @@ void* get_attestation_results_thread(void *arg) {
             }
         } else {
             charra_log_info("[" LOG_NAME "] Re-qualifying with Verifier "
-                            "n\u00b0 %d after rejection ...",
-                    current_thread_index + 1);
+                            "n\u00b0 %d after rejection (reason: %s) ...",
+                    current_thread_index + 1,
+                    rejection_reason[current_thread_index]);
             invalidate_cached_rp_qualification(current_thread_index);
             CHARRA_RC requalify_rc =
                     rp_perform_qualification_handshake(current_thread_index);
@@ -3091,6 +3220,38 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
         charra_log_info("[" LOG_NAME "] Attestation failed by majority "
                         "vote! (%d/%d Verifiers passed)",
                 num_true, num_verifiers);
+    }
+
+    /* --- one-screen run summary ------------------------------------------
+     * log_r/redaction is shared across every Verifier thread (see
+     * charra_rp_prepare_evidence()'s docstring), so it's reported once
+     * here rather than per row below. Per-Verifier reason strings are
+     * derived from the same flags coap_verifier_handler_appraisal() /
+     * rp_perform_qualification_handshake() already set for the retry
+     * logic above -- this is just their first human-readable summary. */
+    charra_log_info("[" LOG_NAME "]  +------------ Run Summary --------------+");
+    charra_log_info(
+            "[" LOG_NAME "] log_r: %u bytes redacted from a %u-byte raw log.",
+            rp_log_r_len, last_response.event_log_len);
+    for (int i = 0; i < num_verifiers; ++i) {
+        const char* reason;
+        if (attestation_results[i]) {
+            reason = "OK";
+        } else if (rejection_reason[i][0] != '\0') {
+            /* Persists across the retry -- if the retry itself then also
+             * failed, this still shows the original rejection reason
+             * rather than nothing. */
+            reason = rejection_reason[i];
+        } else {
+            reason = "appraisal failed (see per-Verifier log above)";
+        }
+        charra_log_info("[" LOG_NAME
+                        "] Verifier %d (%s:%u): %-4s | AK %-6s | %5ld ms | "
+                        "%s",
+                i + 1, verifiers[i].ip_address, verifiers[i].port_number,
+                attestation_results[i] ? "PASS" : "FAIL",
+                rp_ak_cert_was_cached[i] ? "cached" : "fresh",
+                verifier_latency_ms[i], reason);
     }
 
     result = CHARRA_RC_SUCCESS;
