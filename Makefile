@@ -125,7 +125,7 @@ SOURCES = $(shell find $(SRCDIR) -name '*.c')
 INCLUDE = -I$(INCDIR)
 
 OBJECTS =  $(addsuffix .o, $(addprefix $(OBJDIR)/common/, charra_log))
-OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log charra_synthetic_log charra_sdk charra_rp_qualification charra_ak_state charra_qualification_state charra_rp_key_mgr))
+OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log charra_synthetic_log charra_sdk charra_rp_qualification charra_ak_state charra_qualification_state charra_identity_key_mgr))
 OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/util/, cbor_util charra_util coap_util crypto_util io_util tpm2_util cli_util parser_util))
 
 TARGETS = $(addprefix $(BINDIR)/, attester verifier verifier_old relying_party trust_manager)
@@ -134,7 +134,7 @@ TARGETS = $(addprefix $(BINDIR)/, attester verifier verifier_old relying_party t
         test test_event_log test_synthetic_log test_sdk test_rp_qualification \
         test_marshaling_bounds test_x509_cert_chain \
         test_certify_ak_marshaling test_ak_state test_rp_appraisal_marshaling \
-        test_get_verifiers_marshaling \
+        test_get_verifiers_marshaling test_certify_ak_of_attester_marshaling \
         clean
 
 all: $(TARGETS)
@@ -153,9 +153,10 @@ test_certify_ak_marshaling: $(BINDIR)/test_certify_ak_marshaling
 test_ak_state: $(BINDIR)/test_ak_state
 test_rp_appraisal_marshaling: $(BINDIR)/test_rp_appraisal_marshaling
 test_get_verifiers_marshaling: $(BINDIR)/test_get_verifiers_marshaling
+test_certify_ak_of_attester_marshaling: $(BINDIR)/test_certify_ak_of_attester_marshaling
 
 ## run the test suite
-test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log $(BINDIR)/test_sdk $(BINDIR)/test_rp_qualification $(BINDIR)/test_marshaling_bounds $(BINDIR)/test_x509_cert_chain $(BINDIR)/test_certify_ak_marshaling $(BINDIR)/test_ak_state $(BINDIR)/test_rp_appraisal_marshaling $(BINDIR)/test_get_verifiers_marshaling
+test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log $(BINDIR)/test_sdk $(BINDIR)/test_rp_qualification $(BINDIR)/test_marshaling_bounds $(BINDIR)/test_x509_cert_chain $(BINDIR)/test_certify_ak_marshaling $(BINDIR)/test_ak_state $(BINDIR)/test_rp_appraisal_marshaling $(BINDIR)/test_get_verifiers_marshaling $(BINDIR)/test_certify_ak_of_attester_marshaling
 	./$(BINDIR)/test_event_log
 	./$(BINDIR)/test_synthetic_log
 	./$(BINDIR)/test_sdk
@@ -166,6 +167,7 @@ test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log $(BINDIR)/test_sdk $
 	./$(BINDIR)/test_ak_state
 	./$(BINDIR)/test_rp_appraisal_marshaling
 	./$(BINDIR)/test_get_verifiers_marshaling
+	./$(BINDIR)/test_certify_ak_of_attester_marshaling
 
 
 # ------------------------------------------------------------------------------
@@ -243,6 +245,10 @@ $(BINDIR)/test_rp_appraisal_marshaling: tests/test_rp_appraisal_marshaling.c $(O
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
 $(BINDIR)/test_get_verifiers_marshaling: tests/test_get_verifiers_marshaling.c $(OBJECTS)
+	@mkdir -p $(@D)
+	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
+
+$(BINDIR)/test_certify_ak_of_attester_marshaling: tests/test_certify_ak_of_attester_marshaling.c $(OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 

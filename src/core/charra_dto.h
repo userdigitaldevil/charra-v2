@@ -98,6 +98,16 @@ typedef struct {
     uint8_t tpm2_public_key[sizeof(TPM2B_PUBLIC)];
     uint32_t event_log_len;
     uint8_t* event_log;
+    /* EK_a/AK_a: Attester's AK cert as certified by a Verifier
+     * (/certify_ak_of_attester's DELIVER_VERIFIER leg) -- Step 3b item 1's
+     * input. No fixed upper bound, borrowed pointer like event_log above. */
+    uint32_t ak_certificate_attester_by_verifier_len;
+    uint8_t* ak_certificate_attester_by_verifier;
+    /* Attester's AK cert as certified by RP's own CA (DELIVER_RP leg) --
+     * forwarded alongside, so both independently-issued certs reach the
+     * Verifier. */
+    uint32_t ak_certificate_attester_by_rp_len;
+    uint8_t* ak_certificate_attester_by_rp;
 } msg_attestation_response_dto;
 
 typedef struct {
@@ -199,15 +209,16 @@ typedef struct {
     uint32_t tpm2_public_key_len;
     uint8_t tpm2_public_key[sizeof(TPM2B_PUBLIC)];
 
-    /* EK_a/AK_a: the Attester's AK certificate (DER), forwarded by RP --
-     * Step 3b item 1's input. Present in the wire format for symmetry
-     * with ak_certificate_rp above, but will be empty until the Attester
-     * itself gains a /certify_ak client -- see CHARRA_V2_NOTES.md. Step 3b
-     * item 1 correctly fails closed (empty certificate) until then, rather
-     * than being silently skipped. Same borrowed-pointer convention as
-     * ak_certificate_rp above. */
-    uint32_t ak_certificate_len;
-    uint8_t* ak_certificate;
+    /* EK_a/AK_a: Attester's AK cert as certified by a Verifier -- Step 3b
+     * item 1's input, checked by every Verifier. Borrowed pointer, same
+     * convention as ak_certificate_rp above. */
+    uint32_t ak_certificate_attester_by_verifier_len;
+    uint8_t* ak_certificate_attester_by_verifier;
+
+    /* Attester's AK cert as certified by RP's own CA -- forwarded alongside,
+     * not independently checked by the Verifier. */
+    uint32_t ak_certificate_attester_by_rp_len;
+    uint8_t* ak_certificate_attester_by_rp;
 
     /* --- log_r itself --- */
     uint32_t log_r_len;
@@ -262,6 +273,85 @@ typedef struct {
     uint32_t ak_certificate_len;
     uint8_t* ak_certificate;
 } msg_certify_ak_response_dto;
+
+/**
+ * /certify_ak_of_attester "kind" values -- the Attester's single resource
+ * (see CHARRA_V2_NOTES.md) used for all three legs of getting its own AK
+ * certified, always initiated by the RP (Attester and every Verifier stay
+ * fully passive throughout):
+ *
+ *   FETCH:            RP asks; Attester responds with its EK certificate +
+ *                      AK public key + AK name (msg_ak_identity_response_dto
+ *                      below).
+ *   DELIVER_RP:        RP relays back a credential-wrapped AK certificate it
+ *                      signed itself, with its own CA.
+ *   DELIVER_VERIFIER:  RP relays back a credential-wrapped AK certificate a
+ *                      Verifier signed (via that Verifier's own, unmodified
+ *                      /certify_ak) -- RP never decrypts this one itself,
+ *                      only the Attester's TPM can via ActivateCredential.
+ *
+ * Both deliveries use msg_certify_ak_of_attester_request_dto below; the
+ * Attester ends up holding two independently-issued certificates for the
+ * same identity, one from each CA -- neither trusts the other's issuance.
+ */
+#define CHARRA_CERTIFY_AK_OF_ATTESTER_FETCH 0
+#define CHARRA_CERTIFY_AK_OF_ATTESTER_DELIVER_RP 1
+#define CHARRA_CERTIFY_AK_OF_ATTESTER_DELIVER_VERIFIER 2
+
+/**
+ * /certify_ak_of_attester response for kind == FETCH: Attester -> RP,
+ * everything RP needs to drive both certification tracks on the Attester's
+ * behalf. The "AK" here is a dedicated identity keypair the Attester
+ * creates the same way ensure_rp_ak_keypair() creates the RP's own
+ * (charra_rp_key_mgr_create_ek()/_create_ak(), reused as-is) -- NOT the
+ * Attester's existing quoting key that signs Quote_a; the two are
+ * deliberately independent identities.
+ */
+typedef struct {
+    /* EK certificate (DER), chains to the manufacturer root -- same
+     * convention as msg_certify_ak_request_dto's own ek_certificate. */
+    uint32_t ek_certificate_len;
+    uint8_t* ek_certificate;
+
+    /* the AK's public key, to be certified by both CAs */
+    uint32_t ak_public_key_len;
+    uint8_t ak_public_key[sizeof(TPM2B_PUBLIC)];
+
+    /* the AK's TPM2B_NAME, exactly as the Attester's own Esys_ReadPublic()
+     * reports it -- same "not recomputed by the CA" convention
+     * msg_certify_ak_request_dto's own ak_name already documents. */
+    uint32_t ak_name_len;
+    uint8_t ak_name[sizeof(TPM2B_NAME)];
+} msg_ak_identity_response_dto;
+
+/**
+ * /certify_ak_of_attester request for kind == DELIVER_RP or
+ * DELIVER_VERIFIER: RP -> Attester, relaying a signed AK certificate for
+ * the Attester to unwrap (Esys_ActivateCredential) and persist -- proving
+ * the Attester itself genuinely holds the EK/AK, not just trusting the RP's
+ * say-so. Same field shape as msg_certify_ak_response_dto, reused verbatim:
+ * this is exactly what is being relayed, whether RP signed it itself
+ * (DELIVER_RP) or is passing through a Verifier's own /certify_ak response
+ * unmodified (DELIVER_VERIFIER). Unused/zero for kind == FETCH.
+ */
+typedef struct {
+    uint32_t kind; /* one of CHARRA_CERTIFY_AK_OF_ATTESTER_* above */
+
+    /* TPM2_MakeCredential() outputs */
+    uint32_t credential_blob_len;
+    uint8_t credential_blob[sizeof(TPM2B_ID_OBJECT)];
+    uint32_t wrapped_secret_len;
+    uint8_t wrapped_secret[sizeof(TPM2B_ENCRYPTED_SECRET)];
+
+    /* AES-256-GCM parameters for ak_certificate below; key = the 32-byte
+     * credential recovered via ActivateCredential */
+    uint8_t aes_gcm_nonce[12];
+    uint8_t aes_gcm_tag[16];
+
+    /* the signed AK certificate (DER), AES-256-GCM-encrypted as above */
+    uint32_t ak_certificate_len;
+    uint8_t* ak_certificate;
+} msg_certify_ak_of_attester_request_dto;
 
 /**
  * /qualify response: Verifier -> RP, the raw fabricated log to redact plus

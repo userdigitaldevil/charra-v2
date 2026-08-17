@@ -15,12 +15,13 @@
 
 #include "common/charra_log.h"
 #include "common/charra_macro.h"
+#include "core/charra_ak_state.h"
 #include "core/charra_dto.h"
 #include "core/charra_event_log.h"
 #include "core/charra_key_mgr.h"
 #include "core/charra_marshaling.h"
 #include "core/charra_rim_mgr.h"
-#include "core/charra_rp_key_mgr.h"
+#include "core/charra_identity_key_mgr.h"
 #include "core/charra_rp_qualification.h"
 #include "core/charra_sdk.h"
 #include "util/charra_util.h"
@@ -109,7 +110,7 @@ static uint8_t* rp_log_r = NULL;
 static uint32_t rp_log_r_len = 0;
 static uint8_t rp_pcr_r[TPM2_SHA256_DIGEST_SIZE] = {0};
 /* Quote_r's signing key is RP's TPM-resident AK (see ensure_rp_ak_keypair()
- * / charra_rp_key_mgr.h) -- created once and reused for the process's
+ * / charra_identity_key_mgr.h) -- created once and reused for the process's
  * lifetime, unlike the throwaway software key this used to be. Verifier-
  * agnostic: the same keypair signs Quote_r for every Verifier -- only its
  * CERTIFICATE differs per Verifier, see rp_ak_cert_der below. */
@@ -159,6 +160,29 @@ static uint8_t* rp_ak_cert_der[MAX_VERIFIERS] = {NULL};
 static uint32_t rp_ak_cert_der_len[MAX_VERIFIERS] = {0};
 static bool processing_certify_ak_response = false;
 static CHARRA_RC certify_ak_rc = CHARRA_RC_ERROR;
+
+/* --- Attester identity provisioning (/certify_ak_of_attester) -----------
+ * Two independent CAs certify the Attester's AK identity, neither trusting
+ * the other's issuance -- see CHARRA_V2_NOTES.md. RP acts as the sole
+ * initiator for both legs (Attester and every Verifier stay fully
+ * passive); the whole sequence runs once per process (like rp_ak_keypair_
+ * ready above), not per attestation cycle. */
+static char* rp_ca_cert_path = "keys/rp-ca.crt";
+static char* rp_ca_key_path = "keys/rp-ca.key";
+static const char* attester_ak_cert_not_before_utc = "20240101000000";
+static const char* attester_ak_cert_not_after_utc = "20340101000000";
+static char* attester_ak_state_file_path =
+        "state/relying-party/attester-ak-state.txt";
+static bool attester_identity_certified = false;
+
+static msg_ak_identity_response_dto ak_identity_response = {0};
+static CHARRA_RC ak_identity_rc = CHARRA_RC_ERROR;
+static bool processing_ak_identity_response = false;
+
+/* No payload to parse on the DELIVER_RP/DELIVER_VERIFIER leg -- this
+ * handler only needs to know the round trip completed, same "ack-only"
+ * shape /qualify/submit's response has. */
+static bool processing_certify_ak_of_attester_deliver_response = false;
 
 /* --- RP qualification handshake state (/qualify + /qualify/submit) ------
  * See charra_rp_qualification.h. Verifier-local state, so this handshake
@@ -318,6 +342,35 @@ static coap_response_t coap_certify_ak_response_handler(
         coap_session_t* session CHARRA_UNUSED,
         const coap_pdu_t* sent CHARRA_UNUSED, const coap_pdu_t* received,
         const coap_mid_t mid CHARRA_UNUSED);
+
+static coap_response_t coap_ak_identity_response_handler(
+        coap_session_t* session CHARRA_UNUSED,
+        const coap_pdu_t* sent CHARRA_UNUSED, const coap_pdu_t* received,
+        const coap_mid_t mid CHARRA_UNUSED);
+
+static coap_response_t coap_certify_ak_of_attester_deliver_response_handler(
+        coap_session_t* session CHARRA_UNUSED,
+        const coap_pdu_t* sent CHARRA_UNUSED,
+        const coap_pdu_t* received CHARRA_UNUSED,
+        const coap_mid_t mid CHARRA_UNUSED);
+
+/**
+ * @brief Ensure the Attester's AK identity is certified by both CAs (RP's
+ * own, and one Verifier's, relayed) -- see CHARRA_V2_NOTES.md,
+ * "/certify_ak_of_attester". Runs once per process (like ensure_rp_ak_
+ * keypair() above); every call after the first returns immediately.
+ *
+ * The RP-CA leg is a hard local gate: if the Attester's EK certificate
+ * does not chain to the manufacturer root, this returns an error and the
+ * caller is expected to abort the whole attestation cycle rather than
+ * proceed with an unverified Attester identity.
+ *
+ * @param[in] relay_verifier_index which entry in verifiers[] to relay the
+ * Verifier-CA leg to -- only one Verifier ever certifies this identity
+ * (they share one CA key, see CHARRA_V2_NOTES.md), not one per Verifier
+ * the way ensure_rp_ak_certificate() works for RP's own AK.
+ */
+static CHARRA_RC ensure_attester_identity_certified(int relay_verifier_index);
 
 /**
  * @brief Ensure RP's TPM-resident EK+AK keypair exists (creating it once,
@@ -529,6 +582,21 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
              * see ensure_rp_ak_certificate()'s docstring -- so it's ensured
              * per-Verifier, inside get_attestation_results_thread(), not
              * once here against a single verifiers[0]. */
+
+            /* The Attester's own identity, by contrast, only needs
+             * certifying once per process (both CAs' issuances are
+             * meaningful to every Verifier -- see CHARRA_V2_NOTES.md) --
+             * ensure_attester_identity_certified() itself no-ops on every
+             * call after the first. Hard fail-closed: this is RP's own
+             * local gate on the Attester's identity, so any failure here
+             * aborts the whole cycle rather than proceeding with
+             * unverified evidence. */
+            if ((result = ensure_attester_identity_certified(0)) !=
+                    CHARRA_RC_SUCCESS) {
+                charra_log_error("[" LOG_NAME "] Could not certify the "
+                                 "Attester's identity.");
+                goto error;
+            }
 
             /* Getting evidence */
             charra_log_info("[" LOG_NAME "] Getting evidence.");
@@ -944,7 +1012,7 @@ static CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
     }
     Esys_Free(sign_ak_name);
 
-    charra_r = charra_rp_key_mgr_sign(sign_esys_ctx, sign_ak_handle,
+    charra_r = charra_identity_key_mgr_sign(sign_esys_ctx, sign_ak_handle,
             signed_data, sizeof(ev.pcr_r) + ev.verifier_nonce_len,
             ev.rp_signature);
 
@@ -985,6 +1053,19 @@ static CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
     memcpy(ev.tpm2_public_key, last_response.tpm2_public_key,
             last_response.tpm2_public_key_len);
 
+    /* EK_a/AK_a: Attester's Verifier-issued AK cert, forwarded from
+     * /attest's response -- RP never decrypts it itself. */
+    ev.ak_certificate_attester_by_verifier_len =
+            last_response.ak_certificate_attester_by_verifier_len;
+    ev.ak_certificate_attester_by_verifier =
+            last_response.ak_certificate_attester_by_verifier;
+
+    /* RP-issued cert, forwarded alongside the Verifier-issued one above */
+    ev.ak_certificate_attester_by_rp_len =
+            last_response.ak_certificate_attester_by_rp_len;
+    ev.ak_certificate_attester_by_rp =
+            last_response.ak_certificate_attester_by_rp;
+
     ev.log_r = rp_log_r;
     ev.log_r_len = rp_log_r_len;
 
@@ -1020,6 +1101,51 @@ static coap_response_t coap_certify_ak_response_handler(
 
 cleanup:
     processing_certify_ak_response = false;
+    return COAP_RESPONSE_OK;
+}
+
+static coap_response_t coap_ak_identity_response_handler(
+        coap_session_t* session CHARRA_UNUSED,
+        const coap_pdu_t* sent CHARRA_UNUSED, const coap_pdu_t* received,
+        const coap_mid_t mid CHARRA_UNUSED) {
+    processing_ak_identity_response = true;
+
+    int coap_r = 0;
+    size_t data_len = 0;
+    const uint8_t* data = NULL;
+    size_t data_offset = 0;
+    size_t data_total_len = 0;
+    if ((coap_r = coap_get_data_large(
+                 received, &data_len, &data, &data_offset, &data_total_len)) ==
+            0) {
+        charra_log_error("[" LOG_NAME "] /certify_ak_of_attester (FETCH): "
+                         "Could not get CoAP PDU data.");
+        ak_identity_rc = CHARRA_RC_ERROR;
+        goto cleanup;
+    }
+
+    if ((ak_identity_rc = charra_unmarshal_ak_identity_response(
+                 data_len, data, &ak_identity_response)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /certify_ak_of_attester (FETCH): "
+                         "Could not parse CBOR response.");
+        goto cleanup;
+    }
+
+cleanup:
+    processing_ak_identity_response = false;
+    return COAP_RESPONSE_OK;
+}
+
+static coap_response_t coap_certify_ak_of_attester_deliver_response_handler(
+        coap_session_t* session CHARRA_UNUSED,
+        const coap_pdu_t* sent CHARRA_UNUSED,
+        const coap_pdu_t* received CHARRA_UNUSED,
+        const coap_mid_t mid CHARRA_UNUSED) {
+    /* No payload to parse -- a non-error CoAP response code alone means
+     * the Attester unwrapped and persisted the delivered certificate; the
+     * caller only waits on rp_coap_fetch()'s own transport-level result. */
+    processing_certify_ak_of_attester_deliver_response = true;
+    processing_certify_ak_of_attester_deliver_response = false;
     return COAP_RESPONSE_OK;
 }
 
@@ -1397,7 +1523,7 @@ static CHARRA_RC rp_perform_qualification_handshake(int verifier_index) {
     }
     Esys_Free(sign_ak_name);
 
-    result = charra_rp_key_mgr_sign(sign_esys_ctx, sign_ak_handle,
+    result = charra_identity_key_mgr_sign(sign_esys_ctx, sign_ak_handle,
             submitted_pcr_digest, sizeof(submitted_pcr_digest), rp_signature);
 
     Esys_FlushContext(sign_esys_ctx, sign_ak_handle);
@@ -1480,7 +1606,7 @@ done:
 
 /**
  * @brief Open a fresh TPM connection, recreate RP's EK (deterministic --
- * see charra_rp_key_mgr_create_ek()), and load the AK from its persisted
+ * see charra_identity_key_mgr_create_ek()), and load the AK from its persisted
  * public/private blobs. Caller must hold rp_tpm_mutex and Esys_Finalize()/
  * Tss2_TctiLdr_Finalize() the returned contexts when done -- this is the
  * short-lived-connection building block every TPM operation past initial
@@ -1506,7 +1632,7 @@ static CHARRA_RC rp_open_tpm_and_load_ak(ESYS_CONTEXT** esys_ctx_out,
     }
 
     TPM2B_PUBLIC* ek_public = NULL;
-    CHARRA_RC result = charra_rp_key_mgr_create_ek(
+    CHARRA_RC result = charra_identity_key_mgr_create_ek(
             *esys_ctx_out, ek_handle_out, &ek_public);
     Esys_Free(ek_public);
     if (result != CHARRA_RC_SUCCESS) {
@@ -1516,17 +1642,17 @@ static CHARRA_RC rp_open_tpm_and_load_ak(ESYS_CONTEXT** esys_ctx_out,
 
     TPM2B_PUBLIC ak_public = {0};
     TPM2B_PRIVATE ak_private = {0};
-    if ((result = charra_rp_key_mgr_load_public(
+    if ((result = charra_identity_key_mgr_load_public(
                  rp_ak_public_path, &ak_public)) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not load AK public key.");
         goto error;
     }
-    if ((result = charra_rp_key_mgr_load_private(
+    if ((result = charra_identity_key_mgr_load_private(
                  rp_ak_private_path, &ak_private)) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not load AK private area.");
         goto error;
     }
-    if ((result = charra_rp_key_mgr_load_ak(*esys_ctx_out, *ek_handle_out,
+    if ((result = charra_identity_key_mgr_load_ak(*esys_ctx_out, *ek_handle_out,
                  &ak_public, &ak_private, ak_handle_out, ak_name_out)) !=
             CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not load RP's AK.");
@@ -1565,6 +1691,421 @@ static void invalidate_cached_rp_ak_certificate(int verifier_index) {
     rp_ak_cert_was_cached[verifier_index] = false;
 }
 
+static CHARRA_RC ensure_attester_identity_certified(int relay_verifier_index) {
+    if (attester_identity_certified) {
+        return CHARRA_RC_SUCCESS;
+    }
+
+    charra_log_info("[" LOG_NAME "]  +------------ Attester Identity "
+                    "Certification --------------+");
+
+    CHARRA_RC result = CHARRA_RC_ERROR;
+
+    /* --- 1. FETCH: get the Attester's EK cert + AK public key + AK name */
+    msg_certify_ak_of_attester_request_dto fetch_req = {0};
+    fetch_req.kind = CHARRA_CERTIFY_AK_OF_ATTESTER_FETCH;
+    uint8_t* fetch_req_buf = NULL;
+    uint32_t fetch_req_buf_len = 0;
+    if ((result = charra_marshal_certify_ak_of_attester_request(&fetch_req,
+                 &fetch_req_buf_len, &fetch_req_buf)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not marshal "
+                         "/certify_ak_of_attester FETCH request.");
+        return result;
+    }
+
+    ak_identity_rc = CHARRA_RC_ERROR;
+    result = rp_coap_fetch(attester_host, attester_port,
+            "certify_ak_of_attester", fetch_req_buf, fetch_req_buf_len,
+            coap_ak_identity_response_handler, &processing_ak_identity_response);
+    free(fetch_req_buf);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] /certify_ak_of_attester FETCH round trip "
+                "failed.");
+        return result;
+    }
+    if (ak_identity_rc != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /certify_ak_of_attester FETCH did "
+                         "not complete successfully.");
+        return ak_identity_rc;
+    }
+
+    /* Snapshot + release ownership of the shared global's heap field, same
+     * convention certify_ak_response uses (see ensure_rp_ak_certificate()
+     * below). Safe without a mutex: this whole function runs once, before
+     * any per-Verifier thread starts. */
+    msg_ak_identity_response_dto identity = ak_identity_response;
+    ak_identity_response.ek_certificate = NULL;
+    ak_identity_response.ek_certificate_len = 0;
+
+    charra_log_info(
+            "[" LOG_NAME "] Received Attester identity: EK certificate %u "
+            "byte(s), AK public key %u byte(s).",
+            identity.ek_certificate_len, identity.ak_public_key_len);
+
+    /* --- 2. RP-CA local gate: the Attester's EK must chain to the
+     * manufacturer root. Hard fail-closed -- the caller is expected to
+     * abort the whole attestation cycle on any error return from here on,
+     * per "the RP validates the Attester's EK/AK itself" (CHARRA_V2_NOTES.md). */
+    char* manufacturer_root_der = NULL;
+    size_t manufacturer_root_der_len = 0;
+    if ((result = charra_io_read_file(manufacturer_root_cert_path,
+                 &manufacturer_root_der, &manufacturer_root_der_len)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not read manufacturer root "
+                         "certificate ('%s').",
+                manufacturer_root_cert_path);
+        charra_free_if_not_null(identity.ek_certificate);
+        return result;
+    }
+
+    mbedtls_x509_crt attester_ek_leaf_cert;
+    if ((result = charra_crypto_verify_x509_cert_chain(identity.ek_certificate,
+                 identity.ek_certificate_len, (uint8_t*)manufacturer_root_der,
+                 manufacturer_root_der_len, &attester_ek_leaf_cert)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "]     => RP's own EK/AK check of the Attester "
+                "FAILED -- Attester's EK certificate does NOT verify "
+                "against the manufacturer root. Aborting.");
+        charra_io_free_file_buffer(&manufacturer_root_der);
+        charra_free_if_not_null(identity.ek_certificate);
+        return CHARRA_RC_VERIFICATION_FAILED;
+    }
+    charra_crypto_log_cert_summary(
+            "Attester's EK cert (RP's own check)", &attester_ek_leaf_cert);
+    charra_log_info(
+            "[" LOG_NAME "]     => RP's own EK/AK check of the Attester "
+            "passed!");
+
+    TPM2B_PUBLIC attester_ek_public_key = {0};
+    if ((result = charra_crypto_build_ek_tpm2b_public_from_cert(
+                 &attester_ek_leaf_cert, &attester_ek_public_key)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not reconstruct Attester's "
+                         "EK TPM2B_PUBLIC from certificate.");
+        mbedtls_x509_crt_free(&attester_ek_leaf_cert);
+        charra_io_free_file_buffer(&manufacturer_root_der);
+        charra_free_if_not_null(identity.ek_certificate);
+        return result;
+    }
+    mbedtls_x509_crt_free(&attester_ek_leaf_cert);
+    charra_io_free_file_buffer(&manufacturer_root_der);
+
+    TPM2B_PUBLIC* attester_ak_public_key =
+            (TPM2B_PUBLIC*)identity.ak_public_key;
+    TPM2B_NAME* attester_ak_name = (TPM2B_NAME*)identity.ak_name;
+
+    /* --- 3. RP-CA track: sign, wrap, deliver -------------------------- */
+    uint8_t rp_ca_serial[16] = {0};
+    uint8_t* rp_signed_cert_der = NULL;
+    uint32_t rp_signed_cert_der_len = 0;
+    {
+        mbedtls_x509_crt rp_ca_cert;
+        mbedtls_x509_crt_init(&rp_ca_cert);
+        char* rp_ca_cert_der_buf = NULL;
+        size_t rp_ca_cert_der_buf_len = 0;
+        if ((result = charra_io_read_file(rp_ca_cert_path, &rp_ca_cert_der_buf,
+                     &rp_ca_cert_der_buf_len)) != CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Could not read RP CA "
+                             "certificate ('%s').",
+                    rp_ca_cert_path);
+            charra_free_if_not_null(identity.ek_certificate);
+            return result;
+        }
+        if (mbedtls_x509_crt_parse(&rp_ca_cert, (uint8_t*)rp_ca_cert_der_buf,
+                    rp_ca_cert_der_buf_len) != 0) {
+            charra_log_error("[" LOG_NAME "] Could not parse RP CA "
+                             "certificate.");
+            charra_io_free_file_buffer(&rp_ca_cert_der_buf);
+            charra_free_if_not_null(identity.ek_certificate);
+            return CHARRA_RC_CRYPTO_ERROR;
+        }
+        char rp_ca_subject_name[256] = {0};
+        if (mbedtls_x509_dn_gets(rp_ca_subject_name,
+                    sizeof(rp_ca_subject_name), &rp_ca_cert.subject) <= 0) {
+            charra_log_error(
+                    "[" LOG_NAME "] Could not read RP CA subject name.");
+            mbedtls_x509_crt_free(&rp_ca_cert);
+            charra_io_free_file_buffer(&rp_ca_cert_der_buf);
+            charra_free_if_not_null(identity.ek_certificate);
+            return CHARRA_RC_CRYPTO_ERROR;
+        }
+        mbedtls_x509_crt_free(&rp_ca_cert);
+        charra_io_free_file_buffer(&rp_ca_cert_der_buf);
+
+        if ((result = charra_crypto_sign_ak_certificate(attester_ak_public_key,
+                     "CN=CHARRA Attester AK (RP-issued)", rp_ca_subject_name,
+                     attester_ak_cert_not_before_utc,
+                     attester_ak_cert_not_after_utc, rp_ca_key_path,
+                     &rp_signed_cert_der, &rp_signed_cert_der_len,
+                     rp_ca_serial)) != CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Could not sign Attester's AK "
+                             "certificate with RP's own CA.");
+            charra_free_if_not_null(identity.ek_certificate);
+            return result;
+        }
+    }
+    charra_log_info(
+            "[" LOG_NAME "] Attester's AK certificate signed by RP's own CA "
+            "(%u byte(s)).",
+            rp_signed_cert_der_len);
+
+    uint8_t rp_aes_key[CHARRA_AES256GCM_KEY_LEN] = {0};
+    {
+        mbedtls_ctr_drbg_context ctr_drbg;
+        mbedtls_entropy_context entropy;
+        if ((result = charra_crypto_seeded_rng_init(&ctr_drbg, &entropy)) !=
+                CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Could not seed RNG.");
+            charra_free_if_not_null(rp_signed_cert_der);
+            charra_free_if_not_null(identity.ek_certificate);
+            return result;
+        }
+        int mbedtls_r = mbedtls_ctr_drbg_random(
+                &ctr_drbg, rp_aes_key, sizeof(rp_aes_key));
+        charra_crypto_seeded_rng_free(&ctr_drbg, &entropy);
+        if (mbedtls_r != 0) {
+            charra_log_error(
+                    "[" LOG_NAME "] Could not generate AES key.");
+            charra_free_if_not_null(rp_signed_cert_der);
+            charra_free_if_not_null(identity.ek_certificate);
+            return CHARRA_RC_CRYPTO_ERROR;
+        }
+    }
+
+    uint8_t rp_aes_gcm_nonce[CHARRA_AES256GCM_NONCE_LEN] = {0};
+    uint8_t rp_aes_gcm_tag[CHARRA_AES256GCM_TAG_LEN] = {0};
+    uint8_t* rp_cert_ciphertext = NULL;
+    if ((result = charra_crypto_aes256gcm_encrypt(rp_aes_key, rp_signed_cert_der,
+                 rp_signed_cert_der_len, rp_aes_gcm_nonce, rp_aes_gcm_tag,
+                 &rp_cert_ciphertext)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not encrypt RP-signed AK "
+                         "certificate.");
+        charra_free_if_not_null(rp_signed_cert_der);
+        charra_free_if_not_null(identity.ek_certificate);
+        return result;
+    }
+
+    pthread_mutex_lock(&rp_tpm_mutex);
+    ESYS_CONTEXT* esys_ctx = NULL;
+    TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
+    TSS2_RC tss_r = 0;
+    if ((tss_r = Tss2_TctiLdr_Initialize(getenv("CHARRA_TCTI"), &tcti_ctx)) !=
+            TSS2_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Tss2_TctiLdr_Initialize.");
+        pthread_mutex_unlock(&rp_tpm_mutex);
+        charra_free_if_not_null(rp_cert_ciphertext);
+        charra_free_if_not_null(rp_signed_cert_der);
+        charra_free_if_not_null(identity.ek_certificate);
+        return CHARRA_RC_ERROR;
+    }
+    if ((tss_r = Esys_Initialize(&esys_ctx, tcti_ctx, NULL)) !=
+            TSS2_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Esys_Initialize.");
+        Tss2_TctiLdr_Finalize(&tcti_ctx);
+        pthread_mutex_unlock(&rp_tpm_mutex);
+        charra_free_if_not_null(rp_cert_ciphertext);
+        charra_free_if_not_null(rp_signed_cert_der);
+        charra_free_if_not_null(identity.ek_certificate);
+        return CHARRA_RC_ERROR;
+    }
+
+    TPM2B_DIGEST rp_credential = {0};
+    rp_credential.size = sizeof(rp_aes_key);
+    memcpy(rp_credential.buffer, rp_aes_key, sizeof(rp_aes_key));
+
+    TPM2B_ID_OBJECT* rp_credential_blob = NULL;
+    TPM2B_ENCRYPTED_SECRET* rp_wrapped_secret = NULL;
+    result = charra_tpm_make_credential_for_ak(esys_ctx, &attester_ek_public_key,
+            attester_ak_name, &rp_credential, &rp_credential_blob,
+            &rp_wrapped_secret);
+    Esys_Finalize(&esys_ctx);
+    Tss2_TctiLdr_Finalize(&tcti_ctx);
+    pthread_mutex_unlock(&rp_tpm_mutex);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Esys_MakeCredential (RP-CA leg) failed.");
+        charra_free_if_not_null(rp_cert_ciphertext);
+        charra_free_if_not_null(rp_signed_cert_der);
+        charra_free_if_not_null(identity.ek_certificate);
+        return result;
+    }
+
+    /* --- record issuance in RP's own ledger, independent of any
+     * Verifier's ------------------------------------------------------- */
+    uint8_t attester_ek_fingerprint[32] = {0};
+    if (hash_sha256(identity.ek_certificate_len, identity.ek_certificate,
+                attester_ek_fingerprint) == CHARRA_RC_SUCCESS) {
+        charra_ak_state_record rp_ak_record = {0};
+        memcpy(rp_ak_record.ek_fingerprint, attester_ek_fingerprint,
+                sizeof(rp_ak_record.ek_fingerprint));
+        rp_ak_record.ak_name_len = identity.ak_name_len;
+        memcpy(rp_ak_record.ak_name, identity.ak_name, identity.ak_name_len);
+        memcpy(rp_ak_record.serial, rp_ca_serial, sizeof(rp_ak_record.serial));
+        rp_ak_record.issued_at = time(NULL);
+        time_t rp_cert_expires_at = 0;
+        if (charra_crypto_parse_utc_yyyymmddhhmmss(
+                    attester_ak_cert_not_after_utc, &rp_cert_expires_at)) {
+            rp_ak_record.expires_at = rp_cert_expires_at;
+        }
+        if (charra_ak_state_renew(attester_ak_state_file_path,
+                    attester_ek_fingerprint, &rp_ak_record) !=
+                CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Could not record RP-issued "
+                             "Attester AK certificate in state.");
+        }
+    }
+
+    /* --- deliver to the Attester via /certify_ak_of_attester DELIVER_RP */
+    msg_certify_ak_of_attester_request_dto deliver_rp_req = {0};
+    deliver_rp_req.kind = CHARRA_CERTIFY_AK_OF_ATTESTER_DELIVER_RP;
+    deliver_rp_req.credential_blob_len = sizeof(*rp_credential_blob);
+    memcpy(deliver_rp_req.credential_blob, rp_credential_blob,
+            deliver_rp_req.credential_blob_len);
+    deliver_rp_req.wrapped_secret_len = sizeof(*rp_wrapped_secret);
+    memcpy(deliver_rp_req.wrapped_secret, rp_wrapped_secret,
+            deliver_rp_req.wrapped_secret_len);
+    memcpy(deliver_rp_req.aes_gcm_nonce, rp_aes_gcm_nonce,
+            sizeof(rp_aes_gcm_nonce));
+    memcpy(deliver_rp_req.aes_gcm_tag, rp_aes_gcm_tag, sizeof(rp_aes_gcm_tag));
+    deliver_rp_req.ak_certificate_len = rp_signed_cert_der_len;
+    deliver_rp_req.ak_certificate = rp_cert_ciphertext;
+
+    Esys_Free(rp_credential_blob);
+    Esys_Free(rp_wrapped_secret);
+    charra_free_if_not_null(rp_signed_cert_der);
+
+    uint8_t* deliver_rp_buf = NULL;
+    uint32_t deliver_rp_buf_len = 0;
+    result = charra_marshal_certify_ak_of_attester_request(
+            &deliver_rp_req, &deliver_rp_buf_len, &deliver_rp_buf);
+    charra_free_if_not_null(rp_cert_ciphertext);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Could not marshal DELIVER_RP request.");
+        charra_free_if_not_null(identity.ek_certificate);
+        return result;
+    }
+
+    result = rp_coap_fetch(attester_host, attester_port,
+            "certify_ak_of_attester", deliver_rp_buf, deliver_rp_buf_len,
+            coap_certify_ak_of_attester_deliver_response_handler,
+            &processing_certify_ak_of_attester_deliver_response);
+    free(deliver_rp_buf);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] DELIVER_RP round trip to the "
+                         "Attester failed.");
+        charra_free_if_not_null(identity.ek_certificate);
+        return result;
+    }
+    charra_log_info("[" LOG_NAME "] RP-CA leg delivered to the Attester.");
+
+    /* --- 4. Verifier-CA track: relay to ONE Verifier's existing
+     * /certify_ak (they share one CA key -- see CHARRA_V2_NOTES.md -- so a
+     * single Verifier's issuance is enough for every Verifier's own
+     * chain-validation to accept it later). --------------------------- */
+    msg_certify_ak_request_dto verifier_req = {0};
+    verifier_req.ek_certificate = identity.ek_certificate;
+    verifier_req.ek_certificate_len = identity.ek_certificate_len;
+    verifier_req.ak_public_key_len = identity.ak_public_key_len;
+    memcpy(verifier_req.ak_public_key, identity.ak_public_key,
+            identity.ak_public_key_len);
+    verifier_req.ak_name_len = identity.ak_name_len;
+    memcpy(verifier_req.ak_name, identity.ak_name, identity.ak_name_len);
+
+    uint8_t* verifier_req_buf = NULL;
+    uint32_t verifier_req_buf_len = 0;
+    result = charra_marshal_certify_ak_request(
+            &verifier_req, &verifier_req_buf_len, &verifier_req_buf);
+    charra_free_if_not_null(identity.ek_certificate);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not marshal Attester's "
+                         "/certify_ak request to the Verifier.");
+        return result;
+    }
+
+    certify_ak_rc = CHARRA_RC_ERROR;
+    result = rp_coap_fetch(verifiers[relay_verifier_index].ip_address,
+            verifiers[relay_verifier_index].port_number, "certify_ak",
+            verifier_req_buf, verifier_req_buf_len,
+            coap_certify_ak_response_handler, &processing_certify_ak_response);
+    free(verifier_req_buf);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Relayed /certify_ak round trip to "
+                         "the Verifier failed.");
+        return result;
+    }
+    if (certify_ak_rc != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Verifier did not certify the "
+                         "Attester's AK successfully.");
+        return certify_ak_rc;
+    }
+
+    /* Snapshot + release ownership -- shared with RP's own /certify_ak
+     * calls, safe here for the same "runs once, before any thread starts"
+     * reason as above. */
+    msg_certify_ak_response_dto verifier_cert_response = certify_ak_response;
+    certify_ak_response.ak_certificate = NULL;
+    certify_ak_response.ak_certificate_len = 0;
+
+    charra_log_info(
+            "[" LOG_NAME "] Verifier certified the Attester's AK (relayed).");
+
+    /* --- deliver to the Attester via /certify_ak_of_attester
+     * DELIVER_VERIFIER, relaying the still-encrypted response unmodified --
+     * RP never decrypts this one itself. ------------------------------- */
+    msg_certify_ak_of_attester_request_dto deliver_verifier_req = {0};
+    deliver_verifier_req.kind = CHARRA_CERTIFY_AK_OF_ATTESTER_DELIVER_VERIFIER;
+    deliver_verifier_req.credential_blob_len =
+            verifier_cert_response.credential_blob_len;
+    memcpy(deliver_verifier_req.credential_blob,
+            verifier_cert_response.credential_blob,
+            verifier_cert_response.credential_blob_len);
+    deliver_verifier_req.wrapped_secret_len =
+            verifier_cert_response.wrapped_secret_len;
+    memcpy(deliver_verifier_req.wrapped_secret,
+            verifier_cert_response.wrapped_secret,
+            verifier_cert_response.wrapped_secret_len);
+    memcpy(deliver_verifier_req.aes_gcm_nonce,
+            verifier_cert_response.aes_gcm_nonce,
+            sizeof(deliver_verifier_req.aes_gcm_nonce));
+    memcpy(deliver_verifier_req.aes_gcm_tag, verifier_cert_response.aes_gcm_tag,
+            sizeof(deliver_verifier_req.aes_gcm_tag));
+    deliver_verifier_req.ak_certificate_len =
+            verifier_cert_response.ak_certificate_len;
+    deliver_verifier_req.ak_certificate = verifier_cert_response.ak_certificate;
+
+    uint8_t* deliver_verifier_buf = NULL;
+    uint32_t deliver_verifier_buf_len = 0;
+    result = charra_marshal_certify_ak_of_attester_request(&deliver_verifier_req,
+            &deliver_verifier_buf_len, &deliver_verifier_buf);
+    charra_free_if_not_null(verifier_cert_response.ak_certificate);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not marshal DELIVER_VERIFIER "
+                         "request.");
+        return result;
+    }
+
+    result = rp_coap_fetch(attester_host, attester_port,
+            "certify_ak_of_attester", deliver_verifier_buf,
+            deliver_verifier_buf_len,
+            coap_certify_ak_of_attester_deliver_response_handler,
+            &processing_certify_ak_of_attester_deliver_response);
+    free(deliver_verifier_buf);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] DELIVER_VERIFIER round trip to the "
+                         "Attester failed.");
+        return result;
+    }
+
+    charra_log_info(
+            "[" LOG_NAME "] Attester identity fully certified by both CAs "
+            "(RP's own and the Verifier's).");
+    attester_identity_certified = true;
+    return CHARRA_RC_SUCCESS;
+}
+
 static CHARRA_RC ensure_rp_ak_keypair(void) {
     pthread_mutex_lock(&rp_tpm_mutex);
     if (rp_ak_keypair_ready) {
@@ -1589,7 +2130,7 @@ static CHARRA_RC ensure_rp_ak_keypair(void) {
         charra_log_info(
                 "[" LOG_NAME "] Reloading previously provisioned RP AK "
                 "keypair.");
-        if ((result = charra_rp_key_mgr_load_public(
+        if ((result = charra_identity_key_mgr_load_public(
                      rp_ak_public_path, &ak_public)) != CHARRA_RC_SUCCESS) {
             charra_log_error("[" LOG_NAME "] Could not load cached AK public "
                              "key.");
@@ -1632,7 +2173,7 @@ static CHARRA_RC ensure_rp_ak_keypair(void) {
             return CHARRA_RC_ERROR;
         }
 
-        if ((result = charra_rp_key_mgr_create_ek(
+        if ((result = charra_identity_key_mgr_create_ek(
                      esys_ctx, &ek_handle, &ek_public)) != CHARRA_RC_SUCCESS) {
             charra_log_error("[" LOG_NAME "] Could not create RP's EK.");
             Esys_Finalize(&esys_ctx);
@@ -1642,7 +2183,7 @@ static CHARRA_RC ensure_rp_ak_keypair(void) {
         }
 
         /* --- RP's own EK certificate: cached after the first mint, since
-         * charra_rp_key_mgr_create_ek() reproduces the same EK every time
+         * charra_identity_key_mgr_create_ek() reproduces the same EK every time
          * anyway --------------------------------------------------------- */
         if (charra_io_file_exists(rp_ek_cert_cache_path) == CHARRA_RC_SUCCESS) {
             char* buf = NULL;
@@ -1751,7 +2292,7 @@ static CHARRA_RC ensure_rp_ak_keypair(void) {
         /* --- create the AK, persist its blobs -------------------------- */
         TPM2B_PUBLIC* ak_public_p = NULL;
         TPM2B_PRIVATE* ak_private_p = NULL;
-        if ((result = charra_rp_key_mgr_create_ak(esys_ctx, ek_handle,
+        if ((result = charra_identity_key_mgr_create_ak(esys_ctx, ek_handle,
                      &ak_handle, &ak_public_p, &ak_private_p, &ak_name)) !=
                 CHARRA_RC_SUCCESS) {
             charra_log_error("[" LOG_NAME "] Could not create RP's AK.");
@@ -1767,7 +2308,7 @@ static CHARRA_RC ensure_rp_ak_keypair(void) {
         Esys_Free(ak_private_p);
         Esys_Free(ak_name);
 
-        if ((result = charra_rp_key_mgr_save_public(
+        if ((result = charra_identity_key_mgr_save_public(
                      rp_ak_public_path, &ak_public)) != CHARRA_RC_SUCCESS) {
             charra_log_error("[" LOG_NAME "] Could not persist AK public key.");
             Esys_FlushContext(esys_ctx, ak_handle);
@@ -1777,7 +2318,7 @@ static CHARRA_RC ensure_rp_ak_keypair(void) {
             pthread_mutex_unlock(&rp_tpm_mutex);
             return result;
         }
-        if ((result = charra_rp_key_mgr_save_private(
+        if ((result = charra_identity_key_mgr_save_private(
                      rp_ak_private_path, &ak_private)) != CHARRA_RC_SUCCESS) {
             charra_log_error(
                     "[" LOG_NAME "] Could not persist AK private area.");
@@ -1795,7 +2336,7 @@ static CHARRA_RC ensure_rp_ak_keypair(void) {
         Tss2_TctiLdr_Finalize(&tcti_ctx);
     }
 
-    if ((result = charra_rp_key_mgr_public_key_to_der(&ak_public,
+    if ((result = charra_identity_key_mgr_public_key_to_der(&ak_public,
                  rp_public_key_der, sizeof(rp_public_key_der),
                  &rp_public_key_der_len)) != CHARRA_RC_SUCCESS) {
         charra_log_error(
@@ -1910,7 +2451,7 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
     }
 
     TPM2B_PUBLIC ak_public = {0};
-    if ((result = charra_rp_key_mgr_load_public(rp_ak_public_path,
+    if ((result = charra_identity_key_mgr_load_public(rp_ak_public_path,
                  &ak_public)) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not load AK public key for "
                          "/certify_ak request.");
@@ -2097,7 +2638,7 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
     Esys_Free(ak_name2);
 
     TPM2B_DIGEST* credential = NULL;
-    if ((result = charra_rp_key_mgr_activate_credential(esys_ctx, ak_handle2,
+    if ((result = charra_identity_key_mgr_activate_credential(esys_ctx, ak_handle2,
                  ek_handle2,
                  (TPM2B_ID_OBJECT*)response_snapshot.credential_blob,
                  (TPM2B_ENCRYPTED_SECRET*)response_snapshot.wrapped_secret,

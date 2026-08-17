@@ -27,6 +27,15 @@ openssl req -x509 -newkey rsa:2048 -nodes \
     -keyout verifier-ca.key -out verifier-ca.crt -outform DER \
     -days 3650 -subj "/CN=CHARRA Verifier CA (test only)"
 
+echo "Generating RP's own Privacy CA pair..."
+# Independent from the Verifier's CA above -- deliberately so: RP and every
+# Verifier each certify the Attester's identity under their own CA, neither
+# trusting the other's issuance (see CHARRA_V2_NOTES.md, "/certify_ak_of_
+# attester").
+openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout rp-ca.key -out rp-ca.crt -outform DER \
+    -days 3650 -subj "/CN=CHARRA RP CA (test only)"
+
 echo "Generating synthetic TPM manufacturer root..."
 openssl req -x509 -newkey rsa:2048 -nodes \
     -keyout manufacturer-root.key -out manufacturer-root.crt -outform DER \
@@ -57,4 +66,4 @@ echo "Generating a plain test AK key pair (no cert of its own -- gets one"
 echo "minted fresh by charra_crypto_sign_ak_certificate() in tests)..."
 openssl genrsa -out test-ak.key 2048 2>/dev/null
 
-echo "Done. Generated (DER certs, PEM keys): verifier-ca.{key,crt}, manufacturer-root.{key,crt}, rp-ek.{key,crt}, attester-ek.{key,crt}, test-ak.key"
+echo "Done. Generated (DER certs, PEM keys): verifier-ca.{key,crt}, rp-ca.{key,crt}, manufacturer-root.{key,crt}, rp-ek.{key,crt}, attester-ek.{key,crt}, test-ak.key"

@@ -905,30 +905,25 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
          * (obtained via its own earlier /certify_ak call, forwarded here by
          * RP) and the key that actually signed Quote_a. */
         uint8_t ak_serial[16] = {0};
-        if (res.ak_certificate_len == 0) {
-            /* TEMPORARY BYPASS: the Attester has no /certify_ak client yet
-             * (see CHARRA_V2_NOTES.md, "Still genuinely unbuilt") --
-             * relying_party.c deliberately leaves ak_certificate empty,
-             * since nothing exists to provision it. Hard-failing every
-             * single attestation on a gap that isn't this component's job
-             * to close would make end-to-end testing of everything else
-             * (Step 3a, Quote_a's own signature/nonce checks) impossible.
-             * MUST be removed once the Attester provisions a real AK and RP
-             * forwards its certificate -- at that point an empty
-             * certificate has to go back to being a hard failure, not
-             * silently accepted. */
+        if (res.ak_certificate_attester_by_verifier_len == 0) {
             charra_log_error(
                     "[" LOG_NAME "]     => Attester's AK certificate is "
-                    "EMPTY -- accepting anyway (TEMPORARY: Attester AK "
-                    "provisioning is not implemented yet).");
-            attestation_result_ekak = true;
+                    "EMPTY -- the Attester has not completed "
+                    "/certify_ak_of_attester's DELIVER_VERIFIER leg yet.");
+            attestation_result_ekak = false;
         } else {
-            attestation_result_ekak =
-                    charra_crypto_verify_ekak_certificate(res.ak_certificate,
-                            res.ak_certificate_len,
-                            (uint8_t*)verifier_ca_cert_der,
-                            verifier_ca_cert_der_len,
-                            (TPM2B_PUBLIC*)res.tpm2_public_key, ak_serial) ==
+            /* Chain-check only -- no charra_ak_state_check_serial_valid()
+             * here: the Attester's identity is relayed to and certified by
+             * just one Verifier (they share one CA key), so only that one
+             * Verifier's local issuance ledger has a record of it; a
+             * ledger lookup here would spuriously fail on every other
+             * Verifier. Revocation for this cert isn't tracked per-Verifier
+             * as a result -- accepted tradeoff, see CHARRA_V2_NOTES.md. */
+            attestation_result_ekak = charra_crypto_verify_ekak_certificate(
+                    res.ak_certificate_attester_by_verifier,
+                    res.ak_certificate_attester_by_verifier_len,
+                    (uint8_t*)verifier_ca_cert_der, verifier_ca_cert_der_len,
+                    (TPM2B_PUBLIC*)res.tpm2_public_key, ak_serial) ==
                     CHARRA_RC_SUCCESS;
             if (attestation_result_ekak) {
                 char ak_serial_hex[33] = {0};
@@ -938,18 +933,6 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
                         "[" LOG_NAME "]     => Attester's AK certificate is "
                         "valid! (serial %s...)",
                         ak_serial_hex);
-                time_t ak_cert_expires_at = 0;
-                attestation_result_ekak = charra_ak_state_check_serial_valid(
-                        ak_state_file_path, ak_serial, NULL,
-                        &ak_cert_expires_at);
-                if (attestation_result_ekak) {
-                    charra_log_info(
-                            "[" LOG_NAME "]     => Attester's AK certificate "
-                            "is currently valid (expires at %ld, in %ld "
-                            "second(s)).",
-                            (long)ak_cert_expires_at,
-                            (long)(ak_cert_expires_at - time(NULL)));
-                }
             } else {
                 charra_log_error(
                         "[" LOG_NAME "]     => Attester's AK certificate "

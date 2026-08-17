@@ -190,6 +190,47 @@ CHARRA_RC charra_unmarshal_certify_ak_response(
         msg_certify_ak_response_dto* certify_ak_response);
 
 /**
+ * @brief Marshals a /certify_ak_of_attester response DTO for kind == FETCH
+ * (see msg_ak_identity_response_dto in charra_dto.h).
+ */
+CHARRA_RC charra_marshal_ak_identity_response(
+        const msg_ak_identity_response_dto* ak_identity_response,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data);
+
+/**
+ * @brief Unmarshals a /certify_ak_of_attester response DTO for kind ==
+ * FETCH. Bounds-checks ak_public_key_len/ak_name_len against their
+ * fixed-size destination arrays, same as charra_unmarshal_certify_ak_
+ * request(); ek_certificate has no fixed upper bound, so it is
+ * heap-allocated, same as ek_certificate there.
+ */
+CHARRA_RC charra_unmarshal_ak_identity_response(
+        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
+        msg_ak_identity_response_dto* ak_identity_response);
+
+/**
+ * @brief Marshals a /certify_ak_of_attester request DTO for kind ==
+ * DELIVER_RP or DELIVER_VERIFIER (see
+ * msg_certify_ak_of_attester_request_dto in charra_dto.h).
+ */
+CHARRA_RC charra_marshal_certify_ak_of_attester_request(
+        const msg_certify_ak_of_attester_request_dto*
+                certify_ak_of_attester_request,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data);
+
+/**
+ * @brief Unmarshals a /certify_ak_of_attester request DTO. Bounds-checks
+ * credential_blob_len/wrapped_secret_len against their fixed-size
+ * destination arrays; aes_gcm_nonce/aes_gcm_tag are fixed-size and
+ * length-checked exactly, same as charra_unmarshal_certify_ak_response().
+ * ak_certificate is heap-allocated, same reasoning as there.
+ */
+CHARRA_RC charra_unmarshal_certify_ak_of_attester_request(
+        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
+        msg_certify_ak_of_attester_request_dto*
+                certify_ak_of_attester_request);
+
+/**
  * @brief Marshals a /qualify response DTO (see msg_qualify_response_dto in
  * charra_dto.h).
  */

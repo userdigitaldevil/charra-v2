@@ -674,14 +674,47 @@ oversized fixed-size fields rejected via hand-encoded QCBOR, covering
 `tpm2_public_key` — the field bug #1 in the audit below was about —
 `attestation_data`, and `tpm2_signature_rp`).
 
-**Still genuinely unbuilt** (`relying_party.c`'s Step 2a/2b): EK/AK
-validation of the Attester; calling
-`verify_log_entries_self_consistent()`/`verify_log_matches_quote_r_pcr()`/
-`verify_log_file_hashes_against_policy()` against `log_a`; real redaction
-call (`charra_sdk_redact_ima_log()` exists, tested, uncalled here); `Quote_r`
-generation; calling `charra_marshal_rp_appraisal()` to send both evidence
-bundles onward, mirroring how `attester.c` calls
-`charra_marshal_attestation_response()` today.
+**Update (2026-08-17): everything below except the first bullet is now
+built.** `relying_party.c`'s Step 2a/2b actually runs today —
+`charra_rp_appraise_evidence()` calls `charra_verify_log_entries_self_consistent()`,
+`charra_verify_log_matches_quote_pcr_digest()` (renamed from the
+`_quote_r_pcr` name this paragraph originally used), and
+`charra_verify_log_file_hashes_not_blacklisted()` (renamed from
+`_against_policy`) against `log_a`, gated together into "RP Appraisal
+Successful/Failed"; `charra_rp_prepare_evidence()` calls
+`charra_sdk_redact_ima_log()` for real and builds `Quote_r`
+(`charra_rp_build_evidence_message()`, RSA-PSS-signs `pcr_r ||
+verifier_nonce` under the RP's TPM-resident AK). Confirmed live: every
+`relying_party.log` from a live run shows "RP Appraisal Successful" and a
+"RP Privacy Cleaning" block before evidence ever reaches a Verifier.
+
+**Only genuinely unbuilt: EK/AK validation of the Attester.**
+`relying_party.c` has no code that checks the Attester's EK/AK chain at
+all — grepping the file for any Attester-identity check turns up nothing.
+This is the same gap the `/certify_ak` section below tracks (the Attester
+has no `/certify_ak` client yet, so Verifiers currently bypass this check
+too) — see the "Decided (2026-08-17)" note under `/certify_ak`'s "Planned
+end state" for the intended fix: the RP validates the Attester's identity
+itself and relays its `/certify_ak` call, rather than the Attester or the
+Verifier doing it directly.
+
+**Correction — the message-sending step below is done, but not via
+`charra_marshal_rp_appraisal()`.** That function is now dead code: nothing
+in `src/` calls it outside `charra_marshaling.c` itself and its own unit
+test. The design actually shipped as a leaner, separate DTO —
+`msg_rp_evidence_dto`/`charra_marshal_rp_evidence()`/
+`charra_unmarshal_rp_evidence()` — which `charra_rp_build_evidence_message()`
+calls to send `Quote_r`+`log_r`+`Quote_a` onward, and which
+`coap_appraise_handler()` (`verifier.c`) actually unmarshals. See "The real
+RP→Verifier message shape" below for how the two DTOs relate — that
+section documents `msg_rp_appraisal_dto`'s design as originally planned;
+treat it as superseded background, not the current wire format.
+**Untested gap worth knowing about**: `msg_rp_evidence_dto`'s marshal/
+unmarshal pair has no dedicated bounds-check unit test of its own (unlike
+every other message type) — `tests/test_rp_appraisal_marshaling.c` only
+covers the unused `msg_rp_appraisal_dto`. Live/integration runs exercise
+the happy path, but oversized-field rejection isn't independently verified
+for this one.
 
 ### Step 3a/3b item 1: EK/AK certificate validation
 
@@ -860,18 +893,84 @@ including the invoking shell's own script text if it contains the same
 substring (self-matching, self-killing) — use `pkill`/`pgrep` without `-f`,
 or exact PIDs.
 
+### `/certify_ak_of_attester` — Attester AK provisioning, RP-mediated (2026-08-17)
+
+Closes the empty-AK-certificate gap: the Attester now gets a real,
+persistent AK identity, independently certified by **two** CAs (RP's own,
+and one Verifier's, relayed) — neither trusting the other's issuance. The
+Attester and every Verifier stay fully passive throughout; only the RP
+initiates.
+
+**Attester's identity**: dedicated EK (deterministic, mirrors
+`ensure_rp_ak_keypair()`) + AK, both under `state/attester/`. The AK is
+*restricted* (`charra_identity_key_mgr_create_restricted_ak()`, new —
+RP's own `create_ak()` is deliberately unrestricted, see that module's
+header) so it doubles as the real `Quote_a`-signing key
+(`coap_attest_handler()` now loads it instead of the old
+`"PK.RSA.default"` key) — otherwise the certified key and the quoting key
+would be two different keys, and Step 3b's cert-matches-quoting-key check
+could never pass.
+
+**`charra_rp_key_mgr` → `charra_identity_key_mgr`**: the module was
+already fully generic (no RP-specific state), so it was renamed and
+reused as-is by the Attester rather than duplicated.
+
+**One new Attester resource, `/certify_ak_of_attester`**, RP-initiated,
+discriminated by a `kind` field (`FETCH` / `DELIVER_RP` /
+`DELIVER_VERIFIER`) in `msg_certify_ak_of_attester_request_dto`:
+- `FETCH`: Attester responds with EK cert + AK public key + AK name
+  (`msg_ak_identity_response_dto`).
+- `DELIVER_RP`/`DELIVER_VERIFIER`: RP delivers a credential-wrapped signed
+  cert (reuses `msg_certify_ak_response_dto`'s shape); Attester unwraps via
+  `ActivateCredential` + AES-GCM decrypt and persists it.
+
+**RP side** (`ensure_attester_identity_certified()`, runs once per
+process): fetches the identity, then two independent legs:
+- **RP-CA track**: validates the Attester's EK chain itself
+  (`manufacturer-root.crt`) as a hard local gate — aborts the whole cycle
+  on failure. Signs with a new RP CA keypair (`keys/rp-ca.{key,crt}`),
+  wraps via `charra_tpm_make_credential_for_ak()`, records issuance in its
+  own ledger (`state/relying-party/attester-ak-state.txt`), delivers.
+- **Verifier-CA track**: relays the same EK/AK material to **one**
+  Verifier's existing `/certify_ak` (unchanged) and relays the still-
+  encrypted response on to the Attester. Only one Verifier, not all —
+  every `bin/verifier` instance shares one CA key (`keys/verifier-ca.key`,
+  hardcoded, confirmed via `start_verifiers.sh`), so one issuance chain-
+  validates on every instance. Tradeoff: only that one Verifier's local
+  ledger (`state/verifier/ak-provisioning/rp-ak-provisioning-state-<port>.txt`)
+  has a record of it, so Step 3b's Attester-cert check is chain-validation
+  only, no `charra_ak_state_check_serial_valid()` lookup — revocation for
+  this cert isn't tracked per-Verifier as a result. Accepted for a PoC.
+
+**Both certs reach the Verifier**: `msg_attestation_response_dto` and
+`msg_rp_evidence_dto` each carry two fields —
+`ak_certificate_attester_by_verifier` (what Step 3b actually checks) and
+`ak_certificate_attester_by_rp` (forwarded, not independently validated —
+the Verifier has no reason to trust a CA it doesn't recognize; RP's own
+EK-chain check at provisioning time is what vouches for it).
+
+**Verified live**: full 5-verifier sweep (`start_verifiers.sh`-equivalent),
+unanimous `Attestation successful by majority vote! (5/5 Verifiers
+passed)` across every step of the 1..5-verifier benchmark loop, zero
+`ERROR` lines in any of the four entities' logs. New test file
+`tests/test_certify_ak_of_attester_marshaling.c` (24 assertions:
+round-trips for both new DTOs, oversized/wrong-size field rejection).
+
 ### Not yet built (tracked so nothing gets lost between sessions)
 
-- RP-side Step 2a + 2b of the DRA-TLS spec — see "Still genuinely unbuilt"
-  under the message-shape entry above.
-- Real, persistent AK provisioning for both Attester and RP — neither has
-  one yet; `charra_key_mgr.c` still mints a fresh ephemeral primary key per
-  request. This is now the sole remaining blocker on `/appraise` ever
-  succeeding for real (non-bypassed) evidence — Verifier-side checks are
-  complete.
+- ~~RP-side Step 2a + 2b of the DRA-TLS spec~~ **Done, as of 2026-08-17** —
+  `relying_party.c` genuinely runs log self-consistency, PCR-digest replay,
+  file-hash blacklist checks, real redaction, and `Quote_r` generation; see
+  the corrected "Still genuinely unbuilt" entry under the message-shape
+  section above (only the Attester EK/AK-validation piece remains open).
+- ~~Real, persistent AK provisioning: RP has it, Attester does not~~ **Done,
+  2026-08-17** — see "`/certify_ak_of_attester` — Attester AK provisioning,
+  RP-mediated" below. The empty-AK-certificate bypass in
+  `coap_appraise_handler()` is removed; Step 3b now genuinely checks the
+  Attester's AK cert.
 - Real (non-synthetic) EK certificates on the TPM simulator's actual
   endorsement hierarchy — `keys/gen-ak-pki.sh`'s EK certs are plain openssl
-  keys today, not real TPM objects.
+  keys today, not real TPM objects. Still accurate as of 2026-08-17.
 - A manual/administrative AK revocation trigger — out of scope for now; the
   only thing that revokes a record is a fresh renewal for the same EK.
 
@@ -1154,7 +1253,7 @@ glue), then reached a genuine `ATTESTATION SUCCESSFUL` for the first time.
   `ak_certificate_len == 0`: logs a loud `"TEMPORARY"` warning and accepts.
   A non-empty certificate is still validated normally.
 
-**Planned end state (not yet implemented, as of 2026-08-14): the Verifier
+**Planned end state (not yet implemented, as of 2026-08-17): the Verifier
 is *not* meant to grow its own independent Attester EK/AK check to replace
 this bypass.** Intended design: the RP performs EK/AK verification of the
 Attester itself (mirroring how Verifiers validate the RP's own AK cert),
@@ -1167,6 +1266,25 @@ validation." A deliberate trust-boundary shift worth remembering: once
 built, the Attester-identity leg's security becomes fully dependent on the
 RP's honesty/correctness, bigger than the shared-CA-key caveat noted
 elsewhere.
+
+**Decided (2026-08-17): the Attester will never talk to a Verifier
+directly, for `/certify_ak` or anything else.** When the Attester needs its
+AK certified, it talks only to the RP — same as today (Attester is a pure
+passive responder to the RP; it has no CoAP client logic of its own, no
+knowledge of which Verifiers exist). **Implemented as `/certify_ak_of_
+attester`, see that section above** — one correction from this original
+plan: RP relays to only *one* Verifier, not each one, since all instances
+share a single CA key (discovered during implementation, see that
+section's own tradeoff note). This also sidesteps a problem direct-to-
+-Verifier Attester calls would otherwise create: each Verifier is its own
+independent CA, so an Attester with N Verifiers to satisfy would need N
+certs from N different CAs; fanning that out itself would mean duplicating
+the Trust-Manager-lookup-plus-per-Verifier-loop logic the RP already has.
+Consequence worth being explicit about: this extends the RP's existing
+trust role from "verifies the Attester's identity and forwards a signal"
+(above) to "verifies the Attester's identity *and* is the one that obtains
+its Verifier-facing credentials" — not a new category of trust, but the RP
+now sits on both halves of the Attester-identity leg instead of one.
 
 **Result**: a real live run produced `ATTESTATION SUCCESSFUL` end to end —
 both quotes genuinely checked, a 4/5-verifier majority vote surviving a

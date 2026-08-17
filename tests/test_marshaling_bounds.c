@@ -38,19 +38,22 @@ static void check(const char* name, bool condition) {
 }
 
 /**
- * @brief Hand-encode the same 4-byte-string root array
+ * @brief Hand-encode the same 5-byte-string root array
  * charra_marshal_attestation_response() produces, but from raw buffers
  * instead of a msg_attestation_response_dto -- so a field can be made
  * larger than its struct destination allows, which the DTO-based encoder
- * can never do.
+ * can never do. ak_certificate/ak_certificate_len may be NULL/0 -- none of
+ * this file's tests exercise that field's own bounds (it has none, same as
+ * event_log).
  */
 static void encode_raw(const uint8_t* attestation_data, size_t attestation_data_len,
         const uint8_t* tpm2_signature, size_t tpm2_signature_len,
         const uint8_t* tpm2_public_key, size_t tpm2_public_key_len,
-        const uint8_t* event_log, size_t event_log_len, uint8_t** out,
-        size_t* out_len) {
+        const uint8_t* event_log, size_t event_log_len,
+        const uint8_t* ak_certificate, size_t ak_certificate_len,
+        uint8_t** out, size_t* out_len) {
     size_t cap = attestation_data_len + tpm2_signature_len +
-            tpm2_public_key_len + event_log_len + 64;
+            tpm2_public_key_len + event_log_len + ak_certificate_len + 64;
     uint8_t* buf = malloc(cap);
 
     QCBOREncodeContext ec = {0};
@@ -65,6 +68,11 @@ static void encode_raw(const uint8_t* attestation_data, size_t attestation_data_
             (UsefulBufC){.ptr = tpm2_public_key, .len = tpm2_public_key_len});
     QCBOREncode_AddBytes(
             &ec, (UsefulBufC){.ptr = event_log, .len = event_log_len});
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = ak_certificate, .len = ak_certificate_len});
+    /* ak-certificate-attester-by-rp -- always empty, none of this file's
+     * tests exercise it */
+    QCBOREncode_AddBytes(&ec, (UsefulBufC){.ptr = NULL, .len = 0});
     QCBOREncode_CloseArray(&ec);
 
     UsefulBufC buf_out = {0};
@@ -126,7 +134,7 @@ static void test_oversized_attestation_data_rejected(void) {
     uint8_t* raw = NULL;
     size_t raw_len = 0;
     encode_raw(oversized, sizeof(oversized), small, sizeof(small), small,
-            sizeof(small), NULL, 0, &raw, &raw_len);
+            sizeof(small), NULL, 0, NULL, 0, &raw, &raw_len);
 
     msg_attestation_response_dto res = {0};
     CHARRA_RC rc = charra_unmarshal_attestation_response(
@@ -148,7 +156,7 @@ static void test_oversized_tpm2_signature_rejected(void) {
     uint8_t* raw = NULL;
     size_t raw_len = 0;
     encode_raw(small, sizeof(small), oversized, sizeof(oversized), small,
-            sizeof(small), NULL, 0, &raw, &raw_len);
+            sizeof(small), NULL, 0, NULL, 0, &raw, &raw_len);
 
     msg_attestation_response_dto res = {0};
     CHARRA_RC rc = charra_unmarshal_attestation_response(
@@ -170,7 +178,7 @@ static void test_oversized_tpm2_public_key_rejected(void) {
     uint8_t* raw = NULL;
     size_t raw_len = 0;
     encode_raw(small, sizeof(small), small, sizeof(small), oversized,
-            sizeof(oversized), NULL, 0, &raw, &raw_len);
+            sizeof(oversized), NULL, 0, NULL, 0, &raw, &raw_len);
 
     msg_attestation_response_dto res = {0};
     CHARRA_RC rc = charra_unmarshal_attestation_response(
@@ -193,7 +201,7 @@ static void test_large_event_log_still_accepted(void) {
     uint8_t* raw = NULL;
     size_t raw_len = 0;
     encode_raw(small, sizeof(small), small, sizeof(small), small, sizeof(small),
-            big_event_log, sizeof(big_event_log), &raw, &raw_len);
+            big_event_log, sizeof(big_event_log), NULL, 0, &raw, &raw_len);
 
     msg_attestation_response_dto res = {0};
     CHARRA_RC rc = charra_unmarshal_attestation_response(
