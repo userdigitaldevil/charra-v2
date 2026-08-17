@@ -30,7 +30,7 @@ the privacy-preserving redaction scheme from
   - `src/verifier_old.c` — original CHARRA design: active client, drives
     the attest exchange itself and appraises inline. Kept as baseline.
   - `src/verifier.c` — new design: passive CoAP server :31415, resources
-    `nonce` + `appraise` + `certify_ak` + `qualify`/`qualify_submit`, meant
+    `nonce`, `appraise`, `certify_ak`, `qualify` + `qualify_submit`, meant
     to be called by an orchestrator. Logs per-step timing to
     `durations_verifier.txt`.
 - **Trust Manager** (`src/trust_manager.c`, :6000) — new role, the poster's
@@ -43,7 +43,7 @@ the privacy-preserving redaction scheme from
   **once** → fan the same evidence out to all N verifiers in parallel
   (pthreads) → majority vote (`2*num_true > num_verifiers`) on the
   aggregate result. `main()` also doubles as the benchmark harness (sweeps
-  1→5 verifiers, `NUM_RUNS = 10`, writes `timings_RP_multi_verifiers.txt`).
+  1→5 verifiers, `NUM_RUNS = 1`, writes `timings_RP_multi_verifiers.txt`).
   **Also acts as the privacy-preserving proxy** — see Part 2.
 
 Wire protocol: CoAP (UDP, optional DTLS-PSK/RPK) + CBOR (QCBOR), DTOs in
@@ -66,7 +66,7 @@ registered in `verifiers_config.txt` as `id ip port` rows that
 `trust_manager.c` reads to resolve `get_verifiers` requests.
 
 Each Verifier port keeps its own state tree under `state/verifier/` — see
-"`state/` reorganized" in Part 3 for the full layout.
+"`state/` layout (final form)" in Part 3 for the full layout.
 
 **Relying Party internals:**
 - `create_attestation_request()` — generates the shared nonce used across
