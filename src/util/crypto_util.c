@@ -594,6 +594,17 @@ void charra_crypto_log_cert_summary(
             charra_crypto_x509_days_until_expiry(cert));
 }
 
+bool charra_crypto_format_utc_yyyymmddhhmmss(time_t t, char out[15]) {
+    if (out == NULL) {
+        return false;
+    }
+    struct tm tm_utc = {0};
+    if (gmtime_r(&t, &tm_utc) == NULL) {
+        return false;
+    }
+    return strftime(out, 15, "%Y%m%d%H%M%S", &tm_utc) == 14;
+}
+
 bool charra_crypto_parse_utc_yyyymmddhhmmss(const char* s, time_t* out) {
     struct tm tm = {0};
     if (sscanf(s, "%4d%2d%2d%2d%2d%2d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday,

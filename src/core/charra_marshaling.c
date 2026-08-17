@@ -2195,6 +2195,121 @@ CHARRA_RC charra_marshal_qualify_submit_request(
     return charra_r;
 }
 
+static CHARRA_RC charra_marshal_qualify_submit_response_internal(
+        const msg_qualify_submit_response_dto* qualify_submit_response,
+        UsefulBuf buf_in, UsefulBufC* buf_out) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    assert(qualify_submit_response != NULL);
+
+    QCBOREncodeContext ec = {0};
+    QCBOREncode_Init(&ec, buf_in);
+    QCBOREncode_OpenArray(&ec);
+    QCBOREncode_AddUInt64(&ec, qualify_submit_response->qualified);
+    QCBOREncode_AddUInt64(&ec, qualify_submit_response->expires_at);
+    QCBOREncode_CloseArray(&ec);
+
+    if (QCBOREncode_Finish(&ec, buf_out) == QCBOR_SUCCESS) {
+        return CHARRA_RC_SUCCESS;
+    } else {
+        return CHARRA_RC_MARSHALING_ERROR;
+    }
+}
+
+static CHARRA_RC charra_marshal_qualify_submit_response_size(
+        const msg_qualify_submit_response_dto* qualify_submit_response,
+        size_t* marshaled_data_len) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
+    UsefulBuf buf_in = {.len = SIZE_MAX, .ptr = NULL};
+    UsefulBufC buf_out = {0};
+
+    if ((charra_r = charra_marshal_qualify_submit_response_internal(
+                 qualify_submit_response, buf_in, &buf_out)) ==
+            CHARRA_RC_SUCCESS) {
+        *marshaled_data_len = buf_out.len;
+    }
+
+    return charra_r;
+}
+
+CHARRA_RC charra_marshal_qualify_submit_response(
+        const msg_qualify_submit_response_dto* qualify_submit_response,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
+    assert(qualify_submit_response != NULL);
+
+    UsefulBuf buf_in = {.len = 0, .ptr = NULL};
+    if ((charra_r = charra_marshal_qualify_submit_response_size(
+                 qualify_submit_response, &(buf_in.len))) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("Could not compute size of marshaled data.");
+        return charra_r;
+    }
+
+    if ((buf_in.ptr = malloc(buf_in.len)) == NULL) {
+        charra_log_error("Allocating %zu bytes of memory failed.", buf_in.len);
+        return CHARRA_RC_MARSHALING_ERROR;
+    }
+
+    UsefulBufC buf_out = {.len = 0, .ptr = NULL};
+    if ((charra_r = charra_marshal_qualify_submit_response_internal(
+                 qualify_submit_response, buf_in, &buf_out)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("Could not marshal data.");
+        free(buf_in.ptr);
+        return charra_r;
+    }
+
+    *marshaled_data_len = buf_out.len;
+    *marshaled_data = (uint8_t*)buf_out.ptr;
+
+    return charra_r;
+}
+
+CHARRA_RC charra_unmarshal_qualify_submit_response(
+        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
+        msg_qualify_submit_response_dto* qualify_submit_response) {
+    msg_qualify_submit_response_dto res = {0};
+
+    QCBORError cborerr = QCBOR_SUCCESS;
+    UsefulBufC marshaled_data_buf = {marshaled_data, marshaled_data_len};
+    QCBORDecodeContext dc = {0};
+    QCBORItem item = {0};
+
+    QCBORDecode_Init(&dc, marshaled_data_buf, QCBOR_DECODE_MODE_NORMAL);
+
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_ARRAY)))
+        goto cbor_parse_error;
+
+    /* parse "qualified" */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_INT64)))
+        goto cbor_parse_error;
+    res.qualified = (uint32_t)item.val.uint64;
+
+    /* parse "expires-at" */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_INT64)))
+        goto cbor_parse_error;
+    res.expires_at = (uint64_t)item.val.uint64;
+
+    if ((cborerr = QCBORDecode_Finish(&dc))) {
+        charra_log_error("CBOR parser: expected end of input, but could not "
+                         "find it. Continuing.");
+        goto cbor_parse_error;
+    }
+
+    *qualify_submit_response = res;
+    return CHARRA_RC_SUCCESS;
+
+cbor_parse_error:
+    charra_log_error("CBOR parser: %s", qcbor_err_to_str(cborerr));
+    charra_log_info("CBOR parser: skipping parsing.");
+    return CHARRA_RC_MARSHALING_ERROR;
+}
+
 CHARRA_RC charra_unmarshal_qualify_submit_request(
         const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
         msg_qualify_submit_request_dto* qualify_submit_request) {

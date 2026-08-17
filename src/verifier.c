@@ -115,9 +115,15 @@ static char verifier_ca_cert_path_buf[64] = {0};
 static char* verifier_ca_cert_path = "keys/verifier-ca.crt";
 static char verifier_ca_key_path_buf[64] = {0};
 static char* verifier_ca_key_path = "keys/verifier-ca.key";
-/* AK certificate validity window -- fixed test-only window. */
-static const char* ak_cert_not_before_utc = "20240101000000";
-static const char* ak_cert_not_after_utc = "20340101000000";
+/* AK certificate lifetime, as a duration from issuance rather than a
+ * fixed absolute window: with a fixed not_after every certificate this
+ * process ever issues would expire at the same instant, so one issued
+ * late would live for less time than one issued early. Settable with
+ * --ak-validity; the default is the same ~10 years the old hardcoded
+ * 2024-2034 window gave. */
+#define CHARRA_AK_CERT_VALIDITY_SECONDS_DEFAULT (10L * 365 * 24 * 60 * 60)
+static time_t ak_cert_validity_seconds =
+        CHARRA_AK_CERT_VALIDITY_SECONDS_DEFAULT;
 /* Persisted record of AK certificates issued via /certify_ak -- see
  * charra_ak_state.h. Deliberately per-Verifier, NOT shared across every
  * `bin/verifier` instance start_verifiers.sh spawns, now doubly so since
@@ -157,6 +163,12 @@ static char* attester_ak_state_file_path = "state/verifier/ak-provisioning/"
  * already Verifier-agnostic (one RP EK/AK keypair, reused everywhere). */
 static char* qualification_state_file_path =
         "state/verifier/qualification/rp-qualification-state.txt";
+
+/* Qualification window this Verifier grants, settable with
+ * --qualification-validity. Pushed into charra_rp_qualification.c after
+ * CLI parsing; must match the RP's own flag (see that module's header). */
+static time_t qualification_validity_seconds =
+        CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS;
 
 /**
  * @brief SIGINT handler: set quit to 1 for graceful termination.
@@ -241,6 +253,9 @@ int main(int argc, char** argv) {
             .use_ima_event_log = &use_ima_event_log,
             .ima_event_log_path = &ima_event_log_path,
             .dtls_psk_identity = &dtls_psk_identity,
+            .qualification_validity_seconds =
+                    &qualification_validity_seconds,
+            .ak_cert_validity_seconds = &ak_cert_validity_seconds,
         },
     };
 
@@ -254,6 +269,12 @@ int main(int argc, char** argv) {
     /* set CHARRA and libcoap log levels */
     charra_log_set_level(charra_log_level);
     coap_set_log_level(coap_log_level);
+
+    /* The shared module is what actually stamps expires_at into the
+     * ledger, so hand it the effective window now that CLI parsing is
+     * done. */
+    charra_rp_qualification_set_validity_seconds(
+            qualification_validity_seconds);
 
     /* rp_ak_state_file_path/attester_ak_state_file_path are per-port (see
      * their own comments above) -- port is only final once command-line
@@ -1660,6 +1681,21 @@ static CHARRA_RC certify_ak_do_confirm(const msg_certify_ak_request_dto* req,
         goto cleanup;
     }
 
+    /* Validity runs from now, so every issuance gets the full window. */
+    time_t ak_cert_issued_at = time(NULL);
+    time_t ak_cert_expires_at = ak_cert_issued_at + ak_cert_validity_seconds;
+    char ak_cert_not_before_utc[15] = {0};
+    char ak_cert_not_after_utc[15] = {0};
+    if (!charra_crypto_format_utc_yyyymmddhhmmss(
+                ak_cert_issued_at, ak_cert_not_before_utc) ||
+            !charra_crypto_format_utc_yyyymmddhhmmss(
+                    ak_cert_expires_at, ak_cert_not_after_utc)) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: could not format AK "
+                         "certificate validity window.");
+        charra_r = CHARRA_RC_ERROR;
+        goto cleanup;
+    }
+
     uint8_t ak_cert_serial[16] = {0};
     if ((charra_r = charra_crypto_sign_ak_certificate(
                  (TPM2B_PUBLIC*)challenge.ak_public_key, "CN=CHARRA AK",
@@ -1688,14 +1724,8 @@ static CHARRA_RC certify_ak_do_confirm(const msg_certify_ak_request_dto* req,
     /* --- record the issuance, revoking any prior one for this identity.
      * Only reachable past the proof above, so a request that can't answer
      * the challenge can no longer revoke a working certificate. */
-    time_t ak_cert_expires_at = 0;
-    if (!charra_crypto_parse_utc_yyyymmddhhmmss(
-                ak_cert_not_after_utc, &ak_cert_expires_at)) {
-        charra_log_error("[" LOG_NAME "] /certify_ak: could not parse AK "
-                         "certificate expiry for state tracking.");
-        charra_r = CHARRA_RC_ERROR;
-        goto cleanup;
-    }
+    /* ak_cert_expires_at is already the exact value stamped into the
+     * certificate above -- no need to parse the string back out. */
     {
         charra_ak_state_record* existing_records = NULL;
         uint32_t existing_count = 0;
@@ -1989,6 +2019,9 @@ static void coap_qualify_submit_handler(struct coap_resource_t* resource,
      * coap_certify_ak_handler() above uses */
     msg_qualify_submit_request_dto req = {0};
     char* verifier_ca_cert_der = NULL;
+    /* Verdict + the deadline actually granted -- the RP has no other
+     * way to learn the window this Verifier chose. */
+    msg_qualify_submit_response_dto submit_response = {0};
     size_t verifier_ca_cert_der_len = 0;
 
     size_t data_len = 0;
@@ -2131,6 +2164,9 @@ static void coap_qualify_submit_handler(struct coap_resource_t* resource,
                 (long)(qualification_state.expires_at - time(NULL)));
         response_code = COAP_RESPONSE_CODE_CONTENT;
         message = "Qualification successful!\0";
+        submit_response.qualified = 1;
+        submit_response.expires_at =
+                (uint64_t)qualification_state.expires_at;
     } else {
         char ek_fingerprint_hex[17] = {0};
         hex_prefix(ek_fingerprint, sizeof(ek_fingerprint), ek_fingerprint_hex,
@@ -2145,17 +2181,31 @@ static void coap_qualify_submit_handler(struct coap_resource_t* resource,
 
 cleanup:
     coap_pdu_set_code(response, response_code);
-    if ((coap_r = coap_add_data_large_response(resource, session, request,
-                 response, query, COAP_MEDIATYPE_TEXT_PLAIN, -1, 0,
-                 strlen(message), (const uint8_t*)message, NULL,
-                 (void*)strlen(message))) == 0) {
-        charra_log_error("[" LOG_NAME "] /qualify/submit: Error invoking "
-                         "coap_add_data_large_response().");
+    /* The human-readable message stays in the log; the wire now carries
+     * the structured verdict so RP need not assume the window. */
+    charra_log_info("[" LOG_NAME "] /qualify/submit: %s", message);
+    {
+        uint8_t* submit_resp_buf = NULL;
+        uint32_t submit_resp_buf_len = 0;
+        if (charra_marshal_qualify_submit_response(&submit_response,
+                    &submit_resp_buf_len, &submit_resp_buf) !=
+                CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] /qualify/submit: could not "
+                             "marshal response.");
+            coap_pdu_set_code(response, COAP_RESPONSE_CODE_INTERNAL_ERROR);
+        } else if ((coap_r = coap_add_data_large_response(resource, session,
+                            request, response, query,
+                            COAP_MEDIATYPE_APPLICATION_CBOR, -1, 0,
+                            submit_resp_buf_len, submit_resp_buf,
+                            release_response_data, submit_resp_buf)) == 0) {
+            charra_log_error("[" LOG_NAME "] /qualify/submit: error "
+                             "invoking coap_add_data_large_response().");
+            free(submit_resp_buf);
+        }
     }
-    /* submitted_redacted_log/ak_certificate_rp are heap-allocated by
-     * charra_unmarshal_qualify_submit_request(), unlike msg_rp_evidence_
-     * dto's borrowed-pointer convention -- this handler's own to free */
     charra_free_if_not_null(req.submitted_redacted_log);
     charra_free_if_not_null(req.ak_certificate_rp);
     charra_io_free_file_buffer(&verifier_ca_cert_der);
+    return;
 }
+

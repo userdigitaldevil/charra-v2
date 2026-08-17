@@ -285,6 +285,21 @@ CHARRA_RC charra_unmarshal_qualify_submit_request(
         msg_qualify_submit_request_dto* qualify_submit_request);
 
 /**
+ * @brief Marshals a /qualify/submit response DTO (verdict + granted
+ * expiry) into CBOR. See msg_qualify_submit_response_dto in charra_dto.h.
+ */
+CHARRA_RC charra_marshal_qualify_submit_response(
+        const msg_qualify_submit_response_dto* qualify_submit_response,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data);
+
+/**
+ * @brief Unmarshals a /qualify/submit response DTO from CBOR.
+ */
+CHARRA_RC charra_unmarshal_qualify_submit_response(
+        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
+        msg_qualify_submit_response_dto* qualify_submit_response);
+
+/**
  * @brief Marshals a /get_verifiers request DTO (see
  * msg_get_verifiers_request_dto in charra_dto.h) -- replaces the raw,
  * hand-packed `int[]` layout relying_party.c and trust_manager.c used to

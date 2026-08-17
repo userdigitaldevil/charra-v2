@@ -42,9 +42,12 @@ the privacy-preserving redaction scheme from
   Trust Manager to resolve N verifiers → get evidence from the Attester
   **once** → fan the same evidence out to all N verifiers in parallel
   (pthreads) → majority vote (`2*num_true > num_verifiers`) on the
-  aggregate result. `main()` also doubles as the benchmark harness (sweeps
-  1→5 verifiers, `NUM_RUNS = 1`, writes `timings_RP_multi_verifiers.txt`).
-  **Also acts as the privacy-preserving proxy** — see Part 2.
+  aggregate result. Runs that cycle in a **loop by default** (daemon mode:
+  attest, renew qualification if it is near expiry, sleep `--interval`,
+  repeat until SIGINT); `--benchmark` selects the bounded 1→5-verifier
+  timing sweep (`NUM_RUNS = 1`, writes `timings_RP_multi_verifiers.txt`)
+  and exits instead. **Also acts as the privacy-preserving proxy** — see
+  Part 2.
 
 Wire protocol: CoAP (UDP, optional DTLS-PSK/RPK) + CBOR (QCBOR), DTOs in
 `src/core/charra_dto.h`, encode/decode in `src/core/charra_marshaling.c`,
@@ -55,11 +58,11 @@ defined only by struct order, no schema self-description on the wire.
 
 | Role | File | Port | CoAP resource(s) | Timing log |
 |---|---|---|---|---|
-| Attester | `src/attester.c` | 5683 | `attest` (FETCH) | `timings_attester.txt` |
+| Attester | `src/attester.c` | 5683 | `attest`, `certify_ak_of_attester` (both FETCH) | `timings_attester.txt` |
 | Verifier (new, passive) | `src/verifier.c` | 31415 | `nonce`, `appraise`, `certify_ak`, `qualify`, `qualify_submit` | `durations_verifier.txt` |
 | Verifier (old, active — baseline) | `src/verifier_old.c` | n/a (client) | — (calls Attester's `attest`) | `timings_verifier.txt` |
 | Trust Manager | `src/trust_manager.c` | 6000 | `get_verifiers` | — |
-| Relying Party | `src/relying_party.c` | n/a (client) | — (calls Trust Manager + Attester + each Verifier) | `timings_RP_multi_verifiers.txt` |
+| Relying Party | `src/relying_party.c` | n/a (client) | — (calls Trust Manager + Attester + each Verifier) | `timings_RP_multi_verifiers.txt` (`--benchmark` only) |
 
 `start_verifiers.sh` spawns 5 `bin/verifier` instances on ports 5684–5693,
 registered in `verifiers_config.txt` as `id ip port` rows that
@@ -158,8 +161,10 @@ majority vote is this team's own extension, not RATS-native:
 ### Known doc/code drift (pre-existing)
 
 - `charra-ressources/charra2-manual.md` references tuning a
-  `num_used_verifiers` variable — no longer exists; code hardcodes the 1→5
-  sweep + `NUM_RUNS = 10`.
+  `num_used_verifiers` variable — no longer exists under that name, but the
+  capability is back: `--verifiers COUNT` sets how many Verifiers each
+  daemon-mode cycle uses. Only `--benchmark` still hardcodes the 1→5 sweep
+  (at `NUM_RUNS = 1`, not the manual's 10).
 - Multi-attester support (heterogeneous testbeds) is mentioned on the poster
   but not found in `src/` — likely Docker/deployment-level if it exists.
 
@@ -331,8 +336,8 @@ four appear in the spec text above.
 RP is the sole active party throughout this whole flow — Attester and
 every Verifier are pure passive responders, never initiating anything
 themselves (see "Decided" note under `/certify_ak_of_attester`). The
-actual order `relying_party.c`'s `main()` runs things in, one attestation
-cycle:
+actual order `run_one_attestation_cycle()` runs things in, for one cycle
+(daemon mode repeats this on a timer — see "RP daemon mode" below):
 
 1. **`/get_verifiers` (Trust Manager)** — resolve this round's Verifier
    IDs to IP/port (`get_verifiers()`). A static config lookup, nothing
@@ -1548,18 +1553,28 @@ checks pass independently; full suite still passes.
 
 ### RP now caches its own qualification client-side, and Verifier explains *why* `/appraise` was rejected
 
-Prompted by: *if the RP process is short-lived (the benchmark harness runs
-and exits), is the 24h qualification validity window actually doing
-anything?* Answer: not by itself — the persisted expiry on the Verifier
-side was real, but nothing on the RP side ever *acted* on remaining
-validity; it re-ran the full `/qualify`+`/qualify_submit` round trip
-unconditionally every cycle, both within and across process runs.
+Prompted by: *if the RP process is short-lived (back when `main()` only ran
+the benchmark sweep and exited), is the qualification validity window
+(24h at the time; 5 min by default now, and the Verifier's to set via
+`--qualification-validity`) actually doing anything?* Answer: not by itself — the persisted expiry on
+the Verifier side was real, but nothing on the RP side ever *acted* on
+remaining validity; it re-ran the full `/qualify`+`/qualify_submit` round
+trip unconditionally every cycle, both within and across process runs.
+(The cache below is what made the window mean something; daemon mode later
+built on it again — see "RP daemon mode" for the idle-window renewal that
+keeps a near-expiry `/qualify` out of the attestation path entirely.)
 
-**Fix, part 1 — RP-side cache**: `rp_qualified_until[MAX_VERIFIERS]`,
-backed by a per-Verifier file (`rp-qualification-until-<port>.txt`, one
-decimal Unix timestamp). `rp_perform_qualification_handshake()` checks it
-first (re-checked against the wall clock every call), short-circuiting to
-success when still valid.
+**Fix, part 1 — RP-side cache**: originally
+`rp_qualified_until[MAX_VERIFIERS]`, backed by a per-Verifier file
+(`rp-qualification-until-<port>.txt`, one decimal Unix timestamp).
+`rp_perform_qualification_handshake_once()` checks it first (re-checked
+against the wall clock every call), short-circuiting to success when still
+valid. *Both later collapsed to a single value and a single
+`rp-qualification-until.txt`* once the Verifier-side ledger became shared
+across instances — qualifying with one Verifier qualifies with all of them
+— see "RP qualification is now identity-bound and persisted" below. The
+deadline itself is no longer computed locally at all: the Verifier reports
+it on the wire (see "RP daemon mode").
 
 **A bug this introduced, caught before shipping**: the first version also
 skipped `ensure_rp_ak_certificate()` on a cache hit, but
@@ -1589,6 +1604,115 @@ cycle correctly reuses the freshly-earned cache. Full suite, 0 regressions.
 `.gitignore` updated for `rp-qualification-until-*.txt` at the time; now
 moot — see "state/ layout (final form)" above, `.gitignore` ignores
 `state/` wholesale.
+
+### RP daemon mode
+
+`relying_party.c`'s `main()` used to be only a benchmark harness: sweep
+1→5 Verifiers, write `timings_RP_multi_verifiers.txt`, exit. That made the
+qualification validity window largely theoretical — the process rarely
+outlived one grant. RP now runs a real loop by default:
+
+```
+while (!quit) {
+    run_one_attestation_cycle(--verifiers);
+    stop if --cycles reached;
+    renew qualification if it expires within --qualify-margin;  /* idle */
+    interruptible_sleep(min(--interval, time left of --duration));
+    stop if --duration elapsed;
+}
+```
+
+`--benchmark` selects the original sweep instead (unchanged output, still
+what `plot_multi_verifiers.py` reads). Both modes call the same
+`run_one_attestation_cycle()`, so they cannot drift apart. `quit`/SIGINT
+were already declared but never checked — dead code inherited from
+upstream's own commented-out `TODO(any): Enable periodic attestations`
+scaffold in `verifier.c`; now actually wired, and the sleep runs in
+1-second steps so Ctrl+C responds within a second.
+
+**Stopping it.** Unbounded by default. `--duration SECONDS` and
+`--cycles COUNT` both bound the run and exit through *exactly* the same
+path as a signal, so shutdown stays one code path rather than three; the
+final log line reports which of the three ended it. The nap is clamped to
+whatever remains of `--duration`, so `--duration 30 --interval 60` stops at
+~30s instead of overshooting by a full interval, and `--cycles` is
+evaluated after a completed cycle, so `--cycles 3` means three finished
+attestations. **SIGTERM shares the SIGINT handler**: `timeout`,
+`docker stop` and systemd all send SIGTERM, and without that they
+hard-killed the process straight past the cleanup that releases the last
+cycle's evidence buffers.
+
+**Why no dedicated qualification thread**: qualification only matters *at
+attestation time*, so refreshing it in the idle window after each cycle is
+always sufficient — a timer thread would add locking for no correctness
+gain. The renewal is deliberately placed *after* the attestation rather
+than before, so a near-expiry `/qualify` never lands inside one.
+
+**Three coupled durations**, which must satisfy
+`--interval < --qualify-margin < qualification validity` (defaults
+`60 < 120 < 300`):
+- margin > interval: the renewal check runs once per iteration, so a
+  smaller margin lets the loop step over the window and land past expiry.
+- margin < validity: a margin covering the whole window is never
+  satisfiable, so RP would renew on every idle pass.
+`parse_rp_command_line()` warns on the first; the second is checked where
+the window is actually learned (below), not at parse time.
+
+**The qualification window moved onto the wire.** It is the Verifier's
+parameter — it is what stamps `expires_at` into its own ledger — so
+`--qualification-validity` lives on `bin/verifier` alone. Previously
+`/qualify/submit` answered with a bare status string, forcing RP to
+*assume* the same compile-time constant to size its client-side cache: a
+silent contract between two separate binaries. New
+`msg_qualify_submit_response_dto` (`{qualified, expires_at}`, CBOR) carries
+the granted deadline, RP uses it verbatim, and RP has no validity flag at
+all. The human-readable message stayed, but only in the Verifier's log.
+
+**AK certificate validity became a duration**, `--ak-validity` on the
+Verifier (certificates it issues via `/certify_ak`) and
+`--attester-ak-validity` on RP (the Attester certificate RP signs under its
+own CA). These are independent — unlike the qualification window, an X.509
+certificate carries its own `notAfter`, so consumers read the real value
+and the two never need to agree. Both replaced the hardcoded absolute
+`20240101000000`–`20340101000000` pair, which was wrong for a long-running
+issuer: with a fixed `notAfter`, a certificate issued later simply lives
+for less time. New `charra_crypto_format_utc_yyyymmddhhmmss()` (inverse of
+the existing parser) formats `now`/`now + validity` at issuance.
+
+**Daemon-safety fixes found while building this:**
+- **Per-cycle leak**: `charra_unmarshal_attestation_response()` heap-
+  allocates `event_log` plus both Attester AK certificates (~6 KB), and
+  `last_response = res` overwrote the previous cycle's pointers wholesale.
+  Harmless when the process exited immediately; ~8.6 MB/day at a 60s
+  interval otherwise. Added `charra_free_attestation_response()`, called
+  before the assignment and on the appraisal-failure path where `res`
+  never reaches `last_response`.
+- **`coap_cleanup()`** tears down libcoap's *global* state but was called
+  per cycle from three places, including each Verifier thread. Now called
+  once, at process exit.
+
+**Leak-verified under valgrind**, since "it compiles and runs" says nothing
+about a process meant to stay up for weeks: 111 cycles / 111 unanimous
+votes / 11 qualification renewals at `--interval 1 --verifiers 2`, with
+`definitely lost: 0, indirectly lost: 0, possibly lost: 0` — 75,055 allocs
+against 75,050 frees over 30.4 MB churned, the 5-block difference being the
+constant `still reachable` libcoap/OpenSSL globals rather than growth. The
+same run before the `last_response` fix would have orphaned roughly 666 KB
+(111 x ~6 KB). Note the run also reports `ERROR SUMMARY: 2 errors from 2
+contexts` — not leaks (leak counts are all zero); uninvestigated, and
+tracked as such rather than claimed clean.
+
+**Verified live**: 7 daemon cycles, 7/7 unanimous votes, clean SIGINT
+shutdown; with `bin/verifier --qualification-validity 90 --ak-validity 600`
+and `bin/relying_party --interval 15 --qualify-margin 40
+--attester-ak-validity 900`, RP logged `90 second(s) from now, as granted
+by this Verifier` (never the 300s default, confirming the value crosses the
+wire), and `openssl x509 -dates` showed exactly 600s and 900s spans on the
+two issued certificates. A logging bug surfaced here first: the "valid
+until" line printed the compile-time constant rather than the granted
+value, which looked exactly like the flag being ignored — the countdown
+values (max 74s, not ~285s) are what showed the behaviour was already
+correct.
 
 ### `tests/test_rp_appraisal_marshaling.c` — 17 assertions
 

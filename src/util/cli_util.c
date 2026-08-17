@@ -43,7 +43,9 @@ static const struct option verifier_options[] = {
         {"peer-public-key", required_argument, 0, '3'},
         {"verify-peer", required_argument, 0, '4'},
         {"ip", required_argument, 0, 'a'}, {"port", required_argument, 0, 'b'},
-        {"ima", optional_argument, 0, 'm'}, {0}};
+        {"ima", optional_argument, 0, 'm'},
+        {"qualification-validity", required_argument, 0, '5'},
+        {"ak-validity", required_argument, 0, '6'}, {0}};
 
 static const struct option attester_options[] = {
         {"verbose", no_argument, 0, 'v'},
@@ -94,6 +96,16 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
                 printf("     --port=PORT:                Connect to PORT "
                        "instead of default port %u.\n",
                         *(variables->common_config.port));
+                printf("     --qualification-validity=SECONDS: How long a\n"
+                       "                                 passed RP qualification stays "
+                       "valid. Must match the RP's own flag. Default %ld.\n",
+                        (long)*(variables->verifier_config
+                                        .qualification_validity_seconds));
+                printf("     --ak-validity=SECONDS:      Lifetime of AK "
+                       "certificates this Verifier issues, measured from "
+                       "issuance. Default %ld.\n",
+                        (long)*(variables->verifier_config
+                                        .ak_cert_validity_seconds));
                 // printf(" -t, --timeout=SECONDS:          Wait up to SECONDS "
                 //        "for the attestation answer. Default is %d seconds.\n",
                 //         *(variables->verifier_config.timeout));
@@ -301,7 +313,35 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
             continue;
         }
 
-        if (caller == VERIFIER && identifier == 'a') {  // set IP address
+        if (caller == VERIFIER && identifier == '6') {
+            // set AK certificate lifetime
+            char* end = NULL;
+            errno = 0;
+            long value = strtol(optarg, &end, 10);
+            if (errno != 0 || end == optarg || *end != '\0' ||
+                    value <= 0) {
+                charra_log_error("[%s] Invalid --ak-validity '%s' "
+                                 "(expected a positive integer).",
+                        log_name, optarg);
+                return -1;
+            }
+            *(variables->verifier_config.ak_cert_validity_seconds) =
+                    (time_t)value;
+        } else if (caller == VERIFIER && identifier == '5') {
+            // set qualification validity window
+            char* end = NULL;
+            errno = 0;
+            long value = strtol(optarg, &end, 10);
+            if (errno != 0 || end == optarg || *end != '\0' ||
+                    value <= 0) {
+                charra_log_error("[%s] Invalid --qualification-validity "
+                                 "'%s' (expected a positive integer).",
+                        log_name, optarg);
+                return -1;
+            }
+            *(variables->verifier_config.qualification_validity_seconds) =
+                    (time_t)value;
+        } else if (caller == VERIFIER && identifier == 'a') {  // set IP address
             // int argument_length = strlen(optarg);
             // if (argument_length > 15) {
             //     charra_log_error(

@@ -26,8 +26,39 @@
 #include "../common/charra_error.h"
 #include "charra_sdk.h"
 
-/** How long a passed qualification stays valid before re-check is required. */
-#define CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS (24 * 60 * 60)
+/** Default for how long a passed qualification stays valid before re-check
+ * is required; override at runtime with
+ * charra_rp_qualification_set_validity_seconds().
+ *
+ * Short on purpose: the point of qualification is ongoing assurance that
+ * the RP still runs the correct PATH_Clean SDK, and a day-long grant makes
+ * that a once-a-day check. It also has to stay larger than
+ * relying_party.c's RP_DEFAULT_QUALIFY_MARGIN_S -- a margin at or above
+ * this window can never be satisfied, so RP would renew on every idle pass
+ * and the cache would stop meaning anything. Both are checked against each
+ * other at startup (see parse_rp_command_line()). */
+#define CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS (5 * 60)
+
+/**
+ * @brief Set/get the qualification validity window actually in force.
+ *
+ * Deliberately a runtime value rather than the compile-time macro alone:
+ * the window is a contract between two *separate* binaries -- the Verifier
+ * writes `expires_at` into its ledger from it, and the RP independently
+ * computes the same deadline for its own client-side cache (nothing on the
+ * wire carries the expiry: `/qualify/submit` answers with a bare status
+ * string). Both therefore expose the same `--qualification-validity` flag
+ * and must be given matching values.
+ *
+ * A mismatch is self-correcting rather than fatal, which is why this is a
+ * flag on both sides instead of a wire-format change: if the RP over-
+ * estimates, the Verifier rejects the next `/appraise` with "qualification
+ * expired" and RP's existing retry path (see rp_qualification_rejected)
+ * re-qualifies and resubmits; if it under-estimates, it merely re-qualifies
+ * earlier than it had to.
+ */
+void charra_rp_qualification_set_validity_seconds(time_t seconds);
+time_t charra_rp_qualification_get_validity_seconds(void);
 
 /**
  * @brief One RP's qualification round: the golden answer plus pass/fail

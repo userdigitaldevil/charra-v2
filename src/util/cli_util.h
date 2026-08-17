@@ -21,6 +21,7 @@
 #include "../common/charra_log.h"
 #include <coap3/coap.h>
 #include <stdbool.h>
+#include <time.h>
 
 typedef enum {
     VERIFIER,
@@ -65,6 +66,13 @@ typedef struct {
     bool* use_ima_event_log;
     char** ima_event_log_path;
     char** dtls_psk_identity;
+    /* Qualification window this Verifier grants, in seconds. Must
+     * match the RP's own --qualification-validity: nothing on the
+     * wire carries the expiry (see charra_rp_qualification.h). */
+    time_t* qualification_validity_seconds;
+    /* Lifetime of AK certificates this Verifier issues, in seconds
+     * from issuance (see --ak-validity). */
+    time_t* ak_cert_validity_seconds;
 } cli_config_verifier;
 
 /**

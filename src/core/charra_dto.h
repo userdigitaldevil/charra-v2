@@ -455,6 +455,28 @@ typedef struct {
 } msg_qualify_submit_request_dto;
 
 /**
+ * /qualify/submit response: the Verifier's verdict plus the deadline it
+ * actually granted.
+ *
+ * expires_at is on the wire deliberately. The Verifier is the sole issuer
+ * of a qualification grant -- it is what writes expires_at into its own
+ * ledger -- so the window is its parameter to choose
+ * (--qualification-validity). Previously this response was a bare status
+ * string, which forced the RP to *assume* the same window from a
+ * compile-time constant in order to size its own client-side cache: a
+ * silent contract between two separate binaries that broke the moment
+ * either side changed it. Carrying the deadline here removes the
+ * assumption, and with it the need for any matching flag on the RP.
+ */
+typedef struct {
+    /** 1 = qualified, 0 = not qualified. */
+    uint32_t qualified;
+    /** Absolute epoch seconds the grant is valid until; 0 when not
+     * qualified. */
+    uint64_t expires_at;
+} msg_qualify_submit_response_dto;
+
+/**
  * /get_verifiers request: RP -> Trust Manager, which Verifier IDs (the
  * numbering used as the first column of Trust Manager's own
  * verifiers_config.txt) to resolve to IP:port.

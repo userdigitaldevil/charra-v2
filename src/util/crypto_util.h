@@ -237,6 +237,21 @@ void charra_crypto_log_cert_summary(
 bool charra_crypto_parse_utc_yyyymmddhhmmss(const char* s, time_t* out);
 
 /**
+ * @brief Formats a time_t as the "YYYYMMDDHHMMSS" UTC string
+ * charra_crypto_sign_ak_certificate() expects -- the inverse of
+ * charra_crypto_parse_utc_yyyymmddhhmmss() above.
+ *
+ * Lets certificate validity be expressed as a duration from issuance
+ * (now -> now + validity) rather than a fixed absolute window: with a fixed
+ * not_after, a certificate issued later simply lives for less time, which
+ * is wrong once the issuer is a long-running process.
+ *
+ * @param[out] out receives 14 characters plus a NUL terminator.
+ * @returns true on success.
+ */
+bool charra_crypto_format_utc_yyyymmddhhmmss(time_t t, char out[15]);
+
+/**
  * @brief Confirm a certificate's embedded RSA public key is the same key
  * as a TPM2B_PUBLIC -- ties "this certificate is valid" to "this
  * certificate actually vouches for the key that signed this specific

@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <coap3/coap.h>
+#include <errno.h>
 #include <getopt.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -33,6 +34,38 @@
 
 /* measurement config */
 #define NUM_RUNS 1
+
+/* --- daemon-mode config (see parse_rp_command_line()) -------------------
+ * RP's default mode is a long-running loop: attest, renew qualification if
+ * it is close to expiring, sleep, repeat -- until SIGINT. `--benchmark`
+ * selects the original bounded 1..5-Verifier timing sweep instead, which is
+ * what produces timings_RP_multi_verifiers.txt for plot_multi_verifiers.py.
+ *
+ * Three coupled values, and the defaults must satisfy
+ *   interval < margin < CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS
+ * (currently 60 < 120 < 300):
+ *  - margin > interval, because the renewal check runs once per loop
+ *    iteration -- with margin <= interval the loop can step straight over
+ *    the renewal window and land past expiry, paying for /qualify inside an
+ *    attestation anyway, which is exactly what the margin exists to avoid.
+ *  - margin < validity, because a margin at or above the whole validity
+ *    window is never satisfiable, so RP would renew on every idle pass and
+ *    the qualification cache would stop meaning anything.
+ * parse_rp_command_line() warns if an override breaks either bound. */
+#define RP_DEFAULT_ATTESTATION_INTERVAL_S 60
+#define RP_DEFAULT_QUALIFY_MARGIN_S 120
+#define RP_DEFAULT_NUM_VERIFIERS 5
+#define RP_MAX_SWEEP_VERIFIERS 5
+static bool rp_benchmark_mode = false;
+static unsigned int rp_attestation_interval_s =
+        RP_DEFAULT_ATTESTATION_INTERVAL_S;
+static unsigned int rp_qualify_margin_s = RP_DEFAULT_QUALIFY_MARGIN_S;
+static int rp_num_verifiers = RP_DEFAULT_NUM_VERIFIERS;
+/* Optional daemon stop conditions; 0 = unbounded (run until signalled).
+ * Both exit through exactly the same path as a signal, so shutdown stays
+ * one code path rather than three. */
+static unsigned int rp_duration_s = 0;
+static unsigned long rp_max_cycles = 0;
 
 /* logging and coap config */ 
 #define CHARRA_UNUSED __attribute__((unused))
@@ -177,8 +210,17 @@ static CHARRA_RC certify_ak_rc = CHARRA_RC_ERROR;
  *     Verifier's own thread, not once globally. */
 static char* rp_ca_cert_path = "keys/rp-ca.crt";
 static char* rp_ca_key_path = "keys/rp-ca.key";
-static const char* attester_ak_cert_not_before_utc = "20240101000000";
-static const char* attester_ak_cert_not_after_utc = "20340101000000";
+/* Lifetime of the Attester AK certificate RP issues under its own CA,
+ * as a duration from issuance rather than a fixed absolute window (see
+ * verifier.c's ak_cert_validity_seconds for why). Settable with
+ * --attester-ak-validity; default matches the old 2024-2034 window.
+ * Independent of the Verifier's own --ak-validity: that one covers the
+ * certificates the Verifier issues, this one only the Attester
+ * certificate RP signs itself. Each certificate carries its own
+ * notAfter, so the two never need to agree. */
+#define RP_AK_CERT_VALIDITY_SECONDS_DEFAULT (10L * 365 * 24 * 60 * 60)
+static time_t attester_ak_cert_validity_seconds =
+        RP_AK_CERT_VALIDITY_SECONDS_DEFAULT;
 static char* attester_ak_state_file_path =
         "state/relying-party/ak-provisioning/attester-ak-state.txt";
 /* Cache for the RP-issued leg only -- RP genuinely holds the plaintext for
@@ -252,6 +294,9 @@ static uint8_t qualify_challenge_salt[CHARRA_SDK_PATH_SALT_LEN] = {0};
 static CHARRA_RC qualify_response_rc = CHARRA_RC_ERROR;
 static bool processing_qualify_response = false;
 static bool qualify_submit_qualified = false;
+/* Deadline the Verifier reported granting, straight off the wire --
+ * authoritative, unlike the old "assume the same constant" approach. */
+static time_t qualify_submit_expires_at = 0;
 static bool processing_qualify_submit_response = false;
 /* RP's own client-side qualification cache: "qualified until when",
  * persisted to rp-qualification-until.txt so a fresh RP process doesn't
@@ -385,6 +430,11 @@ static CHARRA_RC charra_rp_prepare_evidence(void);
 /** @brief Frees what charra_rp_prepare_evidence() allocated. */
 static void charra_rp_release_evidence(void);
 
+/** @brief See its own definition's docstring. Forward-declared because
+ * main()'s shutdown path frees the final cycle's evidence. */
+static void charra_free_attestation_response(
+        msg_attestation_response_dto* res);
+
 static coap_response_t coap_verifier_handler_nonce(coap_session_t* session,
         const coap_pdu_t* sent CHARRA_UNUSED, const coap_pdu_t* received,
         const coap_mid_t mid CHARRA_UNUSED);
@@ -510,13 +560,20 @@ static coap_response_t coap_qualify_submit_response_handler(
  * verdict would be identical everywhere.
  *
  * @param[in] num_verifiers how many entries of verifiers[] to try.
+ * @param[in] refresh_margin_seconds treat a qualification that expires
+ * within this many seconds as already needing renewal. 0 = the literal
+ * "only if actually expired" behaviour, which is what the attestation path
+ * wants (it must qualify, but has no reason to renew early). Daemon mode
+ * passes a non-zero margin from its idle window instead, so a renewal
+ * never lands in the middle of an attestation -- see rp_qualify_margin_s.
  * @returns CHARRA_RC_SUCCESS if already cached as qualified, or if some
  * Verifier's /qualify/submit response reports the RP as qualified (and
  * caches that). Any other outcome (every Verifier unreachable, or a
  * genuine "not qualified" verdict) returns a non-success code -- the
  * caller decides whether that's fatal.
  */
-static CHARRA_RC rp_perform_qualification_handshake_once(int num_verifiers);
+static CHARRA_RC rp_perform_qualification_handshake_once(
+        int num_verifiers, time_t refresh_margin_seconds);
 
 CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers);
 
@@ -548,31 +605,325 @@ void calculate_stats(double* durations, int num_runs, double* avg, double* stdde
     *stddev = sqrt(variance_sum / num_runs);
 }
 
-int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
-    CHARRA_RC result = EXIT_FAILURE;
-    FILE *timing_file = fopen("timings_RP_multi_verifiers.txt", "w");
-    if (timing_file == NULL) {
-        perror("fopen");
-        return EXIT_FAILURE;
+/* --- daemon mode -------------------------------------------------------- */
+
+/** Per-cycle phase timings, filled by run_one_attestation_cycle() for the
+ * benchmark sweep. Daemon mode passes NULL -- it logs each phase's duration
+ * but has no stats file to accumulate them into. */
+typedef struct {
+    double verifiers;
+    double evidence;
+    double appraisal;
+} rp_cycle_timing;
+
+/**
+ * @brief One complete attestation cycle: resolve Verifiers, ensure the
+ * Attester's identity, fetch and locally appraise its evidence, then
+ * privacy-clean and submit to every Verifier.
+ *
+ * Shared by both modes so they can never drift apart -- the daemon runs
+ * exactly the sequence the benchmark measures. Everything expensive inside
+ * (RP AK keypair/certificates, Attester identity, qualification) is cached
+ * by its own ensure_* or cache check, so repeat cycles skip straight to
+ * /attest -> /nonce -> /appraise.
+ */
+static CHARRA_RC run_one_attestation_cycle(
+        int num_verifiers, const char* label, rp_cycle_timing* timing) {
+    CHARRA_RC result = CHARRA_RC_SUCCESS;
+    struct timespec start_time, end_time;
+    double duration = 0.0;
+
+    for (int i = 0; i < num_verifiers; i++) {
+        verifier_list[i] = i + 1;
     }
 
-    signal(SIGINT, handle_sigint);
+    /* Clear delimiter between cycles -- without it every cycle's log lines
+     * run together with no way to tell where one attempt ends and the next
+     * begins. */
+    charra_log_info("[" LOG_NAME
+                    "] ============================================================");
+    charra_log_info("[" LOG_NAME
+                    "] Starting new attestation run with %d verifier(s) (%s).",
+            num_verifiers, label);
+    charra_log_info("[" LOG_NAME
+                    "] ============================================================");
 
-    /* apply log level from environment (the other binaries do this in their
-     * own main(); without it the log module keeps its zero-initialized
-     * default of CHARRA_LOG_TRACE and LOG_LEVEL_CHARRA is ignored) */
+    /* Getting verifiers */
+    charra_log_info("[" LOG_NAME "] Getting verifiers.");
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+    if ((result = get_verifiers(verifier_list, num_verifiers)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Error getting verifiers.");
+        return result;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &end_time);
+    duration = (end_time.tv_sec - start_time.tv_sec) +
+               (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
+    if (timing != NULL) {
+        timing->verifiers = duration;
+    }
+    charra_log_info("[" LOG_NAME "] Phase timing: get_verifiers took %.3fs.",
+            duration);
+
+    /* RP's AK certificate is no longer provisioned here: each Verifier now
+     * independently certifies (and tracks) RP's AK -- see
+     * ensure_rp_ak_certificate()'s docstring -- so it's ensured
+     * per-Verifier, inside get_attestation_results_thread(), not once here
+     * against a single verifiers[0]. */
+
+    /* The Attester's identity is FETCHed and certified by RP's own CA only
+     * once per process -- ensure_attester_identity_provisioned() itself
+     * no-ops on every call after the first. Hard fail-closed: this is RP's
+     * own local gate on the Attester's identity, so any failure here aborts
+     * the whole cycle rather than proceeding with unverified evidence. Each
+     * Verifier's OWN certificate is ensured per-Verifier instead, inside
+     * get_attestation_results_thread(), the same way RP's own AK
+     * certificate already is (see the comment above). */
+    if ((result = ensure_attester_identity_provisioned()) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Could not provision the Attester's identity.");
+        return result;
+    }
+
+    /* Getting evidence */
+    charra_log_info("[" LOG_NAME "] Getting evidence.");
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+    if ((result = get_evidence()) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Error getting evidence.");
+        return result;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &end_time);
+    duration = (end_time.tv_sec - start_time.tv_sec) +
+               (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
+    if (timing != NULL) {
+        timing->evidence = duration;
+    }
+    charra_log_info("[" LOG_NAME "] Phase timing: get_evidence (Attester "
+                    "round trip + local appraisal) took %.3fs.",
+            duration);
+
+    /* Getting attestation results */
+    charra_log_info("[" LOG_NAME "] Getting attestation results.");
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+    if ((result = get_attestation_results(num_verifiers)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Error getting attestation results.");
+        return result;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &end_time);
+    duration = (end_time.tv_sec - start_time.tv_sec) +
+               (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
+    if (timing != NULL) {
+        timing->appraisal = duration;
+    }
+    charra_log_info("[" LOG_NAME "] Phase timing: get_attestation_results "
+                    "(all Verifiers) took %.3fs.",
+            duration);
+
+    return CHARRA_RC_SUCCESS;
+}
+
+/** sleep(), but returns within a second of SIGINT instead of up to a whole
+ * interval later -- a daemon that ignores Ctrl+C for a minute is not a
+ * daemon anyone wants to run in a terminal. */
+static void rp_interruptible_sleep(unsigned int seconds) {
+    for (unsigned int i = 0; i < seconds && !quit; i++) {
+        sleep(1);
+    }
+}
+
+static const struct option rp_long_options[] = {{"help", no_argument, 0, '0'},
+        {"verbose", no_argument, 0, 'v'},
+        {"log-level", required_argument, 0, 'l'},
+        {"benchmark", no_argument, 0, 'B'},
+        {"interval", required_argument, 0, 'I'},
+        {"qualify-margin", required_argument, 0, 'Q'},
+        {"verifiers", required_argument, 0, 'n'},
+        {"attester-ak-validity", required_argument, 0, 'A'},
+        {"duration", required_argument, 0, 'D'},
+        {"cycles", required_argument, 0, 'C'}, {0}};
+
+/** Parses a positive integer option argument; returns false (and logs) on
+ * anything non-numeric, negative, or out of [min, max]. */
+static bool rp_parse_uint_arg(
+        const char* arg, const char* name, long min, long max, long* out) {
+    char* end = NULL;
+    errno = 0;
+    long value = strtol(arg, &end, 10);
+    if (errno != 0 || end == arg || *end != '\0' || value < min ||
+            value > max) {
+        charra_log_error("[" LOG_NAME "] Invalid --%s value '%s' (expected an "
+                         "integer in [%ld, %ld]).",
+                name, arg, min, max);
+        return false;
+    }
+    *out = value;
+    return true;
+}
+
+/**
+ * @brief Parses RP's own command line.
+ *
+ * Deliberately not routed through util/cli_util.c: that parser is built
+ * around a binary verifier-or-attester split (its getopt string and option
+ * table are chosen with `caller == VERIFIER ? a : b` ternaries), and RP
+ * shares none of its options -- no --port, --pcr-file, --psk or --rpk.
+ * Adding a third caller there would mean rewriting every one of those
+ * ternaries inside a module the other two binaries depend on, for no
+ * benefit to either of them.
+ *
+ * @returns 0 to continue, 1 if help was printed (exit successfully), -1 on
+ * a bad argument.
+ */
+static int parse_rp_command_line(int argc, char** argv) {
+    for (;;) {
+        int index = -1;
+        int identifier =
+                getopt_long(argc, argv, "vl:BI:Q:n:A:D:C:", rp_long_options, &index);
+        if (identifier == -1) {
+            break;
+        }
+
+        long value = 0;
+        switch (identifier) {
+        case '0':
+            printf("\nUsage: relying_party [OPTIONS]\n");
+            printf("     --help:                   Print this help message.\n");
+            printf(" -v, --verbose:                Set CHARRA log-level to "
+                   "DEBUG.\n");
+            printf(" -l, --log-level=LEVEL:        Set CHARRA log-level "
+                   "(TRACE, DEBUG, INFO, WARN, ERROR, FATAL). Overrides "
+                   "$LOG_LEVEL_CHARRA.\n");
+            printf(" -B, --benchmark:              Run the bounded 1..%d-"
+                   "Verifier timing sweep and exit, writing "
+                   "timings_RP_multi_verifiers.txt, instead of the default "
+                   "attestation daemon.\n",
+                    RP_MAX_SWEEP_VERIFIERS);
+            printf(" -I, --interval=SECONDS:       Daemon mode: seconds "
+                   "between attestation cycles. Default %d.\n",
+                    RP_DEFAULT_ATTESTATION_INTERVAL_S);
+            printf("     --qualify-margin=SECONDS: Daemon mode: renew "
+                   "qualification once it expires within SECONDS, from the "
+                   "idle window rather than inside an attestation. Should "
+                   "exceed --interval. Default %d.\n",
+                    RP_DEFAULT_QUALIFY_MARGIN_S);
+            printf(" -n, --verifiers=COUNT:        Daemon mode: attest against "
+                   "COUNT Verifiers per cycle (1..%d). Default %d.\n",
+                    MAX_VERIFIERS, RP_DEFAULT_NUM_VERIFIERS);
+            printf(" -A, --attester-ak-validity=SECONDS:\n");
+            printf("                               Lifetime of the Attester AK "
+                   "certificate RP issues under its own CA, measured from "
+                   "issuance. Default %ld.\n",
+                    (long)attester_ak_cert_validity_seconds);
+            printf(" -D, --duration=SECONDS:       Daemon mode: stop cleanly "
+                   "after roughly SECONDS. Default 0 (run until "
+                   "SIGINT/SIGTERM).\n");
+            printf(" -C, --cycles=COUNT:           Daemon mode: stop cleanly "
+                   "after COUNT attestation cycles. Default 0 "
+                   "(unbounded).\n");
+            return 1;
+        case 'v':
+            charra_log_level = CHARRA_LOG_DEBUG;
+            break;
+        case 'l':
+            if (charra_log_level_from_str(optarg, &charra_log_level) !=
+                    CHARRA_RC_SUCCESS) {
+                charra_log_error(
+                        "[" LOG_NAME "] Invalid --log-level '%s'.", optarg);
+                return -1;
+            }
+            break;
+        case 'B':
+            rp_benchmark_mode = true;
+            break;
+        case 'I':
+            if (!rp_parse_uint_arg(optarg, "interval", 1, 86400, &value)) {
+                return -1;
+            }
+            rp_attestation_interval_s = (unsigned int)value;
+            break;
+        case 'Q':
+            if (!rp_parse_uint_arg(optarg, "qualify-margin", 0, 86400,
+                        &value)) {
+                return -1;
+            }
+            rp_qualify_margin_s = (unsigned int)value;
+            break;
+        case 'n':
+            if (!rp_parse_uint_arg(
+                        optarg, "verifiers", 1, MAX_VERIFIERS, &value)) {
+                return -1;
+            }
+            rp_num_verifiers = (int)value;
+            break;
+        case 'D':
+            if (!rp_parse_uint_arg(optarg, "duration", 1, LONG_MAX,
+                        &value)) {
+                return -1;
+            }
+            rp_duration_s = (unsigned int)value;
+            break;
+        case 'C':
+            if (!rp_parse_uint_arg(optarg, "cycles", 1, LONG_MAX,
+                        &value)) {
+                return -1;
+            }
+            rp_max_cycles = (unsigned long)value;
+            break;
+        case 'A':
+            if (!rp_parse_uint_arg(optarg, "attester-ak-validity", 1, LONG_MAX,
+                        &value)) {
+                return -1;
+            }
+            attester_ak_cert_validity_seconds = (time_t)value;
+            break;
+        default:
+            charra_log_error(
+                    "[" LOG_NAME "] Unrecognized option. Try --help.");
+            return -1;
+        }
+    }
+
+    /* Not fatal: a margin below the interval still attests correctly, it
+     * just stops buying anything -- the loop can step over the renewal
+     * window and pay for /qualify inside an attestation anyway. Worth
+     * saying out loud rather than silently under-performing. */
+    if (!rp_benchmark_mode && rp_qualify_margin_s > 0 &&
+            rp_qualify_margin_s <= rp_attestation_interval_s) {
+        charra_log_warn("[" LOG_NAME "] --qualify-margin (%us) is not larger "
+                        "than --interval (%us); qualification renewal may "
+                        "still land inside an attestation cycle.",
+                rp_qualify_margin_s, rp_attestation_interval_s);
+    }
+    /* The other bound: a margin covering the whole validity window can
+     * never be satisfied, so every idle pass would re-qualify. */
+    /* No margin-vs-validity check here: the window is the Verifier's to
+     * choose (--qualification-validity there) and arrives on the wire, so
+     * it is checked where it is actually learned -- see the warning beside
+     * qualify_submit_expires_at. */
+    return 0;
+}
+
+int main(int argc, char** argv) {
+    CHARRA_RC result = EXIT_FAILURE;
+
+    signal(SIGINT, handle_sigint);
+    /* Same handler for SIGTERM: `timeout`, `docker stop` and systemd all
+     * send SIGTERM, and without this they hard-kill the process past the
+     * clean shutdown below. */
+    signal(SIGTERM, handle_sigint);
+
+    /* Environment first, so an explicit --log-level/-v on the command line
+     * overrides it rather than the other way round. */
     charra_log_level_from_str(
             (const char*)getenv("LOG_LEVEL_CHARRA"), &charra_log_level);
-    charra_log_set_level(charra_log_level);
 
-    charra_log_info("[" LOG_NAME "] Effective configuration: "
-                    "verifier_sweep=1..5 runs_per_step=%d "
-                    "verifier_response_timeout=%us "
-                    "attester_response_timeout=%us blacklist='%s' "
-                    "ima_test_log='%s' (use_ima_test_log=%s)",
-            NUM_RUNS, verifier_response_timeout, attester_response_timeout,
-            blacklist_hashes_path, ima_test_log_path,
-            use_ima_test_log ? "true" : "false");
+    int parse_result = parse_rp_command_line(argc, argv);
+    if (parse_result != 0) {
+        return (parse_result == 1) ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+    charra_log_set_level(charra_log_level);
 
     /* RP's own runtime state (TPM identity, per-Verifier AK certificates,
      * shared qualification cache) lives under state/relying-party/ --
@@ -587,135 +938,182 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
     mkdir("state/relying-party/attester-ak-certificates", 0755);
     mkdir("state/relying-party/ak-provisioning", 0755);
 
-    double verifier_durations[NUM_RUNS];
-    double evidence_durations[NUM_RUNS];
-    double appraisal_durations[NUM_RUNS];
-    double total_attestation_durations[NUM_RUNS];
+    if (rp_benchmark_mode) {
+        charra_log_info("[" LOG_NAME "] Effective configuration: mode=benchmark "
+                        "verifier_sweep=1..%d runs_per_step=%d "
+                        "verifier_response_timeout=%us "
+                        "attester_response_timeout=%us blacklist='%s' "
+                        "ima_test_log='%s' (use_ima_test_log=%s)",
+                RP_MAX_SWEEP_VERIFIERS, NUM_RUNS, verifier_response_timeout,
+                attester_response_timeout, blacklist_hashes_path,
+                ima_test_log_path, use_ima_test_log ? "true" : "false");
 
-    for (int num_verifiers = 1; num_verifiers <= 5; num_verifiers++) {
-        for (int i = 0; i < num_verifiers; i++) {
-            verifier_list[i] = i + 1;
+        FILE* timing_file = fopen("timings_RP_multi_verifiers.txt", "w");
+        if (timing_file == NULL) {
+            perror("fopen");
+            return EXIT_FAILURE;
         }
 
-        for (int run = 0; run < NUM_RUNS; run++) {
-            struct timespec start_time, end_time;
-            double duration;
+        double verifier_durations[NUM_RUNS];
+        double evidence_durations[NUM_RUNS];
+        double appraisal_durations[NUM_RUNS];
+        double total_attestation_durations[NUM_RUNS];
 
-            /* Clear delimiter between sweep iterations -- without this, every
-             * run's log lines (1..5 verifiers, NUM_RUNS repeats each) run
-             * together with no way to tell where one attestation attempt ends
-             * and the next begins. */
-            charra_log_info("[" LOG_NAME
-                            "] ============================================================");
-            charra_log_info("[" LOG_NAME
-                            "] Starting new attestation run with %d verifier(s) "
-                            "(run %d/%d).",
-                    num_verifiers, run + 1, NUM_RUNS);
-            charra_log_info("[" LOG_NAME
-                            "] ============================================================");
+        for (int num_verifiers = 1; num_verifiers <= RP_MAX_SWEEP_VERIFIERS;
+                num_verifiers++) {
+            for (int run = 0; run < NUM_RUNS; run++) {
+                char label[32] = {0};
+                snprintf(label, sizeof(label), "run %d/%d", run + 1, NUM_RUNS);
 
-            /* check environment variables */
-            charra_log_info("[" LOG_NAME "] Checking environment variables.");
-            // Your environment setup code here
-
-            /* Getting verifiers */
-            charra_log_info("[" LOG_NAME "] Getting verifiers.");
-            clock_gettime(CLOCK_MONOTONIC, &start_time);
-            if ((result = get_verifiers(verifier_list, num_verifiers)) != CHARRA_RC_SUCCESS) {
-                charra_log_error("[" LOG_NAME "] Error getting verifiers.");
-                goto error;
-            }
-            clock_gettime(CLOCK_MONOTONIC, &end_time);
-            duration = (end_time.tv_sec - start_time.tv_sec) + (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
-            verifier_durations[run] = duration;
-            charra_log_info(
-                    "[" LOG_NAME "] Phase timing: get_verifiers took %.3fs.",
-                    duration);
-
-            /* RP's AK certificate is no longer provisioned here: each
-             * Verifier now independently certifies (and tracks) RP's AK --
-             * see ensure_rp_ak_certificate()'s docstring -- so it's ensured
-             * per-Verifier, inside get_attestation_results_thread(), not
-             * once here against a single verifiers[0]. */
-
-            /* The Attester's identity is FETCHed and certified by RP's own
-             * CA only once per process -- ensure_attester_identity_
-             * provisioned() itself no-ops on every call after the first.
-             * Hard fail-closed: this is RP's own local gate on the
-             * Attester's identity, so any failure here aborts the whole
-             * cycle rather than proceeding with unverified evidence. Each
-             * Verifier's OWN certificate is ensured per-Verifier instead,
-             * inside get_attestation_results_thread(), the same way RP's
-             * own AK certificate already is (see the comment above). */
-            if ((result = ensure_attester_identity_provisioned()) !=
-                    CHARRA_RC_SUCCESS) {
-                charra_log_error("[" LOG_NAME "] Could not provision the "
-                                 "Attester's identity.");
-                goto error;
+                rp_cycle_timing timing = {0};
+                result = run_one_attestation_cycle(
+                        num_verifiers, label, &timing);
+                if (result != CHARRA_RC_SUCCESS) {
+                    result = EXIT_FAILURE;
+                    break;
+                }
+                verifier_durations[run] = timing.verifiers;
+                evidence_durations[run] = timing.evidence;
+                appraisal_durations[run] = timing.appraisal;
+                total_attestation_durations[run] =
+                        timing.verifiers + timing.evidence + timing.appraisal;
+                result = CHARRA_RC_SUCCESS;
             }
 
-            /* Getting evidence */
-            charra_log_info("[" LOG_NAME "] Getting evidence.");
-            clock_gettime(CLOCK_MONOTONIC, &start_time);
-            if ((result = get_evidence()) != CHARRA_RC_SUCCESS) {
-                charra_log_error("[" LOG_NAME "] Error getting evidence.");
-                goto error;
+            if (result == EXIT_FAILURE) {
+                break;
             }
-            clock_gettime(CLOCK_MONOTONIC, &end_time);
-            duration = (end_time.tv_sec - start_time.tv_sec) + (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
-            evidence_durations[run] = duration;
-            charra_log_info(
-                    "[" LOG_NAME "] Phase timing: get_evidence (Attester "
-                    "round trip + local appraisal) took %.3fs.",
-                    duration);
 
-            /* Getting attestation results */
-            charra_log_info("[" LOG_NAME "] Getting attestation results.");
-            clock_gettime(CLOCK_MONOTONIC, &start_time);
-            if ((result = get_attestation_results(num_verifiers)) != CHARRA_RC_SUCCESS) {
-                charra_log_error("[" LOG_NAME "] Error getting attestation results.");
-                goto error;
-            }
-            clock_gettime(CLOCK_MONOTONIC, &end_time);
-            duration = (end_time.tv_sec - start_time.tv_sec) + (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
-            appraisal_durations[run] = duration;
-            charra_log_info(
-                    "[" LOG_NAME "] Phase timing: get_attestation_results "
-                    "(all Verifiers) took %.3fs.",
-                    duration);
+            double avg_verifier_duration, stddev_verifier_duration;
+            double avg_evidence_duration, stddev_evidence_duration;
+            double avg_appraisal_duration, stddev_appraisal_duration;
+            double avg_total_attestation_duration,
+                    stddev_total_attestation_duration;
 
-            total_attestation_durations[run] = verifier_durations[run] + evidence_durations[run] + appraisal_durations[run];
-            result = CHARRA_RC_SUCCESS;
-            continue;
+            calculate_stats(verifier_durations, NUM_RUNS,
+                    &avg_verifier_duration, &stddev_verifier_duration);
+            calculate_stats(evidence_durations, NUM_RUNS,
+                    &avg_evidence_duration, &stddev_evidence_duration);
+            calculate_stats(appraisal_durations, NUM_RUNS,
+                    &avg_appraisal_duration, &stddev_appraisal_duration);
+            calculate_stats(total_attestation_durations, NUM_RUNS,
+                    &avg_total_attestation_duration,
+                    &stddev_total_attestation_duration);
 
-        error:
-            result = EXIT_FAILURE;
-            break;
+            fprintf(timing_file, "Verifiers: %d\n", num_verifiers);
+            fprintf(timing_file,
+                    "Average Getting verifiers: %f seconds (stddev: %f)\n",
+                    avg_verifier_duration, stddev_verifier_duration);
+            fprintf(timing_file,
+                    "Average Getting evidence: %f seconds (stddev: %f)\n",
+                    avg_evidence_duration, stddev_evidence_duration);
+            fprintf(timing_file,
+                    "Average Appraising evidence: %f seconds (stddev: %f)\n",
+                    avg_appraisal_duration, stddev_appraisal_duration);
+            fprintf(timing_file,
+                    "Average Total Attestation Duration: %f seconds (stddev: "
+                    "%f)\n",
+                    avg_total_attestation_duration,
+                    stddev_total_attestation_duration);
         }
 
-        if (result == EXIT_FAILURE) {
-            break;
-        }
-
-        double avg_verifier_duration, stddev_verifier_duration;
-        double avg_evidence_duration, stddev_evidence_duration;
-        double avg_appraisal_duration, stddev_appraisal_duration;
-        double avg_total_attestation_duration, stddev_total_attestation_duration;
-
-        calculate_stats(verifier_durations, NUM_RUNS, &avg_verifier_duration, &stddev_verifier_duration);
-        calculate_stats(evidence_durations, NUM_RUNS, &avg_evidence_duration, &stddev_evidence_duration);
-        calculate_stats(appraisal_durations, NUM_RUNS, &avg_appraisal_duration, &stddev_appraisal_duration);
-        calculate_stats(total_attestation_durations, NUM_RUNS, &avg_total_attestation_duration, &stddev_total_attestation_duration);
-
-        fprintf(timing_file, "Verifiers: %d\n", num_verifiers);
-        fprintf(timing_file, "Average Getting verifiers: %f seconds (stddev: %f)\n", avg_verifier_duration, stddev_verifier_duration);
-        fprintf(timing_file, "Average Getting evidence: %f seconds (stddev: %f)\n", avg_evidence_duration, stddev_evidence_duration);
-        fprintf(timing_file, "Average Appraising evidence: %f seconds (stddev: %f)\n", avg_appraisal_duration, stddev_appraisal_duration);
-        fprintf(timing_file, "Average Total Attestation Duration: %f seconds (stddev: %f)\n", avg_total_attestation_duration, stddev_total_attestation_duration);
+        fclose(timing_file);
+        coap_cleanup();
+        return result;
     }
 
-    fclose(timing_file);
-    return result;
+    /* --- daemon mode (default) ----------------------------------------- */
+    charra_log_info("[" LOG_NAME "] Effective configuration: mode=daemon "
+                    "verifiers=%d interval=%us qualify_margin=%us "
+                    "verifier_response_timeout=%us "
+                    "attester_response_timeout=%us blacklist='%s' "
+                    "ima_test_log='%s' (use_ima_test_log=%s)",
+            rp_num_verifiers, rp_attestation_interval_s, rp_qualify_margin_s,
+            verifier_response_timeout, attester_response_timeout,
+            blacklist_hashes_path, ima_test_log_path,
+            use_ima_test_log ? "true" : "false");
+    charra_log_info("[" LOG_NAME "] Entering attestation loop; Ctrl+C (SIGINT) "
+                    "to stop.");
+
+    time_t daemon_deadline =
+            (rp_duration_s > 0) ? time(NULL) + (time_t)rp_duration_s : 0;
+    const char* stop_reason = "signal";
+    unsigned long cycle = 0;
+    while (!quit) {
+        char label[32] = {0};
+        snprintf(label, sizeof(label), "cycle %lu", ++cycle);
+
+        /* A failed cycle is not fatal to the daemon: a Verifier or the
+         * Attester being briefly unreachable should cost one cycle, not the
+         * whole process. The failure is already logged in detail by
+         * whichever phase hit it. */
+        if (run_one_attestation_cycle(rp_num_verifiers, label, NULL) !=
+                CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Attestation cycle %lu failed; "
+                             "retrying after the usual interval.",
+                    cycle);
+        }
+        if (quit) {
+            break;
+        }
+
+        /* Idle-window qualification renewal: done here, between cycles,
+         * precisely so it never lands inside an attestation. With the
+         * margin it renews while the current grant is still valid, so the
+         * next cycle always finds a live qualification and skips /qualify
+         * entirely. Failure is non-fatal -- the next attestation's own
+         * margin-0 check will retry it, and abort that cycle if it must. */
+        if (rp_qualify_margin_s > 0 &&
+                rp_perform_qualification_handshake_once(rp_num_verifiers,
+                        (time_t)rp_qualify_margin_s) != CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Idle-window qualification renewal "
+                             "did not complete; will retry next cycle.");
+        }
+        if (quit) {
+            break;
+        }
+
+        if (rp_max_cycles > 0 && cycle >= rp_max_cycles) {
+            stop_reason = "--cycles reached";
+            break;
+        }
+
+        /* Clamp the nap to whatever is left of --duration, so the deadline
+         * is honoured to within a second instead of being overshot by up to
+         * a full interval. */
+        unsigned int nap = rp_attestation_interval_s;
+        if (daemon_deadline > 0) {
+            time_t remaining = daemon_deadline - time(NULL);
+            if (remaining <= 0) {
+                stop_reason = "--duration elapsed";
+                break;
+            }
+            if ((time_t)nap > remaining) {
+                nap = (unsigned int)remaining;
+            }
+        }
+
+        charra_log_info("[" LOG_NAME "] Cycle %lu done; sleeping %us until the "
+                        "next attestation.",
+                cycle, nap);
+        rp_interruptible_sleep(nap);
+
+        if (daemon_deadline > 0 && time(NULL) >= daemon_deadline) {
+            stop_reason = "--duration elapsed";
+            break;
+        }
+    }
+
+    charra_log_info("[" LOG_NAME "] Shutting down (%s) after %lu cycle(s).",
+            quit ? "signal" : stop_reason, cycle);
+
+    /* Release the last cycle's evidence buffers so a clean shutdown really
+     * is clean -- makes "still reachable" bytes at exit meaningful under
+     * valgrind rather than noise. */
+    charra_free_attestation_response(&last_response);
+    charra_rp_release_evidence();
+    coap_cleanup();
+    return EXIT_SUCCESS;
 }
 /* --- function definitions ----------------------------------------------- */
 
@@ -821,6 +1219,9 @@ static coap_response_t coap_attester_handler(
     /* appraise the evidence locally before forwarding any of it */
     if (!charra_rp_appraise_evidence(&res)) {
         attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
+        /* res is fully unmarshaled by now and owns heap buffers; it never
+         * reaches last_response on this path, so free it here. */
+        charra_free_attestation_response(&res);
         goto cleanup;
     }
 
@@ -831,7 +1232,13 @@ static coap_response_t coap_attester_handler(
     charra_log_info(
             "[" LOG_NAME "] Evidence appraised locally; privacy-cleaning "
             "before forwarding to the Verifiers.");
-    /* store last response */
+    /* Store last response, releasing the previous cycle's buffers first --
+     * a plain struct assignment would otherwise orphan them once this
+     * handler runs more than once (daemon mode). Safe here: get_evidence()
+     * completes fully before get_attestation_results() spawns the Verifier
+     * threads that read last_response, so nothing still points into the
+     * old buffers by the time this runs again. */
+    charra_free_attestation_response(&last_response);
     last_response = res;
 
 cleanup:
@@ -1049,6 +1456,30 @@ static CHARRA_RC charra_rp_prepare_evidence(void) {
             "[" LOG_NAME "] RP AK keypair ready (public key %u bytes).",
             rp_public_key_der_len);
     return CHARRA_RC_SUCCESS;
+}
+
+/**
+ * @brief Frees the heap-allocated fields of an /attest response DTO.
+ *
+ * charra_unmarshal_attestation_response() malloc()s three of them
+ * (event_log plus both Attester AK certificates, ~6 KB per cycle). Under
+ * the original one-shot design nothing had to free them -- the process
+ * exited right after -- but in daemon mode every cycle allocates a fresh
+ * set, so they must be released or they accumulate for the process's
+ * lifetime. Nulls as it frees, so it's safe on a zeroed struct and safe to
+ * call twice.
+ */
+static void charra_free_attestation_response(
+        msg_attestation_response_dto* res) {
+    if (res == NULL) {
+        return;
+    }
+    charra_free_if_not_null(res->event_log);
+    res->event_log_len = 0;
+    charra_free_if_not_null(res->ak_certificate_attester_by_verifier);
+    res->ak_certificate_attester_by_verifier_len = 0;
+    charra_free_if_not_null(res->ak_certificate_attester_by_rp);
+    res->ak_certificate_attester_by_rp_len = 0;
 }
 
 static void charra_rp_release_evidence(void) {
@@ -1500,31 +1931,31 @@ static coap_response_t coap_qualify_submit_response_handler(
         const coap_mid_t mid CHARRA_UNUSED) {
     processing_qualify_submit_response = true;
 
-    /* Verifier's coap_qualify_submit_handler() responds with 2.05 Content
-     * for BOTH "qualified" and "not qualified" -- same convention
-     * coap_appraise_handler() uses for /appraise's own success/failure
-     * message -- so the actual verdict has to come from the message text,
-     * not the response code alone. memcmp against the exact expected
-     * length, not strcmp: data has no guaranteed NUL terminator, same
-     * reasoning coap_verifier_handler_appraisal() already documents. */
-    const char* qualified_message = "Qualification successful!\0";
-
+    /* The Verifier now answers with a CBOR verdict carrying the deadline
+     * it granted, so RP no longer has to assume the validity window from
+     * a shared compile-time constant -- see msg_qualify_submit_response_
+     * dto in charra_dto.h. */
     size_t data_len = 0;
     const uint8_t* data = NULL;
     size_t data_offset = 0;
     size_t data_total_len = 0;
-    bool got_data = coap_get_data_large(received, &data_len, &data,
-                             &data_offset, &data_total_len) != 0;
-
-    if (got_data) {
-        charra_log_info("[" LOG_NAME "] /qualify/submit: Verifier says: %.*s",
-                (int)data_len, (const char*)data);
+    qualify_submit_qualified = false;
+    qualify_submit_expires_at = 0;
+    if (coap_get_data_large(received, &data_len, &data, &data_offset,
+                &data_total_len) != 0) {
+        msg_qualify_submit_response_dto resp = {0};
+        if (charra_unmarshal_qualify_submit_response(
+                    (uint32_t)data_len, data, &resp) == CHARRA_RC_SUCCESS) {
+            qualify_submit_qualified =
+                    coap_pdu_get_code(received) ==
+                            COAP_RESPONSE_CODE_CONTENT &&
+                    resp.qualified != 0;
+            qualify_submit_expires_at = (time_t)resp.expires_at;
+        } else {
+            charra_log_error("[" LOG_NAME "] /qualify/submit: could not "
+                             "parse the Verifier's response.");
+        }
     }
-
-    qualify_submit_qualified =
-            coap_pdu_get_code(received) == COAP_RESPONSE_CODE_CONTENT &&
-            got_data && data_len == strlen(qualified_message) &&
-            memcmp(data, qualified_message, data_len) == 0;
 
     processing_qualify_submit_response = false;
     return COAP_RESPONSE_OK;
@@ -1577,7 +2008,8 @@ static void invalidate_cached_rp_qualification(void) {
     rp_qualified_until = 0;
 }
 
-static CHARRA_RC rp_perform_qualification_handshake_once(int num_verifiers) {
+static CHARRA_RC rp_perform_qualification_handshake_once(
+        int num_verifiers, time_t refresh_margin_seconds) {
     /* AK certificate readiness is orthogonal to the qualification cache
      * below: /qualify/submit needs an AK cert issued by whichever Verifier
      * we end up qualifying against, so it's provisioned per-candidate
@@ -1594,10 +2026,15 @@ static CHARRA_RC rp_perform_qualification_handshake_once(int num_verifiers) {
      * attestation cycle regardless of how much of a previous grant was
      * left. See CHARRA_V2_NOTES.md. */
     time_t now = time(NULL);
-    if (rp_qualified_until <= now) {
+    /* Compared against now+margin rather than now: with margin 0 this is
+     * exactly "renew only once expired"; with a margin it renews while the
+     * grant is still valid, which is what lets daemon mode do the renewal
+     * in its idle window instead of inside an attestation. */
+    time_t renew_deadline = now + refresh_margin_seconds;
+    if (rp_qualified_until <= renew_deadline) {
         rp_qualified_until = rp_qualification_cache_load();
     }
-    if (rp_qualified_until > now) {
+    if (rp_qualified_until > renew_deadline) {
         charra_log_info(
                 "[" LOG_NAME "] Cached qualification still valid for %ld "
                 "more second(s), skipping /qualify.",
@@ -1763,15 +2200,27 @@ static CHARRA_RC rp_perform_qualification_handshake_once(int num_verifiers) {
                     "[" LOG_NAME "] |  RP QUALIFIED with Verifier n° %d "
                     "(port %u)  |",
                     verifier_index + 1, verifier->port_number);
-            time_t expires_at = now + CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS;
+            /* Exactly what the Verifier said it granted -- no local
+             * guess at the window. */
+            time_t expires_at = qualify_submit_expires_at;
             rp_qualified_until = expires_at;
             rp_qualification_cache_save(expires_at);
             charra_log_info(
                     "[" LOG_NAME "] Qualification valid until %ld (%ld "
-                    "second(s) from now); shared with every other "
-                    "Verifier.",
-                    (long)expires_at,
-                    (long)CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS);
+                    "second(s) from now, as granted by this Verifier); "
+                    "shared with every other Verifier.",
+                    (long)expires_at, (long)(expires_at - time(NULL)));
+            /* The margin only helps if it fits inside the window the
+             * Verifier actually granted -- which RP only learns here, not
+             * at CLI-parse time. */
+            if (rp_qualify_margin_s > 0 &&
+                    (time_t)rp_qualify_margin_s >= expires_at - time(NULL)) {
+                charra_log_warn(
+                        "[" LOG_NAME "] --qualify-margin (%us) is not smaller "
+                        "than the %lds window this Verifier grants; RP will "
+                        "re-qualify on every idle pass.",
+                        rp_qualify_margin_s, (long)(expires_at - time(NULL)));
+            }
             result = CHARRA_RC_SUCCESS;
         } else {
             charra_log_error(
@@ -1996,6 +2445,13 @@ static CHARRA_RC ensure_attester_identity_provisioned(void) {
     TPM2B_NAME* attester_ak_name = (TPM2B_NAME*)identity.ak_name;
 
     /* --- 3. RP-CA track: sign, wrap, deliver -------------------------- */
+    /* Validity runs from now, so a long-running RP always issues a full
+     * window rather than an ever-shrinking one. */
+    time_t rp_cert_issued_at = time(NULL);
+    time_t rp_cert_expires_at =
+            rp_cert_issued_at + attester_ak_cert_validity_seconds;
+    char attester_ak_cert_not_before_utc[15] = {0};
+    char attester_ak_cert_not_after_utc[15] = {0};
     uint8_t rp_ca_serial[16] = {0};
     uint8_t* rp_signed_cert_der = NULL;
     uint32_t rp_signed_cert_der_len = 0;
@@ -2033,6 +2489,15 @@ static CHARRA_RC ensure_attester_identity_provisioned(void) {
         mbedtls_x509_crt_free(&rp_ca_cert);
         charra_io_free_file_buffer(&rp_ca_cert_der_buf);
 
+        if (!charra_crypto_format_utc_yyyymmddhhmmss(
+                    rp_cert_issued_at, attester_ak_cert_not_before_utc) ||
+                !charra_crypto_format_utc_yyyymmddhhmmss(rp_cert_expires_at,
+                        attester_ak_cert_not_after_utc)) {
+            charra_log_error("[" LOG_NAME "] Could not format Attester AK "
+                             "certificate validity window.");
+            charra_free_if_not_null(identity.ek_certificate);
+            return CHARRA_RC_ERROR;
+        }
         if ((result = charra_crypto_sign_ak_certificate(attester_ak_public_key,
                      "CN=CHARRA Attester AK (RP-issued)", rp_ca_subject_name,
                      attester_ak_cert_not_before_utc,
@@ -2143,11 +2608,8 @@ static CHARRA_RC ensure_attester_identity_provisioned(void) {
         memcpy(rp_ak_record.ak_name, identity.ak_name, identity.ak_name_len);
         memcpy(rp_ak_record.serial, rp_ca_serial, sizeof(rp_ak_record.serial));
         rp_ak_record.issued_at = time(NULL);
-        time_t rp_cert_expires_at = 0;
-        if (charra_crypto_parse_utc_yyyymmddhhmmss(
-                    attester_ak_cert_not_after_utc, &rp_cert_expires_at)) {
-            rp_ak_record.expires_at = rp_cert_expires_at;
-        }
+        /* Exactly the value stamped into the certificate above. */
+        rp_ak_record.expires_at = rp_cert_expires_at;
         if (charra_ak_state_renew(attester_ak_state_file_path,
                     attester_ek_fingerprint, &rp_ak_record) !=
                 CHARRA_RC_SUCCESS) {
@@ -3365,7 +3827,10 @@ cleanup:
     charra_free_if_not_null_ex(coap_session, coap_session_release);
     charra_free_if_not_null_ex(coap_context, coap_free_context);
 
-    coap_cleanup();
+    /* No coap_cleanup() here: it tears down libcoap's *global* state, so
+     * calling it per cycle (and from each Verifier thread) would pull the
+     * ground out from under contexts still in use and from the next
+     * cycle's. Done exactly once, at process exit in main(). */
 
     return result;
 
@@ -3586,7 +4051,10 @@ cleanup:
     /* free variables */
     charra_free_if_not_null(req_buf);
 
-    coap_cleanup();
+    /* No coap_cleanup() here: it tears down libcoap's *global* state, so
+     * calling it per cycle (and from each Verifier thread) would pull the
+     * ground out from under contexts still in use and from the next
+     * cycle's. Done exactly once, at process exit in main(). */
 
     return result;
 }
@@ -4086,8 +4554,10 @@ void* get_attestation_results_thread(void *arg) {
                     current_thread_index + 1,
                     rejection_reason[current_thread_index]);
             invalidate_cached_rp_qualification();
+            /* Margin 0: the cache was just invalidated above, so this must
+             * qualify now regardless of any renewal-window policy. */
             CHARRA_RC requalify_rc = rp_perform_qualification_handshake_once(
-                    rp_num_verifiers_this_cycle);
+                    rp_num_verifiers_this_cycle, 0);
 
             if (requalify_rc != CHARRA_RC_SUCCESS) {
                 charra_log_error(
@@ -4116,7 +4586,10 @@ cleanup:
     charra_free_if_not_null(res_buf);
     charra_free_if_not_null(nonce_req_buf);
 
-    coap_cleanup();
+    /* No coap_cleanup() here: it tears down libcoap's *global* state, so
+     * calling it per cycle (and from each Verifier thread) would pull the
+     * ground out from under contexts still in use and from the next
+     * cycle's. Done exactly once, at process exit in main(). */
 
     return NULL;
 }
@@ -4136,7 +4609,10 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
      * answer. No Verifier will accept /appraise without it, so abort here
      * rather than spawning threads that would all fail identically. */
     rp_num_verifiers_this_cycle = num_verifiers;
-    if (rp_perform_qualification_handshake_once(num_verifiers) !=
+    /* Margin 0: this is the attestation path -- it needs a valid
+     * qualification, but has no reason to renew one that is still good.
+     * Daemon mode does early renewal from its idle window instead. */
+    if (rp_perform_qualification_handshake_once(num_verifiers, 0) !=
             CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not qualify with any "
                          "reachable Verifier; aborting attestation run.");

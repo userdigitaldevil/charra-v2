@@ -13,6 +13,21 @@
 #include "charra_sdk.h"
 #include "charra_synthetic_log.h"
 
+/* Runtime-settable qualification window -- see the setter's docstring in
+ * charra_rp_qualification.h for why this is not just the macro. */
+static time_t qualification_validity_seconds =
+        CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS;
+
+void charra_rp_qualification_set_validity_seconds(time_t seconds) {
+    if (seconds > 0) {
+        qualification_validity_seconds = seconds;
+    }
+}
+
+time_t charra_rp_qualification_get_validity_seconds(void) {
+    return qualification_validity_seconds;
+}
+
 CHARRA_RC charra_rp_qualification_generate(uint32_t num_entries,
         uint32_t seed, const uint8_t salt[CHARRA_SDK_PATH_SALT_LEN],
         rp_qualification_state* state_out, uint8_t** challenge_log_out,
@@ -70,7 +85,8 @@ CHARRA_RC charra_rp_qualification_check(rp_qualification_state* state,
 
     if (log_matches && pcr_matches) {
         state->qualified = true;
-        state->expires_at = now + CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS;
+        state->expires_at =
+                now + charra_rp_qualification_get_validity_seconds();
         return CHARRA_RC_SUCCESS;
     }
 
