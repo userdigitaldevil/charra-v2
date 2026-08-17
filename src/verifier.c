@@ -1243,88 +1243,124 @@ error:
     return;
 }
 
-/**
- * @brief /certify_ak: the Verifier, acting as Privacy CA, certifies a
- * requester's AK via TPM2_MakeCredential -- see msg_certify_ak_request_dto
- * / msg_certify_ak_response_dto in charra_dto.h for the wire format and
- * CHARRA_V2_NOTES.md for why this is a separate exchange from /appraise.
- *
- * Flow: verify the requester's EK certificate chains to the (synthetic,
- * test-only) manufacturer root -> reconstruct the EK's full TPM2B_PUBLIC
- * from that certificate -> sign a fresh AK certificate for the requested
- * AK public key -> AES-256-GCM-encrypt that certificate under a freshly
- * generated key -> wrap that key via Esys_MakeCredential so only a TPM
- * that completes ActivateCredential with the matching EK/AK pair can ever
- * recover it.
- */
 static void release_response_data(
         struct coap_session_t* session CHARRA_UNUSED, void* app_ptr) {
     charra_free_and_null(app_ptr);
 }
 
-static void coap_certify_ak_handler(struct coap_resource_t* resource,
-                                struct coap_session_t* session,
-                                const struct coap_pdu_t* request,
-                                const struct coap_string_t* query,
-                                struct coap_pdu_t* response) {
-    int coap_r = 0;
-    TSS2_RC tss_r = 0;
+/* --- /certify_ak pending challenges -------------------------------------
+ *
+ * What CHALLENGE handed out and CONFIRM must match. Kept in memory only:
+ * a handshake spans seconds, and a Verifier restart mid-flight just makes
+ * the requester retry. Small table rather than one slot because the RP's
+ * own handshake and one relayed for the Attester can overlap. */
+#define CERTIFY_AK_MAX_PENDING 8
+#define CERTIFY_AK_PENDING_TTL_SECONDS 60
+
+typedef struct {
+    bool in_use;
+    uint8_t ek_fingerprint[32];
+    uint8_t secret[CHARRA_CERTIFY_AK_SECRET_LEN];
+    /* The key/name bound into this challenge. CONFIRM certifies THESE, not
+     * anything it re-supplies, so a leaked secret can't be redirected. */
+    uint32_t ak_public_key_len;
+    uint8_t ak_public_key[sizeof(TPM2B_PUBLIC)];
+    uint32_t ak_name_len;
+    uint8_t ak_name[sizeof(TPM2B_NAME)];
+    time_t expires_at;
+} certify_ak_pending_challenge;
+
+static certify_ak_pending_challenge
+        certify_ak_pending[CERTIFY_AK_MAX_PENDING] = {0};
+
+/** Constant-time equality -- the secret is a shared authenticator, so its
+ * comparison must not leak how far it matched. */
+static bool constant_time_equal(
+        const uint8_t* a, const uint8_t* b, size_t len) {
+    uint8_t diff = 0;
+    for (size_t i = 0; i < len; i++) {
+        diff |= (uint8_t)(a[i] ^ b[i]);
+    }
+    return diff == 0;
+}
+
+/** Stores a challenge, replacing any prior one for the same identity (a
+ * fresh CHALLENGE abandons whatever the requester didn't finish). */
+static void certify_ak_pending_store(
+        const certify_ak_pending_challenge* challenge) {
+    time_t now = time(NULL);
+    int slot = -1;
+    for (int i = 0; i < CERTIFY_AK_MAX_PENDING; i++) {
+        if (certify_ak_pending[i].in_use &&
+                memcmp(certify_ak_pending[i].ek_fingerprint,
+                        challenge->ek_fingerprint, 32) == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) { /* else a free or expired slot */
+        for (int i = 0; i < CERTIFY_AK_MAX_PENDING; i++) {
+            if (!certify_ak_pending[i].in_use ||
+                    certify_ak_pending[i].expires_at <= now) {
+                slot = i;
+                break;
+            }
+        }
+    }
+    if (slot < 0) {
+        slot = 0; /* table full of live challenges: evict the oldest */
+        for (int i = 1; i < CERTIFY_AK_MAX_PENDING; i++) {
+            if (certify_ak_pending[i].expires_at <
+                    certify_ak_pending[slot].expires_at) {
+                slot = i;
+            }
+        }
+    }
+    certify_ak_pending[slot] = *challenge;
+    certify_ak_pending[slot].in_use = true;
+}
+
+/** Single-use lookup: a matching challenge is copied out and cleared, so
+ * neither a replay nor a retry after a wrong guess can reuse it. */
+static bool certify_ak_pending_take(
+        const uint8_t ek_fingerprint[32], certify_ak_pending_challenge* out) {
+    time_t now = time(NULL);
+    for (int i = 0; i < CERTIFY_AK_MAX_PENDING; i++) {
+        if (!certify_ak_pending[i].in_use ||
+                memcmp(certify_ak_pending[i].ek_fingerprint, ek_fingerprint,
+                        32) != 0) {
+            continue;
+        }
+        bool expired = certify_ak_pending[i].expires_at <= now;
+        *out = certify_ak_pending[i];
+        memset(&certify_ak_pending[i], 0, sizeof(certify_ak_pending[i]));
+        return !expired;
+    }
+    return false;
+}
+
+/**
+ * @brief /certify_ak CHALLENGE leg: validate the requester's EK
+ * certificate, then hand back a fresh random secret wrapped via
+ * Esys_MakeCredential against that EK/AK pair. Deliberately signs nothing
+ * and records nothing -- an unanswered challenge leaves no trace.
+ */
+static CHARRA_RC certify_ak_do_challenge(const msg_certify_ak_request_dto* req,
+        uint8_t** marshaled_out, uint32_t* marshaled_len_out,
+        coap_pdu_code_t* response_code_out) {
     CHARRA_RC charra_r = CHARRA_RC_ERROR;
-    coap_pdu_code_t response_code = COAP_RESPONSE_CODE_INTERNAL_ERROR;
-
-    log_peer_address("/certify_ak", session);
-
-    msg_certify_ak_request_dto req = {0};
-    bool req_unmarshaled = false;
+    TSS2_RC tss_r = 0;
 
     char* manufacturer_root_der = NULL;
     size_t manufacturer_root_der_len = 0;
     mbedtls_x509_crt ek_leaf_cert;
     bool ek_leaf_cert_inited = false;
 
-    char* verifier_ca_cert_der = NULL;
-    size_t verifier_ca_cert_der_len = 0;
-    mbedtls_x509_crt verifier_ca_cert;
-    bool verifier_ca_cert_inited = false;
-
-    uint8_t* ak_cert_der = NULL;
-    uint32_t ak_cert_der_len = 0;
-    uint8_t* ak_cert_ciphertext = NULL;
-
     ESYS_CONTEXT* esys_ctx = NULL;
     TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
     TPM2B_ID_OBJECT* credential_blob = NULL;
     TPM2B_ENCRYPTED_SECRET* wrapped_secret = NULL;
 
-    uint8_t* marshaled_response = NULL;
-    uint32_t marshaled_response_len = 0;
-
-    /* --- receive incoming data --- */
-    size_t data_len = 0;
-    const uint8_t* data = NULL;
-    size_t data_offset = 0;
-    size_t data_total_len = 0;
-    if ((coap_r = coap_get_data_large(request, &data_len, &data, &data_offset,
-                 &data_total_len)) == 0) {
-        charra_log_error("[" LOG_NAME "] /certify_ak: Could not get CoAP PDU data.");
-        response_code = COAP_RESPONSE_CODE_BAD_REQUEST;
-        goto cleanup;
-    }
-    charra_log_info(
-            "[" LOG_NAME "] /certify_ak: received request of length %zu.",
-            data_len);
-
-    if ((charra_r = charra_unmarshal_certify_ak_request(
-                 data_len, data, &req)) != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] /certify_ak: could not parse CBOR request.");
-        response_code = COAP_RESPONSE_CODE_BAD_REQUEST;
-        goto cleanup;
-    }
-    req_unmarshaled = true;
-
-    /* --- validate the requester's EK certificate against the manufacturer
-     * root (Step: EK certificate check, this endpoint's own equivalent of
-     * Step 3a/3b item 1) --- */
     if ((charra_r = charra_io_read_file(manufacturer_root_cert_path,
                  &manufacturer_root_der, &manufacturer_root_der_len)) !=
             CHARRA_RC_SUCCESS) {
@@ -1335,38 +1371,178 @@ static void coap_certify_ak_handler(struct coap_resource_t* resource,
         goto cleanup;
     }
 
-    if ((charra_r = charra_crypto_verify_x509_cert_chain(req.ek_certificate,
-                 req.ek_certificate_len, (uint8_t*)manufacturer_root_der,
+    if ((charra_r = charra_crypto_verify_x509_cert_chain(req->ek_certificate,
+                 req->ek_certificate_len, (uint8_t*)manufacturer_root_der,
                  manufacturer_root_der_len, &ek_leaf_cert)) !=
             CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] /certify_ak: EK certificate did "
                          "NOT verify against the manufacturer root.");
-        response_code = COAP_RESPONSE_CODE_UNAUTHORIZED;
+        *response_code_out = COAP_RESPONSE_CODE_UNAUTHORIZED;
         goto cleanup;
     }
     ek_leaf_cert_inited = true;
-    charra_log_info(
-            "[" LOG_NAME "] /certify_ak: EK certificate verified.");
+    charra_log_info("[" LOG_NAME "] /certify_ak: EK certificate verified.");
     charra_crypto_log_cert_summary("requester's EK cert", &ek_leaf_cert);
 
-    /* --- reconstruct the EK's full TPM2B_PUBLIC (Esys_MakeCredential needs
-     * more than the bare RSA key the certificate carries) --- */
+    /* Esys_MakeCredential needs more than the bare RSA key the cert carries */
     TPM2B_PUBLIC ek_public_key = {0};
     if ((charra_r = charra_crypto_build_ek_tpm2b_public_from_cert(
                  &ek_leaf_cert, &ek_public_key)) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] /certify_ak: could not "
                          "reconstruct EK TPM2B_PUBLIC from certificate.");
-        response_code = COAP_RESPONSE_CODE_UNAUTHORIZED;
+        *response_code_out = COAP_RESPONSE_CODE_UNAUTHORIZED;
         goto cleanup;
     }
 
-    /* req.ak_public_key / req.ak_name are raw copies of the requester's own
-     * TPM2B_PUBLIC / TPM2B_NAME structs -- same "cast the byte array back"
-     * convention coap_appraise_handler() uses for tpm2_public_key(_rp). */
-    TPM2B_PUBLIC* ak_public_key = (TPM2B_PUBLIC*)req.ak_public_key;
-    TPM2B_NAME* ak_name = (TPM2B_NAME*)req.ak_name;
+    certify_ak_pending_challenge challenge = {0};
+    if ((charra_r = charra_random_bytes(sizeof(challenge.secret),
+                 challenge.secret)) != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] /certify_ak: could not generate secret.");
+        goto cleanup;
+    }
+    if ((charra_r = hash_sha256(req->ek_certificate_len, req->ek_certificate,
+                 challenge.ek_fingerprint)) != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] /certify_ak: could not hash EK certificate.");
+        goto cleanup;
+    }
+    challenge.ak_public_key_len = req->ak_public_key_len;
+    memcpy(challenge.ak_public_key, req->ak_public_key,
+            req->ak_public_key_len);
+    challenge.ak_name_len = req->ak_name_len;
+    memcpy(challenge.ak_name, req->ak_name, req->ak_name_len);
+    challenge.expires_at = time(NULL) + CERTIFY_AK_PENDING_TTL_SECONDS;
 
-    /* --- sign a fresh AK certificate --- */
+    if ((tss_r = Tss2_TctiLdr_Initialize(getenv("CHARRA_TCTI"), &tcti_ctx)) !=
+            TSS2_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] /certify_ak: Tss2_TctiLdr_Initialize.");
+        charra_r = CHARRA_RC_ERROR;
+        goto cleanup;
+    }
+    if ((tss_r = Esys_Initialize(&esys_ctx, tcti_ctx, NULL)) !=
+            TSS2_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: Esys_Initialize.");
+        charra_r = CHARRA_RC_ERROR;
+        goto cleanup;
+    }
+
+    TPM2B_DIGEST credential = {0};
+    credential.size = sizeof(challenge.secret);
+    memcpy(credential.buffer, challenge.secret, sizeof(challenge.secret));
+
+    if ((charra_r = charra_tpm_make_credential_for_ak(esys_ctx, &ek_public_key,
+                 (TPM2B_NAME*)req->ak_name, &credential, &credential_blob,
+                 &wrapped_secret)) != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] /certify_ak: Esys_MakeCredential failed.");
+        goto cleanup;
+    }
+
+    msg_certify_ak_response_dto resp = {0};
+    resp.credential_blob_len = sizeof(*credential_blob);
+    memcpy(resp.credential_blob, credential_blob, resp.credential_blob_len);
+    resp.wrapped_secret_len = sizeof(*wrapped_secret);
+    memcpy(resp.wrapped_secret, wrapped_secret, resp.wrapped_secret_len);
+
+    if ((charra_r = charra_marshal_certify_ak_response(
+                 &resp, marshaled_len_out, marshaled_out)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME
+                         "] /certify_ak: could not marshal CHALLENGE.");
+        goto cleanup;
+    }
+
+    certify_ak_pending_store(&challenge);
+    {
+        char fingerprint_hex[17] = {0};
+        hex_prefix(challenge.ek_fingerprint, sizeof(challenge.ek_fingerprint),
+                fingerprint_hex, sizeof(fingerprint_hex));
+        charra_log_info("[" LOG_NAME "] /certify_ak: CHALLENGE issued to "
+                        "identity %s... (valid %ds); awaiting CONFIRM.",
+                fingerprint_hex, CERTIFY_AK_PENDING_TTL_SECONDS);
+    }
+    *response_code_out = COAP_RESPONSE_CODE_CONTENT;
+    charra_r = CHARRA_RC_SUCCESS;
+
+cleanup:
+    if (credential_blob != NULL) {
+        Esys_Free(credential_blob);
+    }
+    if (wrapped_secret != NULL) {
+        Esys_Free(wrapped_secret);
+    }
+    if (esys_ctx != NULL) {
+        Esys_Finalize(&esys_ctx);
+    }
+    if (tcti_ctx != NULL) {
+        Tss2_TctiLdr_Finalize(&tcti_ctx);
+    }
+    if (ek_leaf_cert_inited) {
+        mbedtls_x509_crt_free(&ek_leaf_cert);
+    }
+    charra_io_free_file_buffer(&manufacturer_root_der);
+    return charra_r;
+}
+
+/**
+ * @brief /certify_ak CONFIRM leg: match the echoed secret against the
+ * pending challenge and only then sign, record, and release the
+ * certificate. Needs no TPM -- the proof was produced by the requester's.
+ */
+static CHARRA_RC certify_ak_do_confirm(const msg_certify_ak_request_dto* req,
+        uint8_t** marshaled_out, uint32_t* marshaled_len_out,
+        coap_pdu_code_t* response_code_out) {
+    CHARRA_RC charra_r = CHARRA_RC_ERROR;
+
+    char* verifier_ca_cert_der = NULL;
+    size_t verifier_ca_cert_der_len = 0;
+    mbedtls_x509_crt verifier_ca_cert;
+    bool verifier_ca_cert_inited = false;
+    uint8_t* ak_cert_der = NULL;
+    uint32_t ak_cert_der_len = 0;
+
+    uint8_t ek_fingerprint[32] = {0};
+    if ((charra_r = hash_sha256(req->ek_certificate_len, req->ek_certificate,
+                 ek_fingerprint)) != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] /certify_ak: could not hash EK certificate.");
+        goto cleanup;
+    }
+    char ek_fingerprint_hex[17] = {0};
+    hex_prefix(ek_fingerprint, sizeof(ek_fingerprint), ek_fingerprint_hex,
+            sizeof(ek_fingerprint_hex));
+
+    certify_ak_pending_challenge challenge = {0};
+    if (!certify_ak_pending_take(ek_fingerprint, &challenge)) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: CONFIRM from identity "
+                         "%s... has no live challenge (never issued, already "
+                         "used, or expired).",
+                ek_fingerprint_hex);
+        *response_code_out = COAP_RESPONSE_CODE_UNAUTHORIZED;
+        charra_r = CHARRA_RC_VERIFICATION_FAILED;
+        goto cleanup;
+    }
+
+    if (req->secret_len != sizeof(challenge.secret) ||
+            !constant_time_equal(
+                    req->secret, challenge.secret, sizeof(challenge.secret))) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: CONFIRM from identity "
+                         "%s... did NOT echo the challenge secret -- this "
+                         "requester does not hold the EK/AK it claims. "
+                         "Nothing signed, nothing revoked.",
+                ek_fingerprint_hex);
+        *response_code_out = COAP_RESPONSE_CODE_UNAUTHORIZED;
+        charra_r = CHARRA_RC_VERIFICATION_FAILED;
+        goto cleanup;
+    }
+    charra_log_info("[" LOG_NAME "] /certify_ak: CONFIRM from identity %s... "
+                    "echoed the correct secret (ActivateCredential proves "
+                    "TPM possession); issuing certificate.",
+            ek_fingerprint_hex);
+
+    /* --- sign, for the key bound into the challenge --- */
     if ((charra_r = charra_io_read_file(verifier_ca_cert_path,
                  &verifier_ca_cert_der, &verifier_ca_cert_der_len)) !=
             CHARRA_RC_SUCCESS) {
@@ -1378,8 +1554,8 @@ static void coap_certify_ak_handler(struct coap_resource_t* resource,
     mbedtls_x509_crt_init(&verifier_ca_cert);
     verifier_ca_cert_inited = true;
     if (mbedtls_x509_crt_parse(&verifier_ca_cert,
-                (uint8_t*)verifier_ca_cert_der,
-                verifier_ca_cert_der_len) != 0) {
+                (uint8_t*)verifier_ca_cert_der, verifier_ca_cert_der_len) !=
+            0) {
         charra_log_error("[" LOG_NAME "] /certify_ak: could not parse "
                          "Verifier CA certificate.");
         charra_r = CHARRA_RC_CRYPTO_ERROR;
@@ -1396,11 +1572,11 @@ static void coap_certify_ak_handler(struct coap_resource_t* resource,
     }
 
     uint8_t ak_cert_serial[16] = {0};
-    if ((charra_r = charra_crypto_sign_ak_certificate(ak_public_key,
-                 "CN=CHARRA AK", verifier_ca_subject_name,
-                 ak_cert_not_before_utc, ak_cert_not_after_utc,
-                 verifier_ca_key_path, &ak_cert_der, &ak_cert_der_len,
-                 ak_cert_serial)) != CHARRA_RC_SUCCESS) {
+    if ((charra_r = charra_crypto_sign_ak_certificate(
+                 (TPM2B_PUBLIC*)challenge.ak_public_key, "CN=CHARRA AK",
+                 verifier_ca_subject_name, ak_cert_not_before_utc,
+                 ak_cert_not_after_utc, verifier_ca_key_path, &ak_cert_der,
+                 &ak_cert_der_len, ak_cert_serial)) != CHARRA_RC_SUCCESS) {
         charra_log_error(
                 "[" LOG_NAME "] /certify_ak: could not sign AK certificate.");
         goto cleanup;
@@ -1409,118 +1585,20 @@ static void coap_certify_ak_handler(struct coap_resource_t* resource,
             "[" LOG_NAME "] /certify_ak: AK certificate signed (%u bytes).",
             ak_cert_der_len);
 
-    /* --- generate the MakeCredential secret (a fresh AES-256 key) and
-     * encrypt the AK certificate under it --- */
-    uint8_t aes_key[CHARRA_AES256GCM_KEY_LEN] = {0};
-    {
-        mbedtls_ctr_drbg_context ctr_drbg;
-        mbedtls_entropy_context entropy;
-        if ((charra_r = charra_crypto_seeded_rng_init(&ctr_drbg, &entropy)) !=
-                CHARRA_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] /certify_ak: could not seed RNG.");
-            goto cleanup;
-        }
-        int mbedtls_r =
-                mbedtls_ctr_drbg_random(&ctr_drbg, aes_key, sizeof(aes_key));
-        charra_crypto_seeded_rng_free(&ctr_drbg, &entropy);
-        if (mbedtls_r != 0) {
-            charra_log_error("[" LOG_NAME
-                             "] /certify_ak: could not generate AES key.");
-            charra_r = CHARRA_RC_CRYPTO_ERROR;
-            goto cleanup;
-        }
-    }
-
-    charra_print_hex(CHARRA_LOG_INFO, sizeof(aes_key), aes_key,
-            "[DEBUG] /certify_ak: aes_key = 0x", "\n", false);
-
-    uint8_t aes_gcm_nonce[CHARRA_AES256GCM_NONCE_LEN] = {0};
-    uint8_t aes_gcm_tag[CHARRA_AES256GCM_TAG_LEN] = {0};
-    if ((charra_r = charra_crypto_aes256gcm_encrypt(aes_key, ak_cert_der,
-                 ak_cert_der_len, aes_gcm_nonce, aes_gcm_tag,
-                 &ak_cert_ciphertext)) != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME
-                         "] /certify_ak: could not encrypt AK certificate.");
-    }
-    charra_print_hex(CHARRA_LOG_INFO, sizeof(aes_gcm_nonce), aes_gcm_nonce,
-            "[DEBUG] /certify_ak: nonce = 0x", "\n", false);
-    charra_print_hex(CHARRA_LOG_INFO, sizeof(aes_gcm_tag), aes_gcm_tag,
-            "[DEBUG] /certify_ak: tag = 0x", "\n", false);
-    if (charra_r != CHARRA_RC_SUCCESS) {
-        goto cleanup;
-    }
-    /* Permanent integrity fingerprint of the ciphertext as sent -- lets a
-     * receiver-side mismatch be diagnosed by diffing two short hashes. */
-    uint8_t ak_ciphertext_fingerprint[32] = {0};
-    if (hash_sha256(ak_cert_der_len, ak_cert_ciphertext,
-                ak_ciphertext_fingerprint) == CHARRA_RC_SUCCESS) {
-        charra_print_hex(CHARRA_LOG_INFO, sizeof(ak_ciphertext_fingerprint),
-                ak_ciphertext_fingerprint,
-                "[DEBUG] /certify_ak: ciphertext sha256 = 0x", "\n", false);
-    }
-
-    /* --- wrap the AES key so only a TPM holding the EK/AK pair can
-     * recover it (TPM2_MakeCredential) --- */
-    if ((tss_r = Tss2_TctiLdr_Initialize(getenv("CHARRA_TCTI"), &tcti_ctx)) !=
-            TSS2_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] /certify_ak: Tss2_TctiLdr_Initialize.");
-        charra_r = CHARRA_RC_ERROR;
-        goto cleanup;
-    }
-    if ((tss_r = Esys_Initialize(&esys_ctx, tcti_ctx, NULL)) !=
-            TSS2_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] /certify_ak: Esys_Initialize.");
-        charra_r = CHARRA_RC_ERROR;
-        goto cleanup;
-    }
-
-    TPM2B_DIGEST credential = {0};
-    credential.size = sizeof(aes_key);
-    memcpy(credential.buffer, aes_key, sizeof(aes_key));
-
-    if ((charra_r = charra_tpm_make_credential_for_ak(esys_ctx,
-                 &ek_public_key, ak_name, &credential, &credential_blob,
-                 &wrapped_secret)) != CHARRA_RC_SUCCESS) {
-        charra_log_error(
-                "[" LOG_NAME "] /certify_ak: Esys_MakeCredential failed.");
-        goto cleanup;
-    }
-
-    /* --- marshal + send response --- */
     msg_certify_ak_response_dto resp = {0};
-    resp.credential_blob_len = sizeof(*credential_blob);
-    memcpy(resp.credential_blob, credential_blob, resp.credential_blob_len);
-    resp.wrapped_secret_len = sizeof(*wrapped_secret);
-    memcpy(resp.wrapped_secret, wrapped_secret, resp.wrapped_secret_len);
-    memcpy(resp.aes_gcm_nonce, aes_gcm_nonce, sizeof(aes_gcm_nonce));
-    memcpy(resp.aes_gcm_tag, aes_gcm_tag, sizeof(aes_gcm_tag));
     resp.ak_certificate_len = ak_cert_der_len;
-    resp.ak_certificate = ak_cert_ciphertext;
-
-    if ((charra_r = charra_marshal_certify_ak_response(&resp,
-                 &marshaled_response_len, &marshaled_response)) !=
+    resp.ak_certificate = ak_cert_der;
+    if ((charra_r = charra_marshal_certify_ak_response(
+                 &resp, marshaled_len_out, marshaled_out)) !=
             CHARRA_RC_SUCCESS) {
         charra_log_error(
-                "[" LOG_NAME "] /certify_ak: could not marshal response.");
+                "[" LOG_NAME "] /certify_ak: could not marshal CONFIRM.");
         goto cleanup;
     }
 
-    charra_log_info("[" LOG_NAME "] /certify_ak: AK certified successfully.");
-
-    /* --- record the issuance: revokes any prior record for this EK, then
-     * appends this one as the new active record. Deliberately done only
-     * here, at the point the response is about to actually be sent -- not
-     * right after signing -- so a later failure (marshal/MakeCredential)
-     * can never revoke a working certificate in favor of one the requester
-     * never receives. */
-    uint8_t ek_fingerprint[32] = {0};
-    if ((charra_r = hash_sha256(req.ek_certificate_len, req.ek_certificate,
-                 ek_fingerprint)) != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] /certify_ak: could not hash EK "
-                         "certificate for state tracking.");
-        goto cleanup;
-    }
+    /* --- record the issuance, revoking any prior one for this identity.
+     * Only reachable past the proof above, so a request that can't answer
+     * the challenge can no longer revoke a working certificate. */
     time_t ak_cert_expires_at = 0;
     if (!charra_crypto_parse_utc_yyyymmddhhmmss(
                 ak_cert_not_after_utc, &ak_cert_expires_at)) {
@@ -1529,15 +1607,6 @@ static void coap_certify_ak_handler(struct coap_resource_t* resource,
         charra_r = CHARRA_RC_ERROR;
         goto cleanup;
     }
-
-    char ek_fingerprint_hex[17] = {0};
-    hex_prefix(ek_fingerprint, sizeof(ek_fingerprint), ek_fingerprint_hex,
-            sizeof(ek_fingerprint_hex));
-    /* charra_ak_state_renew() below silently revokes any prior record for
-     * this identity -- looked up here purely so that revocation, an event
-     * worth knowing about (an existing valid identity being superseded, as
-     * opposed to a brand-new one being provisioned), is actually visible in
-     * the log instead of happening invisibly inside the renewal call. */
     {
         charra_ak_state_record* existing_records = NULL;
         uint32_t existing_count = 0;
@@ -1574,8 +1643,8 @@ static void coap_certify_ak_handler(struct coap_resource_t* resource,
     charra_ak_state_record ak_record = {0};
     memcpy(ak_record.ek_fingerprint, ek_fingerprint,
             sizeof(ak_record.ek_fingerprint));
-    ak_record.ak_name_len = req.ak_name_len;
-    memcpy(ak_record.ak_name, req.ak_name, req.ak_name_len);
+    ak_record.ak_name_len = challenge.ak_name_len;
+    memcpy(ak_record.ak_name, challenge.ak_name, challenge.ak_name_len);
     memcpy(ak_record.serial, ak_cert_serial, sizeof(ak_record.serial));
     ak_record.issued_at = time(NULL);
     ak_record.expires_at = ak_cert_expires_at;
@@ -1596,7 +1665,90 @@ static void coap_certify_ak_handler(struct coap_resource_t* resource,
                 ek_fingerprint_hex, new_serial_hex, (long)ak_cert_expires_at);
     }
 
-    response_code = COAP_RESPONSE_CODE_CONTENT;
+    *response_code_out = COAP_RESPONSE_CODE_CONTENT;
+    charra_r = CHARRA_RC_SUCCESS;
+
+cleanup:
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        free(*marshaled_out);
+        *marshaled_out = NULL;
+        *marshaled_len_out = 0;
+    }
+    free(ak_cert_der);
+    if (verifier_ca_cert_inited) {
+        mbedtls_x509_crt_free(&verifier_ca_cert);
+    }
+    charra_io_free_file_buffer(&verifier_ca_cert_der);
+    return charra_r;
+}
+
+/**
+ * @brief /certify_ak: dispatches the two legs of the credential-activation
+ * handshake (see CHARRA_CERTIFY_AK_* in charra_dto.h). Unmarshals, routes
+ * on `kind`, and sends whatever response the leg produced.
+ */
+static void coap_certify_ak_handler(struct coap_resource_t* resource,
+                                struct coap_session_t* session,
+                                const struct coap_pdu_t* request,
+                                const struct coap_string_t* query,
+                                struct coap_pdu_t* response) {
+    int coap_r = 0;
+    CHARRA_RC charra_r = CHARRA_RC_ERROR;
+    coap_pdu_code_t response_code = COAP_RESPONSE_CODE_INTERNAL_ERROR;
+
+    log_peer_address("/certify_ak", session);
+
+    msg_certify_ak_request_dto req = {0};
+    bool req_unmarshaled = false;
+    uint8_t* marshaled_response = NULL;
+    uint32_t marshaled_response_len = 0;
+
+    size_t data_len = 0;
+    const uint8_t* data = NULL;
+    size_t data_offset = 0;
+    size_t data_total_len = 0;
+    if ((coap_r = coap_get_data_large(request, &data_len, &data, &data_offset,
+                 &data_total_len)) == 0) {
+        charra_log_error(
+                "[" LOG_NAME "] /certify_ak: Could not get CoAP PDU data.");
+        response_code = COAP_RESPONSE_CODE_BAD_REQUEST;
+        goto cleanup;
+    }
+    charra_log_info(
+            "[" LOG_NAME "] /certify_ak: received request of length %zu.",
+            data_len);
+
+    if ((charra_r = charra_unmarshal_certify_ak_request(
+                 data_len, data, &req)) != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] /certify_ak: could not parse CBOR request.");
+        response_code = COAP_RESPONSE_CODE_BAD_REQUEST;
+        goto cleanup;
+    }
+    req_unmarshaled = true;
+
+    switch (req.kind) {
+    case CHARRA_CERTIFY_AK_CHALLENGE:
+        charra_r = certify_ak_do_challenge(
+                &req, &marshaled_response, &marshaled_response_len,
+                &response_code);
+        break;
+    case CHARRA_CERTIFY_AK_CONFIRM:
+        charra_r = certify_ak_do_confirm(
+                &req, &marshaled_response, &marshaled_response_len,
+                &response_code);
+        break;
+    default:
+        charra_log_error("[" LOG_NAME "] /certify_ak: unknown kind %u.",
+                req.kind);
+        response_code = COAP_RESPONSE_CODE_BAD_REQUEST;
+        charra_r = CHARRA_RC_BAD_ARGUMENT;
+        break;
+    }
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        goto cleanup;
+    }
+
     coap_pdu_set_code(response, response_code);
     if ((coap_r = coap_add_data_large_response(resource, session, request,
                  response, query, COAP_MEDIATYPE_APPLICATION_CBOR, -1, 0,
@@ -1614,37 +1766,8 @@ cleanup:
     coap_pdu_set_code(response, response_code);
 
 cleanup_success:
-    /* NULL on the success path (ownership transferred above); non-NULL
-     * (and still ours to free) on every other path. */
+    /* NULL on the success path (ownership transferred above). */
     free(marshaled_response);
-    free(ak_cert_der);
-    /* ak_cert_ciphertext: owned by resp.ak_certificate once assigned above;
-     * freed here regardless, same pointer either way */
-    free(ak_cert_ciphertext);
-
-    if (credential_blob != NULL) {
-        Esys_Free(credential_blob);
-    }
-    if (wrapped_secret != NULL) {
-        Esys_Free(wrapped_secret);
-    }
-    if (esys_ctx != NULL) {
-        Esys_Finalize(&esys_ctx);
-    }
-    if (tcti_ctx != NULL) {
-        Tss2_TctiLdr_Finalize(&tcti_ctx);
-    }
-
-    if (verifier_ca_cert_inited) {
-        mbedtls_x509_crt_free(&verifier_ca_cert);
-    }
-    charra_io_free_file_buffer(&verifier_ca_cert_der);
-
-    if (ek_leaf_cert_inited) {
-        mbedtls_x509_crt_free(&ek_leaf_cert);
-    }
-    charra_io_free_file_buffer(&manufacturer_root_der);
-
     if (req_unmarshaled) {
         charra_free_if_not_null(req.ek_certificate);
     }

@@ -753,6 +753,10 @@ AK certificates via standard TPM2 Credential Activation
 (`TPM2_MakeCredential`/`ActivateCredential`), no separate manual CA
 enrollment step.
 
+**Now a two-leg challenge-response exchange** (CHALLENGE then CONFIRM) --
+see "/certify_ak is now a two-leg handshake" below, which supersedes the
+one-shot flow the rest of this entry describes.
+
 **Why a separate endpoint, not folded into `/appraise`**: a first-ever
 uncertified-AK request can't carry a meaningful appraisal verdict, since
 `ActivateCredential` (which must complete on the requester's own TPM) hasn't
@@ -1462,6 +1466,81 @@ A batch of logging and diagnostics improvements, in one commit:
   `+------------ Run Summary --------------+` block after every run — one
   line per Verifier (`PASS`/`FAIL`, `AK cached`/`fresh`, latency in ms,
   reason), plus the `log_r` redaction byte counts.
+
+### `/certify_ak` is now a two-leg handshake: the requester must echo the secret back
+
+**The bug this closes.** The one-shot exchange had the Verifier sign the
+certificate, wrap the AES key via `MakeCredential`, **and call
+`charra_ak_state_renew()` — which revokes the requester's previous
+certificate** — all before sending the response, i.e. before it had any
+evidence the requester could actually open it. The request itself carries
+only the EK *certificate* (public data) plus the AK's public key/name;
+nothing in it proves possession of the EK private key. So anyone holding a
+copy of a legitimate EK certificate could send a `/certify_ak` request and
+knock out that identity's working certificate, while being cryptographically
+unable to read or use the replacement. A denial of service, not a theft --
+confidentiality was never the weak part, `MakeCredential` covered that.
+
+**The fix.** `/certify_ak` gained a `kind` discriminator
+(`CHARRA_CERTIFY_AK_CHALLENGE` / `_CONFIRM`, `charra_dto.h`) and split in two:
+
+- **CHALLENGE**: Verifier validates the EK chain, generates a random 32-byte
+  secret, wraps it via `MakeCredential` against that EK/AK pair, returns only
+  the wrapped secret. **Signs nothing, records nothing** -- an unanswered
+  challenge leaves no trace.
+- **CONFIRM**: requester echoes back the secret it recovered via
+  `ActivateCredential`. Only a TPM genuinely holding that EK private key with
+  that AK loaded can produce it. On a match the Verifier signs, calls
+  `charra_ak_state_renew()`, and returns the certificate.
+
+Every irreversible step now sits behind the proof.
+
+**Pending-challenge state** (`certify_ak_pending[]`, `verifier.c`): keyed by
+EK fingerprint, 60s TTL, 8 slots (the RP's own handshake and one relayed for
+the Attester can overlap), in memory only -- a handshake spans seconds and a
+restart mid-flight just means a retry. Lookups are **single-use**: a matching
+entry is copied out and cleared, so neither a replay nor a retry after a
+wrong guess can reuse it. The secret is compared in constant time.
+
+**CONFIRM certifies the key bound into the CHALLENGE**, not one it re-supplies
+-- `ak_public_key`/`ak_name` are deliberately absent from the CONFIRM leg, so
+even a leaked secret can't be redirected onto a different key. CONFIRM also
+needs no TPM at all (the proof was produced by the requester's), which removes
+it from TPM-simulator contention entirely.
+
+**The certificate now travels in the clear.** The AES-256-GCM wrapping (and
+`aes_gcm_nonce`/`aes_gcm_tag`) is gone from `msg_certify_ak_response_dto`:
+it only ever served as an *implicit* possession proof, which CONFIRM now
+makes explicit. Keeping it would also have been self-defeating, since CONFIRM
+puts that same secret on the wire. The certificate was never secret anyway --
+identical bytes travel unencrypted in every later `/appraise`.
+
+**Attester relay adapted.** Only the Attester's TPM can activate a challenge
+meant for it, so `/certify_ak_of_attester` gained a fourth kind, `ACTIVATE`:
+RP relays the Verifier's CHALLENGE, the Attester activates and returns the
+secret (`msg_activate_credential_response_dto`), and the RP relays that as
+the Verifier's CONFIRM. `DELIVER_VERIFIER` then carries a plaintext
+certificate. `DELIVER_RP` is unchanged -- the RP is its own CA on that leg
+and still uses the one-shot wrapped form, so the Attester's unwrap is what
+proves possession there. Making that leg symmetrical is a follow-up.
+
+**RP client**: `ensure_rp_ak_certificate()` now does CHALLENGE →
+`ActivateCredential` → CONFIRM. The ~120 lines of inline CoAP boilerplate it
+carried were replaced with the existing `rp_coap_fetch()` helper, wrapped in
+a new `rp_certify_ak_exchange()` that preserves the established
+"reprovision mutex, then TPM mutex, never nested" lock discipline.
+
+**Verified**: all 11 suites pass (246 assertions; `test_certify_ak_marshaling`
+20 → 29, covering the new `kind`/`secret` fields, the certificate-less
+CHALLENGE response shape, and the ACTIVATE DTO). Live 1-through-5-verifier
+sweep: unanimous `5/5 Verifiers passed`, zero `ERROR` lines across all eight
+component logs, both identities (RP's own and the relayed Attester's) visible
+completing CHALLENGE → CONFIRM in the Verifier log. A throwaway
+(not-committed) client then confirmed the actual security property against a
+live Verifier holding a valid certificate: an abandoned CHALLENGE, a CONFIRM
+with a wrong secret (4.01), and a CONFIRM with no live challenge (4.01, also
+proving single-use consumption) all left the AK-provisioning ledger
+byte-identical -- nothing revoked.
 
 ### Timeout-handling bugs, wall-clock timing rewrite, and a stale-vote bug — FIXED
 

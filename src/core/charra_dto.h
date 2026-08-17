@@ -226,50 +226,73 @@ typedef struct {
 } msg_rp_evidence_dto;
 
 /**
- * /certify_ak request: asks the Verifier, acting as Privacy CA, to certify
- * an AK. Sent by whichever party wants an AK certified (RP for itself, or
- * relayed for the Attester) -- the protocol itself doesn't distinguish
- * who's asking. A separate exchange from msg_rp_appraisal_dto, completed
- * once (or on renewal) before that AK is ever presented in an appraisal --
- * see CHARRA_V2_NOTES.md for why the two can't be merged into one message.
+ * /certify_ak "kind" values -- the two legs of the credential-activation
+ * handshake the Verifier runs before certifying an AK.
+ *
+ * CHALLENGE: Verifier validates the EK chain and returns a random secret
+ * wrapped via TPM2_MakeCredential; nothing is signed or recorded yet.
+ * CONFIRM: requester echoes back the secret it recovered via
+ * TPM2_ActivateCredential -- only the right TPM can -- and the Verifier
+ * then signs, records, and releases the certificate.
+ *
+ * Two legs because a one-shot response forced the Verifier to sign and
+ * revoke the prior certificate before any proof, so anyone holding a copy
+ * of an EK certificate (public data) could knock out a working identity.
+ */
+#define CHARRA_CERTIFY_AK_CHALLENGE 0
+#define CHARRA_CERTIFY_AK_CONFIRM 1
+
+/** CHALLENGE secret size -- the largest MakeCredential reliably carries. */
+#define CHARRA_CERTIFY_AK_SECRET_LEN 32
+
+/**
+ * /certify_ak request, both legs (discriminated by `kind`): asks the
+ * Verifier, acting as Privacy CA, to certify an AK. Sent by whichever party
+ * wants one certified (RP for itself, or relayed for the Attester).
  */
 typedef struct {
-    /* EK certificate (DER), chains to the manufacturer root */
+    uint32_t kind; /* one of CHARRA_CERTIFY_AK_* above */
+
+    /* EK certificate (DER). CHALLENGE validates it; CONFIRM uses its
+     * SHA-256 to look the pending challenge up. */
     uint32_t ek_certificate_len;
     uint8_t* ek_certificate;
 
-    /* the AK's public key, to be certified */
+    /* CHALLENGE only. Not re-sent on CONFIRM: the Verifier certifies the
+     * key it already bound into the challenge, so a leaked secret can't be
+     * redirected onto a different key. */
     uint32_t ak_public_key_len;
     uint8_t ak_public_key[sizeof(TPM2B_PUBLIC)];
 
-    /* the AK's TPM2B_NAME, exactly as the requester's own Esys_ReadPublic()
-     * reports it -- NOT recomputed by the Verifier, see
-     * charra_tpm_make_credential_for_ak()'s docstring for why that's safe */
+    /* CHALLENGE only: the AK's TPM2B_NAME as the requester's own
+     * Esys_ReadPublic() reports it -- not recomputed by the Verifier, see
+     * charra_tpm_make_credential_for_ak(). */
     uint32_t ak_name_len;
     uint8_t ak_name[sizeof(TPM2B_NAME)];
+
+    /* CONFIRM only: the secret recovered via TPM2_ActivateCredential. */
+    uint32_t secret_len;
+    uint8_t secret[CHARRA_CERTIFY_AK_SECRET_LEN];
 } msg_certify_ak_request_dto;
 
 /**
- * /certify_ak response: the TPM2_MakeCredential() output, plus the actual
- * signed AK certificate -- too large to fit inside MakeCredential's own
- * small credential field, so it travels alongside, AES-256-GCM-encrypted
- * under that field's contents (a fresh symmetric key, not the certificate
- * itself). Only a TPM that completes ActivateCredential with the matching
- * EK/AK pair ever recovers that key, and so ever recovers the certificate.
+ * /certify_ak response: CHALLENGE populates credential_blob +
+ * wrapped_secret, CONFIRM populates ak_certificate.
+ *
+ * The certificate is sent in the clear -- the same bytes travel
+ * unencrypted in every later /appraise anyway. Encrypting it under the
+ * MakeCredential secret only ever served as an implicit possession proof,
+ * which CONFIRM now makes explicit (and which would be self-defeating here,
+ * since CONFIRM puts that secret on the wire).
  */
 typedef struct {
-    /* TPM2_MakeCredential() outputs */
+    /* TPM2_MakeCredential() outputs (CHALLENGE leg) */
     uint32_t credential_blob_len;
     uint8_t credential_blob[sizeof(TPM2B_ID_OBJECT)];
     uint32_t wrapped_secret_len;
     uint8_t wrapped_secret[sizeof(TPM2B_ENCRYPTED_SECRET)];
 
-    /* AES-256-GCM parameters for ak_certificate below; key = the 32-byte
-     * credential recovered via ActivateCredential */
-    uint8_t aes_gcm_nonce[12];
-    uint8_t aes_gcm_tag[16];
-
-    /* the signed AK certificate (DER), AES-256-GCM-encrypted as above */
+    /* the signed AK certificate (DER), plaintext (CONFIRM leg) */
     uint32_t ak_certificate_len;
     uint8_t* ak_certificate;
 } msg_certify_ak_response_dto;
@@ -285,18 +308,21 @@ typedef struct {
  *                      below).
  *   DELIVER_RP:        RP relays back a credential-wrapped AK certificate it
  *                      signed itself, with its own CA.
- *   DELIVER_VERIFIER:  RP relays back a credential-wrapped AK certificate a
- *                      Verifier signed (via that Verifier's own, unmodified
- *                      /certify_ak) -- RP never decrypts this one itself,
- *                      only the Attester's TPM can via ActivateCredential.
+ *   ACTIVATE:          RP relays a Verifier's /certify_ak CHALLENGE; the
+ *                      Attester activates it and returns the recovered
+ *                      secret, which the RP relays as that Verifier's
+ *                      CONFIRM. Only the Attester's TPM could produce it.
+ *   DELIVER_VERIFIER:  RP relays back the plaintext AK certificate the
+ *                      Verifier released once CONFIRM succeeded.
  *
- * Both deliveries use msg_certify_ak_of_attester_request_dto below; the
- * Attester ends up holding two independently-issued certificates for the
- * same identity, one from each CA -- neither trusts the other's issuance.
+ * All three non-FETCH legs use msg_certify_ak_of_attester_request_dto
+ * below; the Attester ends up holding two independently-issued
+ * certificates for the same identity, one from each CA.
  */
 #define CHARRA_CERTIFY_AK_OF_ATTESTER_FETCH 0
 #define CHARRA_CERTIFY_AK_OF_ATTESTER_DELIVER_RP 1
 #define CHARRA_CERTIFY_AK_OF_ATTESTER_DELIVER_VERIFIER 2
+#define CHARRA_CERTIFY_AK_OF_ATTESTER_ACTIVATE 3
 
 /**
  * /certify_ak_of_attester response for kind == FETCH: Attester -> RP,
@@ -325,33 +351,46 @@ typedef struct {
 } msg_ak_identity_response_dto;
 
 /**
- * /certify_ak_of_attester request for kind == DELIVER_RP or
- * DELIVER_VERIFIER: RP -> Attester, relaying a signed AK certificate for
- * the Attester to unwrap (Esys_ActivateCredential) and persist -- proving
- * the Attester itself genuinely holds the EK/AK, not just trusting the RP's
- * say-so. Same field shape as msg_certify_ak_response_dto, reused verbatim:
- * this is exactly what is being relayed, whether RP signed it itself
- * (DELIVER_RP) or is passing through a Verifier's own /certify_ak response
- * unmodified (DELIVER_VERIFIER). Unused/zero for kind == FETCH.
+ * /certify_ak_of_attester request for every kind except FETCH: RP ->
+ * Attester. Fields populated follow from `kind`:
+ *
+ *   DELIVER_RP:       credential_blob + wrapped_secret + aes_gcm_* +
+ *                      ak_certificate (ciphertext) -- RP is the CA here and
+ *                      still uses the one-shot wrapped form, so the
+ *                      Attester's unwrap is what proves it holds the EK/AK.
+ *   ACTIVATE:         credential_blob + wrapped_secret only.
+ *   DELIVER_VERIFIER: ak_certificate only, plaintext -- the preceding
+ *                      ACTIVATE already supplied the possession proof.
  */
 typedef struct {
     uint32_t kind; /* one of CHARRA_CERTIFY_AK_OF_ATTESTER_* above */
 
-    /* TPM2_MakeCredential() outputs */
+    /* TPM2_MakeCredential() outputs (DELIVER_RP, ACTIVATE) */
     uint32_t credential_blob_len;
     uint8_t credential_blob[sizeof(TPM2B_ID_OBJECT)];
     uint32_t wrapped_secret_len;
     uint8_t wrapped_secret[sizeof(TPM2B_ENCRYPTED_SECRET)];
 
-    /* AES-256-GCM parameters for ak_certificate below; key = the 32-byte
-     * credential recovered via ActivateCredential */
+    /* AES-256-GCM parameters for ak_certificate below (DELIVER_RP only);
+     * key = the 32-byte credential recovered via ActivateCredential */
     uint8_t aes_gcm_nonce[12];
     uint8_t aes_gcm_tag[16];
 
-    /* the signed AK certificate (DER), AES-256-GCM-encrypted as above */
+    /* the signed AK certificate (DER) -- AES-256-GCM-encrypted as above for
+     * DELIVER_RP, plaintext for DELIVER_VERIFIER */
     uint32_t ak_certificate_len;
     uint8_t* ak_certificate;
 } msg_certify_ak_of_attester_request_dto;
+
+/**
+ * /certify_ak_of_attester response for kind == ACTIVATE: the secret the
+ * Attester recovered via TPM2_ActivateCredential, relayed by the RP as that
+ * Verifier's CONFIRM leg.
+ */
+typedef struct {
+    uint32_t secret_len;
+    uint8_t secret[CHARRA_CERTIFY_AK_SECRET_LEN];
+} msg_activate_credential_response_dto;
 
 /**
  * /qualify response: Verifier -> RP, the raw fabricated log to redact plus

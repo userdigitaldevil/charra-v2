@@ -52,6 +52,9 @@ static void test_request_round_trips(void) {
     memset(req.ak_public_key, 0x22, req.ak_public_key_len);
     req.ak_name_len = sizeof(req.ak_name);
     memset(req.ak_name, 0x33, req.ak_name_len);
+    req.kind = CHARRA_CERTIFY_AK_CONFIRM;
+    req.secret_len = sizeof(req.secret);
+    memset(req.secret, 0x44, req.secret_len);
 
     uint32_t marshaled_len = 0;
     uint8_t* marshaled = NULL;
@@ -74,6 +77,10 @@ static void test_request_round_trips(void) {
     check("ak_name round-trips",
             res.ak_name_len == req.ak_name_len &&
                     memcmp(res.ak_name, req.ak_name, req.ak_name_len) == 0);
+    check("kind round-trips", res.kind == req.kind);
+    check("secret round-trips",
+            res.secret_len == req.secret_len &&
+                    memcmp(res.secret, req.secret, req.secret_len) == 0);
 
     free(marshaled);
     free(res.ek_certificate);
@@ -103,24 +110,28 @@ static void test_request_empty_ek_certificate_accepted(void) {
     free(res.ek_certificate);
 }
 
-/** Hand-encodes a 3-byte-string array with an oversized second field
- * (ak_public_key), bypassing the DTO-based encoder the same way
- * test_marshaling_bounds.c's encode_raw() does. */
+/** Hand-encodes the request array with a caller-chosen oversized field,
+ * bypassing the DTO-based encoder the same way test_marshaling_bounds.c's
+ * encode_raw() does. */
 static void encode_raw_request(const uint8_t* ek_cert, size_t ek_cert_len,
         const uint8_t* ak_pub, size_t ak_pub_len, const uint8_t* ak_name,
-        size_t ak_name_len, uint8_t** out, size_t* out_len) {
-    size_t cap = ek_cert_len + ak_pub_len + ak_name_len + 64;
+        size_t ak_name_len, const uint8_t* secret, size_t secret_len,
+        uint8_t** out, size_t* out_len) {
+    size_t cap =
+            ek_cert_len + ak_pub_len + ak_name_len + secret_len + 64;
     uint8_t* buf = malloc(cap);
 
     QCBOREncodeContext ec = {0};
     UsefulBuf buf_in = {.ptr = buf, .len = cap};
     QCBOREncode_Init(&ec, buf_in);
     QCBOREncode_OpenArray(&ec);
+    QCBOREncode_AddUInt64(&ec, CHARRA_CERTIFY_AK_CHALLENGE);
     QCBOREncode_AddBytes(
             &ec, (UsefulBufC){.ptr = ek_cert, .len = ek_cert_len});
     QCBOREncode_AddBytes(&ec, (UsefulBufC){.ptr = ak_pub, .len = ak_pub_len});
     QCBOREncode_AddBytes(
             &ec, (UsefulBufC){.ptr = ak_name, .len = ak_name_len});
+    QCBOREncode_AddBytes(&ec, (UsefulBufC){.ptr = secret, .len = secret_len});
     QCBOREncode_CloseArray(&ec);
 
     UsefulBufC buf_out = {0};
@@ -141,7 +152,7 @@ static void test_request_oversized_ak_public_key_rejected(void) {
     uint8_t* raw = NULL;
     size_t raw_len = 0;
     encode_raw_request(small, sizeof(small), oversized, sizeof(oversized),
-            small, sizeof(small), &raw, &raw_len);
+            small, sizeof(small), small, sizeof(small), &raw, &raw_len);
 
     msg_certify_ak_request_dto res = {0};
     CHARRA_RC rc = charra_unmarshal_certify_ak_request(
@@ -164,7 +175,30 @@ static void test_request_oversized_ak_name_rejected(void) {
     uint8_t* raw = NULL;
     size_t raw_len = 0;
     encode_raw_request(small, sizeof(small), small, sizeof(small), oversized,
-            sizeof(oversized), &raw, &raw_len);
+            sizeof(oversized), small, sizeof(small), &raw, &raw_len);
+
+    msg_certify_ak_request_dto res = {0};
+    CHARRA_RC rc = charra_unmarshal_certify_ak_request(
+            (uint32_t)raw_len, raw, &res);
+    check("rejected with CHARRA_RC_MARSHALING_ERROR",
+            rc == CHARRA_RC_MARSHALING_ERROR);
+
+    free(raw);
+    free(res.ek_certificate);
+}
+
+static void test_request_oversized_secret_rejected(void) {
+    printf("\na secret one byte over its max size is rejected, not "
+           "overflowed\n");
+
+    uint8_t small[8] = {0};
+    uint8_t oversized[CHARRA_CERTIFY_AK_SECRET_LEN + 1];
+    memset(oversized, 0x43, sizeof(oversized));
+
+    uint8_t* raw = NULL;
+    size_t raw_len = 0;
+    encode_raw_request(small, sizeof(small), small, sizeof(small), small,
+            sizeof(small), oversized, sizeof(oversized), &raw, &raw_len);
 
     msg_certify_ak_request_dto res = {0};
     CHARRA_RC rc = charra_unmarshal_certify_ak_request(
@@ -179,15 +213,14 @@ static void test_request_oversized_ak_name_rejected(void) {
 /* --- /certify_ak response ------------------------------------------------- */
 
 static void test_response_round_trips(void) {
-    printf("\n/certify_ak response survives marshal -> unmarshal unchanged\n");
+    printf("\n/certify_ak CONFIRM response survives marshal -> unmarshal "
+           "unchanged\n");
 
     msg_certify_ak_response_dto req = {0};
     req.credential_blob_len = sizeof(req.credential_blob);
     memset(req.credential_blob, 0x51, req.credential_blob_len);
     req.wrapped_secret_len = sizeof(req.wrapped_secret);
     memset(req.wrapped_secret, 0x52, req.wrapped_secret_len);
-    memset(req.aes_gcm_nonce, 0x53, sizeof(req.aes_gcm_nonce));
-    memset(req.aes_gcm_tag, 0x54, sizeof(req.aes_gcm_tag));
     uint8_t ak_cert[950];
     memset(ak_cert, 0x55, sizeof(ak_cert));
     req.ak_certificate = ak_cert;
@@ -211,12 +244,6 @@ static void test_response_round_trips(void) {
             res.wrapped_secret_len == req.wrapped_secret_len &&
                     memcmp(res.wrapped_secret, req.wrapped_secret,
                             req.wrapped_secret_len) == 0);
-    check("aes_gcm_nonce round-trips",
-            memcmp(res.aes_gcm_nonce, req.aes_gcm_nonce,
-                    sizeof(req.aes_gcm_nonce)) == 0);
-    check("aes_gcm_tag round-trips",
-            memcmp(res.aes_gcm_tag, req.aes_gcm_tag,
-                    sizeof(req.aes_gcm_tag)) == 0);
     check("ak_certificate round-trips",
             res.ak_certificate_len == req.ak_certificate_len &&
                     memcmp(res.ak_certificate, req.ak_certificate,
@@ -226,13 +253,42 @@ static void test_response_round_trips(void) {
     free(res.ak_certificate);
 }
 
+/* The CHALLENGE leg carries no certificate at all, so a zero-length
+ * ak_certificate is a normal response shape here, not an edge case. */
+static void test_response_challenge_shape_round_trips(void) {
+    printf("\n/certify_ak CHALLENGE response (no certificate) round-trips\n");
+
+    msg_certify_ak_response_dto req = {0};
+    req.credential_blob_len = sizeof(req.credential_blob);
+    memset(req.credential_blob, 0x71, req.credential_blob_len);
+    req.wrapped_secret_len = sizeof(req.wrapped_secret);
+    memset(req.wrapped_secret, 0x72, req.wrapped_secret_len);
+
+    uint32_t marshaled_len = 0;
+    uint8_t* marshaled = NULL;
+    CHARRA_RC rc = charra_marshal_certify_ak_response(
+            &req, &marshaled_len, &marshaled);
+    check("marshaling a certificate-less response succeeds",
+            rc == CHARRA_RC_SUCCESS);
+
+    msg_certify_ak_response_dto res = {0};
+    rc = charra_unmarshal_certify_ak_response(marshaled_len, marshaled, &res);
+    check("unmarshaling succeeds", rc == CHARRA_RC_SUCCESS);
+    check("ak_certificate_len is 0", res.ak_certificate_len == 0);
+    check("ak_certificate is NULL", res.ak_certificate == NULL);
+    check("credential_blob still round-trips",
+            res.credential_blob_len == req.credential_blob_len &&
+                    memcmp(res.credential_blob, req.credential_blob,
+                            req.credential_blob_len) == 0);
+
+    free(marshaled);
+    free(res.ak_certificate);
+}
+
 static void encode_raw_response(const uint8_t* cred_blob, size_t cred_len,
-        const uint8_t* secret, size_t secret_len, const uint8_t* nonce,
-        size_t nonce_len, const uint8_t* tag, size_t tag_len,
-        const uint8_t* ak_cert, size_t ak_cert_len, uint8_t** out,
-        size_t* out_len) {
-    size_t cap = cred_len + secret_len + nonce_len + tag_len + ak_cert_len +
-            64;
+        const uint8_t* wrapped, size_t wrapped_len, const uint8_t* ak_cert,
+        size_t ak_cert_len, uint8_t** out, size_t* out_len) {
+    size_t cap = cred_len + wrapped_len + ak_cert_len + 64;
     uint8_t* buf = malloc(cap);
 
     QCBOREncodeContext ec = {0};
@@ -241,9 +297,8 @@ static void encode_raw_response(const uint8_t* cred_blob, size_t cred_len,
     QCBOREncode_OpenArray(&ec);
     QCBOREncode_AddBytes(
             &ec, (UsefulBufC){.ptr = cred_blob, .len = cred_len});
-    QCBOREncode_AddBytes(&ec, (UsefulBufC){.ptr = secret, .len = secret_len});
-    QCBOREncode_AddBytes(&ec, (UsefulBufC){.ptr = nonce, .len = nonce_len});
-    QCBOREncode_AddBytes(&ec, (UsefulBufC){.ptr = tag, .len = tag_len});
+    QCBOREncode_AddBytes(
+            &ec, (UsefulBufC){.ptr = wrapped, .len = wrapped_len});
     QCBOREncode_AddBytes(
             &ec, (UsefulBufC){.ptr = ak_cert, .len = ak_cert_len});
     QCBOREncode_CloseArray(&ec);
@@ -266,7 +321,7 @@ static void test_response_oversized_credential_blob_rejected(void) {
     uint8_t* raw = NULL;
     size_t raw_len = 0;
     encode_raw_response(oversized, sizeof(oversized), small, sizeof(small),
-            small, 12, small, 16, small, sizeof(small), &raw, &raw_len);
+            small, sizeof(small), &raw, &raw_len);
 
     msg_certify_ak_response_dto res = {0};
     CHARRA_RC rc = charra_unmarshal_certify_ak_response(
@@ -278,18 +333,19 @@ static void test_response_oversized_credential_blob_rejected(void) {
     free(res.ak_certificate);
 }
 
-static void test_response_wrong_size_nonce_rejected(void) {
-    printf("\nan aes_gcm_nonce of the wrong size (not just oversized) is "
-           "rejected\n");
+static void test_response_oversized_wrapped_secret_rejected(void) {
+    printf("\na wrapped_secret one byte over its max size is rejected, not "
+           "overflowed\n");
 
     uint8_t small[8] = {0};
-    uint8_t wrong_size_nonce[11] = {0}; /* must be exactly 12 */
+    uint8_t oversized
+            [sizeof(((msg_certify_ak_response_dto*)0)->wrapped_secret) + 1];
+    memset(oversized, 0x62, sizeof(oversized));
 
     uint8_t* raw = NULL;
     size_t raw_len = 0;
-    encode_raw_response(small, sizeof(small), small, sizeof(small),
-            wrong_size_nonce, sizeof(wrong_size_nonce), small, 16, small,
-            sizeof(small), &raw, &raw_len);
+    encode_raw_response(small, sizeof(small), oversized, sizeof(oversized),
+            small, sizeof(small), &raw, &raw_len);
 
     msg_certify_ak_response_dto res = {0};
     CHARRA_RC rc = charra_unmarshal_certify_ak_response(
@@ -301,28 +357,56 @@ static void test_response_wrong_size_nonce_rejected(void) {
     free(res.ak_certificate);
 }
 
-static void test_response_wrong_size_tag_rejected(void) {
-    printf("\nan aes_gcm_tag of the wrong size (not just oversized) is "
-           "rejected\n");
+/* --- ACTIVATE response ---------------------------------------------------- */
 
-    uint8_t small[8] = {0};
-    uint8_t nonce[12] = {0};
-    uint8_t wrong_size_tag[17] = {0}; /* must be exactly 16 */
+static void test_activate_response_round_trips(void) {
+    printf("\nACTIVATE response survives marshal -> unmarshal unchanged\n");
 
-    uint8_t* raw = NULL;
-    size_t raw_len = 0;
-    encode_raw_response(small, sizeof(small), small, sizeof(small), nonce,
-            sizeof(nonce), wrong_size_tag, sizeof(wrong_size_tag), small,
-            sizeof(small), &raw, &raw_len);
+    msg_activate_credential_response_dto req = {0};
+    req.secret_len = sizeof(req.secret);
+    memset(req.secret, 0x81, req.secret_len);
 
-    msg_certify_ak_response_dto res = {0};
-    CHARRA_RC rc = charra_unmarshal_certify_ak_response(
-            (uint32_t)raw_len, raw, &res);
+    uint32_t marshaled_len = 0;
+    uint8_t* marshaled = NULL;
+    CHARRA_RC rc = charra_marshal_activate_credential_response(
+            &req, &marshaled_len, &marshaled);
+    check("marshaling succeeds", rc == CHARRA_RC_SUCCESS);
+
+    msg_activate_credential_response_dto res = {0};
+    rc = charra_unmarshal_activate_credential_response(
+            marshaled_len, marshaled, &res);
+    check("unmarshaling succeeds", rc == CHARRA_RC_SUCCESS);
+    check("secret round-trips",
+            res.secret_len == req.secret_len &&
+                    memcmp(res.secret, req.secret, req.secret_len) == 0);
+
+    free(marshaled);
+}
+
+static void test_activate_response_oversized_secret_rejected(void) {
+    printf("\nan ACTIVATE secret one byte over its max size is rejected\n");
+
+    uint8_t oversized[CHARRA_CERTIFY_AK_SECRET_LEN + 1];
+    memset(oversized, 0x82, sizeof(oversized));
+
+    size_t cap = sizeof(oversized) + 64;
+    uint8_t* buf = malloc(cap);
+    QCBOREncodeContext ec = {0};
+    QCBOREncode_Init(&ec, (UsefulBuf){.ptr = buf, .len = cap});
+    QCBOREncode_OpenArray(&ec);
+    QCBOREncode_AddBytes(
+            &ec, (UsefulBufC){.ptr = oversized, .len = sizeof(oversized)});
+    QCBOREncode_CloseArray(&ec);
+    UsefulBufC buf_out = {0};
+    QCBOREncode_Finish(&ec, &buf_out);
+
+    msg_activate_credential_response_dto res = {0};
+    CHARRA_RC rc = charra_unmarshal_activate_credential_response(
+            (uint32_t)buf_out.len, buf, &res);
     check("rejected with CHARRA_RC_MARSHALING_ERROR",
             rc == CHARRA_RC_MARSHALING_ERROR);
 
-    free(raw);
-    free(res.ak_certificate);
+    free(buf);
 }
 
 int main(void) {
@@ -333,10 +417,13 @@ int main(void) {
     test_request_empty_ek_certificate_accepted();
     test_request_oversized_ak_public_key_rejected();
     test_request_oversized_ak_name_rejected();
+    test_request_oversized_secret_rejected();
     test_response_round_trips();
+    test_response_challenge_shape_round_trips();
     test_response_oversized_credential_blob_rejected();
-    test_response_wrong_size_nonce_rejected();
-    test_response_wrong_size_tag_rejected();
+    test_response_oversized_wrapped_secret_rejected();
+    test_activate_response_round_trips();
+    test_activate_response_oversized_secret_rejected();
 
     printf("\n================================================\n");
     printf("%u tests, %u failed\n", tests_run, tests_failed);

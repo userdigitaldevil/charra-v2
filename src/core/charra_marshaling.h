@@ -190,6 +190,22 @@ CHARRA_RC charra_unmarshal_certify_ak_response(
         msg_certify_ak_response_dto* certify_ak_response);
 
 /**
+ * @brief Marshals a /certify_ak_of_attester response DTO for kind ==
+ * ACTIVATE (see msg_activate_credential_response_dto in charra_dto.h).
+ */
+CHARRA_RC charra_marshal_activate_credential_response(
+        const msg_activate_credential_response_dto* activate_response,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data);
+
+/**
+ * @brief Unmarshals a /certify_ak_of_attester response DTO for kind ==
+ * ACTIVATE. Bounds-checks secret_len against its fixed-size destination.
+ */
+CHARRA_RC charra_unmarshal_activate_credential_response(
+        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
+        msg_activate_credential_response_dto* activate_response);
+
+/**
  * @brief Marshals a /certify_ak_of_attester response DTO for kind == FETCH
  * (see msg_ak_identity_response_dto in charra_dto.h).
  */

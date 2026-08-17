@@ -1104,6 +1104,9 @@ static CHARRA_RC charra_marshal_certify_ak_request_internal(
     /* root array */
     QCBOREncode_OpenArray(&ec);
 
+    /* encode "kind" */
+    QCBOREncode_AddUInt64(&ec, certify_ak_request->kind);
+
     /* encode "ek-certificate" */
     UsefulBufC ek_certificate = {.ptr = certify_ak_request->ek_certificate,
             .len = certify_ak_request->ek_certificate_len};
@@ -1118,6 +1121,11 @@ static CHARRA_RC charra_marshal_certify_ak_request_internal(
     UsefulBufC ak_name = {.ptr = certify_ak_request->ak_name,
             .len = certify_ak_request->ak_name_len};
     QCBOREncode_AddBytes(&ec, ak_name);
+
+    /* encode "secret" */
+    UsefulBufC secret = {.ptr = certify_ak_request->secret,
+            .len = certify_ak_request->secret_len};
+    QCBOREncode_AddBytes(&ec, secret);
 
     /* close array: root_array_encoder */
     QCBOREncode_CloseArray(&ec);
@@ -1202,6 +1210,11 @@ CHARRA_RC charra_unmarshal_certify_ak_request(
     if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_ARRAY)))
         goto cbor_parse_error;
 
+    /* parse "kind" */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_INT64)))
+        goto cbor_parse_error;
+    res.kind = (uint32_t)item.val.uint64;
+
     /* parse "ek-certificate" (bytes) -- no fixed upper bound, heap-alloc */
     if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
         goto cbor_parse_error;
@@ -1233,6 +1246,16 @@ CHARRA_RC charra_unmarshal_certify_ak_request(
         goto cbor_parse_error;
     }
     memcpy(&(res.ak_name), item.val.string.ptr, res.ak_name_len);
+
+    /* parse "secret" (bytes) */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.secret_len = item.val.string.len;
+    if (res.secret_len > sizeof(res.secret)) {
+        charra_log_error("CBOR parser: secret exceeds maximum allowed size.");
+        goto cbor_parse_error;
+    }
+    memcpy(&(res.secret), item.val.string.ptr, res.secret_len);
 
     if ((cborerr = QCBORDecode_Finish(&dc))) {
         charra_log_error("CBOR parser: expected end of input, but could not "
@@ -1277,14 +1300,6 @@ static CHARRA_RC charra_marshal_certify_ak_response_internal(
     UsefulBufC wrapped_secret = {.ptr = certify_ak_response->wrapped_secret,
             .len = certify_ak_response->wrapped_secret_len};
     QCBOREncode_AddBytes(&ec, wrapped_secret);
-
-    UsefulBufC aes_gcm_nonce = {.ptr = certify_ak_response->aes_gcm_nonce,
-            .len = sizeof(certify_ak_response->aes_gcm_nonce)};
-    QCBOREncode_AddBytes(&ec, aes_gcm_nonce);
-
-    UsefulBufC aes_gcm_tag = {.ptr = certify_ak_response->aes_gcm_tag,
-            .len = sizeof(certify_ak_response->aes_gcm_tag)};
-    QCBOREncode_AddBytes(&ec, aes_gcm_tag);
 
     UsefulBufC ak_certificate = {.ptr = certify_ak_response->ak_certificate,
             .len = certify_ak_response->ak_certificate_len};
@@ -1395,35 +1410,20 @@ CHARRA_RC charra_unmarshal_certify_ak_response(
     }
     memcpy(&(res.wrapped_secret), item.val.string.ptr, res.wrapped_secret_len);
 
-    /* parse "aes-gcm-nonce" (bytes) -- fixed size, checked exactly */
-    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
-        goto cbor_parse_error;
-    if (item.val.string.len != sizeof(res.aes_gcm_nonce)) {
-        charra_log_error("CBOR parser: AES-GCM nonce has the wrong size.");
-        goto cbor_parse_error;
-    }
-    memcpy(&(res.aes_gcm_nonce), item.val.string.ptr,
-            sizeof(res.aes_gcm_nonce));
-
-    /* parse "aes-gcm-tag" (bytes) -- fixed size, checked exactly */
-    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
-        goto cbor_parse_error;
-    if (item.val.string.len != sizeof(res.aes_gcm_tag)) {
-        charra_log_error("CBOR parser: AES-GCM tag has the wrong size.");
-        goto cbor_parse_error;
-    }
-    memcpy(&(res.aes_gcm_tag), item.val.string.ptr, sizeof(res.aes_gcm_tag));
-
-    /* parse "ak-certificate" (bytes) -- no fixed upper bound, heap-alloc */
+    /* parse "ak-certificate" (bytes) -- no fixed upper bound, heap-alloc.
+     * Legitimately empty on the CHALLENGE leg, so don't malloc(0). */
     if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
         goto cbor_parse_error;
     res.ak_certificate_len = item.val.string.len;
-    ak_certificate = (uint8_t*)malloc(res.ak_certificate_len);
-    if (ak_certificate == NULL) {
-        goto cbor_parse_error;
+    if (res.ak_certificate_len > 0) {
+        ak_certificate = (uint8_t*)malloc(res.ak_certificate_len);
+        if (ak_certificate == NULL) {
+            goto cbor_parse_error;
+        }
+        res.ak_certificate = ak_certificate;
+        memcpy(res.ak_certificate, item.val.string.ptr,
+                res.ak_certificate_len);
     }
-    res.ak_certificate = ak_certificate;
-    memcpy(res.ak_certificate, item.val.string.ptr, res.ak_certificate_len);
 
     if ((cborerr = QCBORDecode_Finish(&dc))) {
         charra_log_error("CBOR parser: expected end of input, but could not "
@@ -1440,6 +1440,112 @@ cbor_parse_error:
     charra_log_info("CBOR parser: skipping parsing.");
 
     charra_free_if_not_null(ak_certificate);
+
+    return CHARRA_RC_MARSHALING_ERROR;
+}
+
+/* --- /certify_ak_of_attester response (kind == ACTIVATE) ----------------- */
+
+static CHARRA_RC charra_marshal_activate_credential_response_internal(
+        const msg_activate_credential_response_dto* activate_response,
+        UsefulBuf buf_in, UsefulBufC* buf_out) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    assert(activate_response != NULL);
+
+    QCBOREncodeContext ec = {0};
+    QCBOREncode_Init(&ec, buf_in);
+
+    QCBOREncode_OpenArray(&ec);
+
+    UsefulBufC secret = {.ptr = activate_response->secret,
+            .len = activate_response->secret_len};
+    QCBOREncode_AddBytes(&ec, secret);
+
+    QCBOREncode_CloseArray(&ec);
+
+    if (QCBOREncode_Finish(&ec, buf_out) == QCBOR_SUCCESS) {
+        return CHARRA_RC_SUCCESS;
+    } else {
+        return CHARRA_RC_MARSHALING_ERROR;
+    }
+}
+
+CHARRA_RC charra_marshal_activate_credential_response(
+        const msg_activate_credential_response_dto* activate_response,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
+
+    assert(activate_response != NULL);
+
+    UsefulBuf buf_in = {.len = SIZE_MAX, .ptr = NULL};
+    UsefulBufC buf_out = {0};
+    if ((charra_r = charra_marshal_activate_credential_response_internal(
+                 activate_response, buf_in, &buf_out)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("Could not compute size of marshaled data.");
+        return charra_r;
+    }
+
+    buf_in.len = buf_out.len;
+    if ((buf_in.ptr = malloc(buf_in.len)) == NULL) {
+        charra_log_error("Allocating %zu bytes of memory failed.", buf_in.len);
+        return CHARRA_RC_MARSHALING_ERROR;
+    }
+
+    buf_out = (UsefulBufC){.len = 0, .ptr = NULL};
+    if ((charra_r = charra_marshal_activate_credential_response_internal(
+                 activate_response, buf_in, &buf_out)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("Could not marshal data.");
+        free(buf_in.ptr);
+        return charra_r;
+    }
+
+    *marshaled_data_len = buf_out.len;
+    *marshaled_data = (uint8_t*)buf_out.ptr;
+
+    return charra_r;
+}
+
+CHARRA_RC charra_unmarshal_activate_credential_response(
+        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
+        msg_activate_credential_response_dto* activate_response) {
+    msg_activate_credential_response_dto res = {0};
+
+    QCBORError cborerr = QCBOR_SUCCESS;
+    UsefulBufC marshaled_data_buf = {marshaled_data, marshaled_data_len};
+    QCBORDecodeContext dc = {0};
+    QCBORItem item = {0};
+
+    QCBORDecode_Init(&dc, marshaled_data_buf, QCBOR_DECODE_MODE_NORMAL);
+
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_ARRAY)))
+        goto cbor_parse_error;
+
+    /* parse "secret" (bytes) */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.secret_len = item.val.string.len;
+    if (res.secret_len > sizeof(res.secret)) {
+        charra_log_error("CBOR parser: secret exceeds maximum allowed size.");
+        goto cbor_parse_error;
+    }
+    memcpy(&(res.secret), item.val.string.ptr, res.secret_len);
+
+    if ((cborerr = QCBORDecode_Finish(&dc))) {
+        charra_log_error("CBOR parser: expected end of input, but could not "
+                         "find it. Continuing.");
+        goto cbor_parse_error;
+    }
+
+    *activate_response = res;
+
+    return CHARRA_RC_SUCCESS;
+
+cbor_parse_error:
+    charra_log_error("CBOR parser: %s", qcbor_err_to_str(cborerr));
+    charra_log_info("CBOR parser: skipping parsing.");
 
     return CHARRA_RC_MARSHALING_ERROR;
 }

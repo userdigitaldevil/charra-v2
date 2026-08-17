@@ -1117,20 +1117,12 @@ static void coap_certify_ak_of_attester_handler(
             goto cleanup;
         }
         response_code = COAP_RESPONSE_CODE_CONTENT;
-    } else if (req.kind == CHARRA_CERTIFY_AK_OF_ATTESTER_DELIVER_RP ||
-            req.kind == CHARRA_CERTIFY_AK_OF_ATTESTER_DELIVER_VERIFIER) {
-        const char* leg_name =
-                (req.kind == CHARRA_CERTIFY_AK_OF_ATTESTER_DELIVER_RP)
-                        ? "DELIVER_RP"
-                        : "DELIVER_VERIFIER";
-        const char* out_path =
-                (req.kind == CHARRA_CERTIFY_AK_OF_ATTESTER_DELIVER_RP)
-                        ? attester_ak_cert_rp_path
-                        : attester_ak_cert_verifier_path;
-        charra_log_info(
-                "[" LOG_NAME "] /certify_ak_of_attester: %s -- unwrapping "
-                "delivered AK certificate.",
-                leg_name);
+    } else if (req.kind == CHARRA_CERTIFY_AK_OF_ATTESTER_ACTIVATE) {
+        /* A Verifier's /certify_ak CHALLENGE, relayed. Activating it proves
+         * this TPM holds the EK/AK; the RP relays the secret back as that
+         * Verifier's CONFIRM. */
+        charra_log_info("[" LOG_NAME "] /certify_ak_of_attester: ACTIVATE -- "
+                        "recovering the Verifier's challenge secret.");
 
         ESYS_CONTEXT* esys_ctx = NULL;
         TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
@@ -1147,8 +1139,8 @@ static void coap_certify_ak_of_attester_handler(
         Esys_Free(ak_name);
 
         TPM2B_DIGEST* credential = NULL;
-        charra_r = charra_identity_key_mgr_activate_credential(esys_ctx, ak_handle,
-                ek_handle, (TPM2B_ID_OBJECT*)req.credential_blob,
+        charra_r = charra_identity_key_mgr_activate_credential(esys_ctx,
+                ak_handle, ek_handle, (TPM2B_ID_OBJECT*)req.credential_blob,
                 (TPM2B_ENCRYPTED_SECRET*)req.wrapped_secret, &credential);
         Esys_FlushContext(esys_ctx, ak_handle);
         Esys_FlushContext(esys_ctx, ek_handle);
@@ -1162,19 +1154,92 @@ static void coap_certify_ak_of_attester_handler(
             goto cleanup;
         }
 
-        uint8_t* ak_cert_der = NULL;
-        charra_r = charra_crypto_aes256gcm_decrypt(credential->buffer,
-                req.ak_certificate, req.ak_certificate_len, req.aes_gcm_nonce,
-                req.aes_gcm_tag, &ak_cert_der);
+        msg_activate_credential_response_dto activate_resp = {0};
+        if (credential->size > sizeof(activate_resp.secret)) {
+            charra_log_error("[" LOG_NAME "] /certify_ak_of_attester: "
+                             "recovered secret is unexpectedly large (%u).",
+                    credential->size);
+            Esys_Free(credential);
+            charra_r = CHARRA_RC_ERROR;
+            goto cleanup;
+        }
+        activate_resp.secret_len = credential->size;
+        memcpy(activate_resp.secret, credential->buffer, credential->size);
         Esys_Free(credential);
-        if (charra_r != CHARRA_RC_SUCCESS) {
+
+        if ((charra_r = charra_marshal_activate_credential_response(
+                     &activate_resp, &marshaled_response_len,
+                     &marshaled_response)) != CHARRA_RC_SUCCESS) {
             charra_log_error("[" LOG_NAME "] /certify_ak_of_attester: could "
-                             "not decrypt delivered AK certificate.");
+                             "not marshal ACTIVATE response.");
             goto cleanup;
         }
 
-        charra_r = charra_io_write_file(
-                out_path, ak_cert_der, req.ak_certificate_len);
+        charra_log_info("[" LOG_NAME "] /certify_ak_of_attester: ACTIVATE -- "
+                        "returning the %u-byte secret to the RP.",
+                activate_resp.secret_len);
+        response_code = COAP_RESPONSE_CODE_CONTENT;
+    } else if (req.kind == CHARRA_CERTIFY_AK_OF_ATTESTER_DELIVER_RP ||
+            req.kind == CHARRA_CERTIFY_AK_OF_ATTESTER_DELIVER_VERIFIER) {
+        bool is_rp_leg = (req.kind == CHARRA_CERTIFY_AK_OF_ATTESTER_DELIVER_RP);
+        const char* leg_name = is_rp_leg ? "DELIVER_RP" : "DELIVER_VERIFIER";
+        const char* out_path = is_rp_leg ? attester_ak_cert_rp_path
+                                         : attester_ak_cert_verifier_path;
+        charra_log_info("[" LOG_NAME "] /certify_ak_of_attester: %s -- "
+                        "persisting delivered AK certificate.",
+                leg_name);
+
+        uint8_t* ak_cert_der = NULL;
+
+        if (is_rp_leg) {
+            /* RP is the CA on this leg and still uses the one-shot wrapped
+             * form, so unwrapping here is what proves EK/AK possession. */
+            ESYS_CONTEXT* esys_ctx = NULL;
+            TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
+            ESYS_TR ek_handle = ESYS_TR_NONE;
+            ESYS_TR ak_handle = ESYS_TR_NONE;
+            TPM2B_NAME* ak_name = NULL;
+            if ((charra_r = attester_open_tpm_and_load_ak(&esys_ctx, &tcti_ctx,
+                         &ek_handle, &ak_handle, &ak_name, NULL)) !=
+                    CHARRA_RC_SUCCESS) {
+                charra_log_error(
+                        "[" LOG_NAME "] /certify_ak_of_attester: could not "
+                        "open TPM connection for ActivateCredential.");
+                goto cleanup;
+            }
+            Esys_Free(ak_name);
+
+            TPM2B_DIGEST* credential = NULL;
+            charra_r = charra_identity_key_mgr_activate_credential(esys_ctx,
+                    ak_handle, ek_handle, (TPM2B_ID_OBJECT*)req.credential_blob,
+                    (TPM2B_ENCRYPTED_SECRET*)req.wrapped_secret, &credential);
+            Esys_FlushContext(esys_ctx, ak_handle);
+            Esys_FlushContext(esys_ctx, ek_handle);
+            Esys_Finalize(&esys_ctx);
+            Tss2_TctiLdr_Finalize(&tcti_ctx);
+            if (charra_r != CHARRA_RC_SUCCESS) {
+                charra_log_error("[" LOG_NAME
+                                 "] /certify_ak_of_attester: ActivateCredential "
+                                 "failed -- this AK is not genuinely bound to "
+                                 "this EK.");
+                response_code = COAP_RESPONSE_CODE_UNAUTHORIZED;
+                goto cleanup;
+            }
+
+            charra_r = charra_crypto_aes256gcm_decrypt(credential->buffer,
+                    req.ak_certificate, req.ak_certificate_len,
+                    req.aes_gcm_nonce, req.aes_gcm_tag, &ak_cert_der);
+            Esys_Free(credential);
+            if (charra_r != CHARRA_RC_SUCCESS) {
+                charra_log_error("[" LOG_NAME "] /certify_ak_of_attester: could "
+                                 "not decrypt delivered AK certificate.");
+                goto cleanup;
+            }
+        }
+
+        charra_r = charra_io_write_file(out_path,
+                is_rp_leg ? ak_cert_der : req.ak_certificate,
+                req.ak_certificate_len);
         free(ak_cert_der);
         if (charra_r != CHARRA_RC_SUCCESS) {
             charra_log_error("[" LOG_NAME "] /certify_ak_of_attester: could "
@@ -1182,9 +1247,8 @@ static void coap_certify_ak_of_attester_handler(
             goto cleanup;
         }
 
-        charra_log_info(
-                "[" LOG_NAME "] /certify_ak_of_attester: %s certificate "
-                "unwrapped and persisted (%u byte(s)).",
+        charra_log_info("[" LOG_NAME "] /certify_ak_of_attester: %s "
+                        "certificate persisted (%u byte(s)).",
                 leg_name, req.ak_certificate_len);
         response_code = COAP_RESPONSE_CODE_CONTENT;
     } else {

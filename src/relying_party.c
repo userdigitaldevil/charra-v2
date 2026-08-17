@@ -193,6 +193,12 @@ static bool processing_ak_identity_response = false;
  * shape /qualify/submit's response has. */
 static bool processing_certify_ak_of_attester_deliver_response = false;
 
+/* ACTIVATE leg: the secret the Attester recovered, relayed onward as that
+ * Verifier's CONFIRM. */
+static msg_activate_credential_response_dto activate_credential_response = {0};
+static CHARRA_RC activate_credential_rc = CHARRA_RC_ERROR;
+static bool processing_activate_credential_response = false;
+
 /* --- RP qualification handshake state (/qualify + /qualify/submit) ------
  * See charra_rp_qualification.h. Verifier-local state, so this handshake
  * has to be repeated against each Verifier the RP submits evidence to, not
@@ -1114,6 +1120,39 @@ cleanup:
     return COAP_RESPONSE_OK;
 }
 
+static coap_response_t coap_activate_credential_response_handler(
+        coap_session_t* session CHARRA_UNUSED,
+        const coap_pdu_t* sent CHARRA_UNUSED, const coap_pdu_t* received,
+        const coap_mid_t mid CHARRA_UNUSED) {
+    processing_activate_credential_response = true;
+
+    int coap_r = 0;
+    size_t data_len = 0;
+    const uint8_t* data = NULL;
+    size_t data_offset = 0;
+    size_t data_total_len = 0;
+    if ((coap_r = coap_get_data_large(
+                 received, &data_len, &data, &data_offset, &data_total_len)) ==
+            0) {
+        charra_log_error("[" LOG_NAME
+                         "] ACTIVATE: Could not get CoAP PDU data.");
+        activate_credential_rc = CHARRA_RC_ERROR;
+        goto cleanup;
+    }
+
+    if ((activate_credential_rc = charra_unmarshal_activate_credential_response(
+                 data_len, data, &activate_credential_response)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] ACTIVATE: Could not parse CBOR response.");
+        goto cleanup;
+    }
+
+cleanup:
+    processing_activate_credential_response = false;
+    return COAP_RESPONSE_OK;
+}
+
 static coap_response_t coap_ak_identity_response_handler(
         coap_session_t* session CHARRA_UNUSED,
         const coap_pdu_t* sent CHARRA_UNUSED, const coap_pdu_t* received,
@@ -1273,6 +1312,53 @@ static CHARRA_RC rp_coap_fetch(const char* ip_address, unsigned int port,
     charra_free_if_not_null_ex(coap_options, coap_delete_optlist);
     charra_free_if_not_null_ex(coap_session, coap_session_release);
     charra_free_if_not_null_ex(coap_context, coap_free_context);
+    return result;
+}
+
+/**
+ * @brief One /certify_ak round trip (either leg -- req->kind picks which).
+ *
+ * Serialized on rp_ak_reprovision_mutex: certify_ak_response and friends
+ * are shared globals. The response is snapshotted out before unlocking, so
+ * ownership of its heap field moves to the caller and a sibling thread's
+ * next call can't overwrite or free memory this one still needs. The mutex
+ * is never held across the caller's TPM work, preserving the existing
+ * "reprovision mutex, then TPM mutex, never nested" lock discipline.
+ */
+static CHARRA_RC rp_certify_ak_exchange(const char* host, unsigned int port,
+        const msg_certify_ak_request_dto* req,
+        msg_certify_ak_response_dto* response_out) {
+    uint8_t* req_buf = NULL;
+    uint32_t req_buf_len = 0;
+    CHARRA_RC result = charra_marshal_certify_ak_request(
+            req, &req_buf_len, &req_buf);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Could not marshal /certify_ak request.");
+        return result;
+    }
+
+    pthread_mutex_lock(&rp_ak_reprovision_mutex);
+    certify_ak_rc = CHARRA_RC_ERROR;
+    memset(&certify_ak_response, 0, sizeof(certify_ak_response));
+
+    result = rp_coap_fetch(host, port, "certify_ak", req_buf, req_buf_len,
+            coap_certify_ak_response_handler, &processing_certify_ak_response);
+    free(req_buf);
+
+    if (result == CHARRA_RC_SUCCESS && certify_ak_rc != CHARRA_RC_SUCCESS) {
+        result = certify_ak_rc;
+    }
+
+    *response_out = certify_ak_response;
+    certify_ak_response.ak_certificate = NULL;
+    certify_ak_response.ak_certificate_len = 0;
+    pthread_mutex_unlock(&rp_ak_reprovision_mutex);
+
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_free_if_not_null(response_out->ak_certificate);
+        memset(response_out, 0, sizeof(*response_out));
+    }
     return result;
 }
 
@@ -2036,6 +2122,7 @@ static CHARRA_RC ensure_attester_identity_certified(int relay_verifier_index) {
      * single Verifier's issuance is enough for every Verifier's own
      * chain-validation to accept it later). --------------------------- */
     msg_certify_ak_request_dto verifier_req = {0};
+    verifier_req.kind = CHARRA_CERTIFY_AK_CHALLENGE;
     verifier_req.ek_certificate = identity.ek_certificate;
     verifier_req.ek_certificate_len = identity.ek_certificate_len;
     verifier_req.ak_public_key_len = identity.ak_public_key_len;
@@ -2044,64 +2131,97 @@ static CHARRA_RC ensure_attester_identity_certified(int relay_verifier_index) {
     verifier_req.ak_name_len = identity.ak_name_len;
     memcpy(verifier_req.ak_name, identity.ak_name, identity.ak_name_len);
 
-    uint8_t* verifier_req_buf = NULL;
-    uint32_t verifier_req_buf_len = 0;
-    result = charra_marshal_certify_ak_request(
-            &verifier_req, &verifier_req_buf_len, &verifier_req_buf);
+    msg_certify_ak_response_dto verifier_challenge = {0};
+    result = rp_certify_ak_exchange(
+            verifiers[relay_verifier_index].ip_address,
+            verifiers[relay_verifier_index].port_number, &verifier_req,
+            &verifier_challenge);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Relayed /certify_ak CHALLENGE to "
+                         "the Verifier failed.");
+        charra_free_if_not_null(identity.ek_certificate);
+        return result;
+    }
+
+    /* --- relay the challenge to the Attester: only its TPM can activate
+     * it, so the secret it returns is the possession proof the RP itself
+     * could not have produced. ----------------------------------------- */
+    msg_certify_ak_of_attester_request_dto activate_req = {0};
+    activate_req.kind = CHARRA_CERTIFY_AK_OF_ATTESTER_ACTIVATE;
+    activate_req.credential_blob_len = verifier_challenge.credential_blob_len;
+    memcpy(activate_req.credential_blob, verifier_challenge.credential_blob,
+            verifier_challenge.credential_blob_len);
+    activate_req.wrapped_secret_len = verifier_challenge.wrapped_secret_len;
+    memcpy(activate_req.wrapped_secret, verifier_challenge.wrapped_secret,
+            verifier_challenge.wrapped_secret_len);
+    charra_free_if_not_null(verifier_challenge.ak_certificate);
+
+    uint8_t* activate_buf = NULL;
+    uint32_t activate_buf_len = 0;
+    result = charra_marshal_certify_ak_of_attester_request(
+            &activate_req, &activate_buf_len, &activate_buf);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not marshal ACTIVATE request.");
+        charra_free_if_not_null(identity.ek_certificate);
+        return result;
+    }
+
+    activate_credential_rc = CHARRA_RC_ERROR;
+    memset(&activate_credential_response, 0,
+            sizeof(activate_credential_response));
+    result = rp_coap_fetch(attester_host, attester_port,
+            "certify_ak_of_attester", activate_buf, activate_buf_len,
+            coap_activate_credential_response_handler,
+            &processing_activate_credential_response);
+    free(activate_buf);
+    if (result == CHARRA_RC_SUCCESS && activate_credential_rc !=
+            CHARRA_RC_SUCCESS) {
+        result = activate_credential_rc;
+    }
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Attester could not activate the "
+                         "Verifier's challenge.");
+        charra_free_if_not_null(identity.ek_certificate);
+        return result;
+    }
+    charra_log_info("[" LOG_NAME "] Attester activated the Verifier's "
+                    "challenge (%u-byte secret recovered).",
+            activate_credential_response.secret_len);
+
+    /* --- CONFIRM on the Attester's behalf, echoing its secret --- */
+    msg_certify_ak_request_dto verifier_confirm = {0};
+    verifier_confirm.kind = CHARRA_CERTIFY_AK_CONFIRM;
+    verifier_confirm.ek_certificate = identity.ek_certificate;
+    verifier_confirm.ek_certificate_len = identity.ek_certificate_len;
+    verifier_confirm.secret_len = activate_credential_response.secret_len;
+    memcpy(verifier_confirm.secret, activate_credential_response.secret,
+            activate_credential_response.secret_len);
+
+    msg_certify_ak_response_dto verifier_cert_response = {0};
+    result = rp_certify_ak_exchange(
+            verifiers[relay_verifier_index].ip_address,
+            verifiers[relay_verifier_index].port_number, &verifier_confirm,
+            &verifier_cert_response);
     charra_free_if_not_null(identity.ek_certificate);
     if (result != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not marshal Attester's "
-                         "/certify_ak request to the Verifier.");
+        charra_log_error("[" LOG_NAME "] Relayed /certify_ak CONFIRM to the "
+                         "Verifier failed.");
         return result;
     }
-
-    certify_ak_rc = CHARRA_RC_ERROR;
-    result = rp_coap_fetch(verifiers[relay_verifier_index].ip_address,
-            verifiers[relay_verifier_index].port_number, "certify_ak",
-            verifier_req_buf, verifier_req_buf_len,
-            coap_certify_ak_response_handler, &processing_certify_ak_response);
-    free(verifier_req_buf);
-    if (result != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Relayed /certify_ak round trip to "
-                         "the Verifier failed.");
-        return result;
+    if (verifier_cert_response.ak_certificate_len == 0) {
+        charra_log_error("[" LOG_NAME "] Verifier's CONFIRM returned no "
+                         "certificate for the Attester.");
+        charra_free_if_not_null(verifier_cert_response.ak_certificate);
+        return CHARRA_RC_ERROR;
     }
-    if (certify_ak_rc != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Verifier did not certify the "
-                         "Attester's AK successfully.");
-        return certify_ak_rc;
-    }
-
-    /* Snapshot + release ownership -- shared with RP's own /certify_ak
-     * calls, safe here for the same "runs once, before any thread starts"
-     * reason as above. */
-    msg_certify_ak_response_dto verifier_cert_response = certify_ak_response;
-    certify_ak_response.ak_certificate = NULL;
-    certify_ak_response.ak_certificate_len = 0;
 
     charra_log_info(
             "[" LOG_NAME "] Verifier certified the Attester's AK (relayed).");
 
-    /* --- deliver to the Attester via /certify_ak_of_attester
-     * DELIVER_VERIFIER, relaying the still-encrypted response unmodified --
-     * RP never decrypts this one itself. ------------------------------- */
+    /* --- deliver the plaintext certificate; the ACTIVATE leg above already
+     * supplied the possession proof. ------------------------------------ */
     msg_certify_ak_of_attester_request_dto deliver_verifier_req = {0};
     deliver_verifier_req.kind = CHARRA_CERTIFY_AK_OF_ATTESTER_DELIVER_VERIFIER;
-    deliver_verifier_req.credential_blob_len =
-            verifier_cert_response.credential_blob_len;
-    memcpy(deliver_verifier_req.credential_blob,
-            verifier_cert_response.credential_blob,
-            verifier_cert_response.credential_blob_len);
-    deliver_verifier_req.wrapped_secret_len =
-            verifier_cert_response.wrapped_secret_len;
-    memcpy(deliver_verifier_req.wrapped_secret,
-            verifier_cert_response.wrapped_secret,
-            verifier_cert_response.wrapped_secret_len);
-    memcpy(deliver_verifier_req.aes_gcm_nonce,
-            verifier_cert_response.aes_gcm_nonce,
-            sizeof(deliver_verifier_req.aes_gcm_nonce));
-    memcpy(deliver_verifier_req.aes_gcm_tag, verifier_cert_response.aes_gcm_tag,
-            sizeof(deliver_verifier_req.aes_gcm_tag));
     deliver_verifier_req.ak_certificate_len =
             verifier_cert_response.ak_certificate_len;
     deliver_verifier_req.ak_certificate = verifier_cert_response.ak_certificate;
@@ -2497,7 +2617,10 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
 
     /* --- /certify_ak request, built now while ak_name is still valid,
      * sent AFTER the TPM connection below is closed -------------- */
+    /* --- CHALLENGE request, built now while ak_name is still valid, sent
+     * AFTER the TPM connection below is closed -------------------------- */
     msg_certify_ak_request_dto req = {0};
+    req.kind = CHARRA_CERTIFY_AK_CHALLENGE;
     req.ek_certificate = (uint8_t*)ek_cert_buf;
     req.ek_certificate_len = (uint32_t)ek_cert_buf_len;
     req.ak_public_key_len = sizeof(ak_public);
@@ -2512,145 +2635,22 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
     Tss2_TctiLdr_Finalize(&tcti_ctx);
     pthread_mutex_unlock(&rp_tpm_mutex);
 
-    uint8_t* req_buf = NULL;
-    uint32_t req_buf_len = 0;
-    if ((result = charra_marshal_certify_ak_request(&req, &req_buf_len,
-                 &req_buf)) != CHARRA_RC_SUCCESS) {
+    charra_log_info("[" LOG_NAME "] /certify_ak: requesting a CHALLENGE ...");
+    msg_certify_ak_response_dto challenge = {0};
+    if ((result = rp_certify_ak_exchange(
+                 verifier_host, verifier_port, &req, &challenge)) !=
+            CHARRA_RC_SUCCESS) {
         charra_log_error(
-                "[" LOG_NAME "] Could not marshal /certify_ak request.");
+                "[" LOG_NAME "] /certify_ak CHALLENGE leg did not complete.");
         charra_io_free_file_buffer(&ek_cert_buf);
         return result;
     }
-    charra_io_free_file_buffer(&ek_cert_buf);
 
-    /* --- send /certify_ak, serialized against sibling Verifier threads
-     * doing the same: certify_ak_response/certify_ak_rc/processing_
-     * certify_ak_response are single shared globals -- see rp_ak_
-     * reprovision_mutex's own comment. Snapshotted into a local copy
-     * before unlocking, below, so this function's remaining work (TPM
-     * session #2) can't race a sibling thread's own /certify_ak call
-     * overwriting the shared globals. --------------------------------- */
-    pthread_mutex_lock(&rp_ak_reprovision_mutex);
-
-    coap_context_t* coap_context = NULL;
-    coap_session_t* coap_session = NULL;
-    coap_optlist_t* coap_options = NULL;
-    if ((coap_context = charra_coap_new_context(true)) == NULL) {
-        charra_log_error("[" LOG_NAME "] Cannot create CoAP context.");
-        charra_free_if_not_null(req_buf);
-        pthread_mutex_unlock(&rp_ak_reprovision_mutex);
-        return CHARRA_RC_COAP_ERROR;
-    }
-    coap_register_response_handler(
-            coap_context, coap_certify_ak_response_handler);
-    if ((coap_session = charra_coap_new_client_session(coap_context,
-                 verifier_host, verifier_port, COAP_PROTO_UDP)) == NULL) {
-        charra_log_error(
-                "[" LOG_NAME "] Cannot create /certify_ak client session.");
-        charra_free_if_not_null(req_buf);
-        charra_free_if_not_null_ex(coap_context, coap_free_context);
-        pthread_mutex_unlock(&rp_ak_reprovision_mutex);
-        return CHARRA_RC_COAP_ERROR;
-    }
-
-    uint8_t coap_mediatype_cbor_buf[4] = {0};
-    unsigned int coap_mediatype_cbor_buf_len = coap_encode_var_safe(
-            coap_mediatype_cbor_buf, sizeof(coap_mediatype_cbor_buf),
-            COAP_MEDIATYPE_APPLICATION_CBOR);
-    coap_insert_optlist(&coap_options,
-            coap_new_optlist(COAP_OPTION_URI_PATH, 10,
-                    (const uint8_t*)"certify_ak"));
-    coap_insert_optlist(&coap_options,
-            coap_new_optlist(COAP_OPTION_CONTENT_TYPE,
-                    coap_mediatype_cbor_buf_len, coap_mediatype_cbor_buf));
-
-    coap_pdu_t* pdu = charra_coap_new_request(coap_session,
-            COAP_MESSAGE_TYPE_CON, COAP_REQUEST_FETCH, &coap_options, req_buf,
-            req_buf_len);
-    if (pdu == NULL) {
-        charra_log_error(
-                "[" LOG_NAME "] Cannot create /certify_ak request PDU.");
-        charra_free_if_not_null(req_buf);
-        charra_free_if_not_null_ex(coap_options, coap_delete_optlist);
-        charra_free_if_not_null_ex(coap_session, coap_session_release);
-        charra_free_if_not_null_ex(coap_context, coap_free_context);
-        pthread_mutex_unlock(&rp_ak_reprovision_mutex);
-        return CHARRA_RC_ERROR;
-    }
-
-    coap_fixed_point_t coap_timeout = {verifier_response_timeout, 0};
-    coap_session_set_ack_timeout(coap_session, coap_timeout);
-
-    if (coap_send_large(coap_session, pdu) == COAP_INVALID_MID) {
-        charra_log_error("[" LOG_NAME "] Cannot send /certify_ak request.");
-        charra_free_if_not_null(req_buf);
-        charra_free_if_not_null_ex(coap_options, coap_delete_optlist);
-        charra_free_if_not_null_ex(coap_session, coap_session_release);
-        charra_free_if_not_null_ex(coap_context, coap_free_context);
-        pthread_mutex_unlock(&rp_ak_reprovision_mutex);
-        return CHARRA_RC_COAP_ERROR;
-    }
-
-    /* Real wall-clock elapsed time -- see rp_coap_fetch()'s docstring
-     * comment above for why this replaced a self-reported-duration sum. */
-    struct timespec wait_start, wait_now;
-    clock_gettime(CLOCK_MONOTONIC, &wait_start);
-    int coap_io_process_time = -1;
-    certify_ak_rc = CHARRA_RC_ERROR;
-    result = CHARRA_RC_SUCCESS;
-    charra_log_info("[" LOG_NAME "] Waiting on network for /certify_ak "
-                    "response ...");
-    while (!processing_certify_ak_response && coap_io_pending(coap_context)) {
-        if ((coap_io_process_time = coap_io_process(
-                     coap_context, COAP_IO_PROCESS_TIME_MS)) == -1) {
-            charra_log_error(
-                    "[" LOG_NAME "] Error during CoAP I/O processing.");
-            result = CHARRA_RC_COAP_ERROR;
-            break;
-        }
-        clock_gettime(CLOCK_MONOTONIC, &wait_now);
-        double elapsed_ms = (wait_now.tv_sec - wait_start.tv_sec) * 1000.0 +
-                             (wait_now.tv_nsec - wait_start.tv_nsec) / 1e6;
-        if (elapsed_ms >= (verifier_response_timeout * 1000)) {
-            charra_log_error(
-                    "[" LOG_NAME "] Timeout after %.0f ms waiting for "
-                    "/certify_ak response.",
-                    elapsed_ms);
-            result = CHARRA_RC_TIMEOUT;
-            break;
-        }
-    }
-
-    charra_free_if_not_null(req_buf);
-    charra_free_if_not_null_ex(coap_options, coap_delete_optlist);
-    charra_free_if_not_null_ex(coap_session, coap_session_release);
-    charra_free_if_not_null_ex(coap_context, coap_free_context);
-
-    if (result == CHARRA_RC_SUCCESS && certify_ak_rc != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] /certify_ak did not complete "
-                         "successfully.");
-        result = certify_ak_rc;
-    }
-
-    /* Snapshot the response, then remove its heap-allocated field from the
-     * shared global -- ownership moves to this local copy, so the next
-     * /certify_ak call (a sibling thread, once this mutex is released)
-     * can't free or overwrite memory this function still needs, and this
-     * function doesn't leak the previous call's buffer either. */
-    msg_certify_ak_response_dto response_snapshot = certify_ak_response;
-    certify_ak_response.ak_certificate = NULL;
-    certify_ak_response.ak_certificate_len = 0;
-    pthread_mutex_unlock(&rp_ak_reprovision_mutex);
-
-    if (result != CHARRA_RC_SUCCESS) {
-        charra_free_if_not_null(response_snapshot.ak_certificate);
-        return result;
-    }
-
-    /* --- TPM session #2 (mutex-held): recover the AES key via
-     * ActivateCredential, then decrypt the AK certificate ----------- */
-    charra_log_info("[" LOG_NAME "] Waiting on TPM mutex for ActivateCredential "
-                    "(TPM session #2) ...");
+    /* --- TPM session #2: recover the challenge secret via
+     * ActivateCredential. Only this TPM can, which is exactly what the
+     * Verifier's CONFIRM leg is about to check. --------------------------- */
+    charra_log_info("[" LOG_NAME "] Waiting on TPM mutex for "
+                    "ActivateCredential (TPM session #2) ...");
     pthread_mutex_lock(&rp_tpm_mutex);
     ESYS_TR ek_handle2 = ESYS_TR_NONE;
     ESYS_TR ak_handle2 = ESYS_TR_NONE;
@@ -2662,16 +2662,17 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
         charra_log_error("[" LOG_NAME "] Could not reopen TPM connection "
                          "for ActivateCredential.");
         pthread_mutex_unlock(&rp_tpm_mutex);
-        charra_free_if_not_null(response_snapshot.ak_certificate);
+        charra_free_if_not_null(challenge.ak_certificate);
+        charra_io_free_file_buffer(&ek_cert_buf);
         return result;
     }
     Esys_Free(ak_name2);
 
     TPM2B_DIGEST* credential = NULL;
-    if ((result = charra_identity_key_mgr_activate_credential(esys_ctx, ak_handle2,
-                 ek_handle2,
-                 (TPM2B_ID_OBJECT*)response_snapshot.credential_blob,
-                 (TPM2B_ENCRYPTED_SECRET*)response_snapshot.wrapped_secret,
+    if ((result = charra_identity_key_mgr_activate_credential(esys_ctx,
+                 ak_handle2, ek_handle2,
+                 (TPM2B_ID_OBJECT*)challenge.credential_blob,
+                 (TPM2B_ENCRYPTED_SECRET*)challenge.wrapped_secret,
                  &credential)) != CHARRA_RC_SUCCESS) {
         charra_log_error(
                 "[" LOG_NAME "] ActivateCredential failed -- this AK is not "
@@ -2682,7 +2683,8 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
         Esys_Finalize(&esys_ctx);
         Tss2_TctiLdr_Finalize(&tcti_ctx);
         pthread_mutex_unlock(&rp_tpm_mutex);
-        charra_free_if_not_null(response_snapshot.ak_certificate);
+        charra_free_if_not_null(challenge.ak_certificate);
+        charra_io_free_file_buffer(&ek_cert_buf);
         return result;
     }
     Esys_FlushContext(esys_ctx, ak_handle2);
@@ -2694,58 +2696,52 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
     double activate_duration =
             (activate_end.tv_sec - activate_start.tv_sec) +
             (activate_end.tv_nsec - activate_start.tv_nsec) / 1e9;
+    charra_free_if_not_null(challenge.ak_certificate);
 
-    charra_log_info("[" LOG_NAME "] ActivateCredential recovered a %u-byte "
-                    "credential in %.3fs; decrypting %u-byte AK certificate "
-                    "ciphertext.",
-            credential->size, activate_duration,
-            response_snapshot.ak_certificate_len);
-    charra_print_hex(CHARRA_LOG_INFO, credential->size, credential->buffer,
-            "[DEBUG] recovered credential = 0x", "\n", false);
-    charra_print_hex(CHARRA_LOG_INFO,
-            sizeof(response_snapshot.aes_gcm_nonce),
-            response_snapshot.aes_gcm_nonce, "[DEBUG] received nonce = 0x",
-            "\n", false);
-    charra_print_hex(CHARRA_LOG_INFO, sizeof(response_snapshot.aes_gcm_tag),
-            response_snapshot.aes_gcm_tag, "[DEBUG] received tag = 0x", "\n",
-            false);
-    /* Matches the Verifier's own fingerprint -- diff these if decrypt fails. */
-    uint8_t received_ciphertext_fingerprint[32] = {0};
-    if (hash_sha256(response_snapshot.ak_certificate_len,
-                response_snapshot.ak_certificate,
-                received_ciphertext_fingerprint) == CHARRA_RC_SUCCESS) {
-        charra_print_hex(CHARRA_LOG_INFO,
-                sizeof(received_ciphertext_fingerprint),
-                received_ciphertext_fingerprint,
-                "[DEBUG] received ciphertext sha256 = 0x", "\n", false);
+    charra_log_info("[" LOG_NAME "] ActivateCredential recovered the %u-byte "
+                    "challenge secret in %.3fs.",
+            credential->size, activate_duration);
+
+    if (credential->size != CHARRA_CERTIFY_AK_SECRET_LEN) {
+        charra_log_error("[" LOG_NAME "] Recovered secret has unexpected "
+                         "size %u (expected %d).",
+                credential->size, CHARRA_CERTIFY_AK_SECRET_LEN);
+        Esys_Free(credential);
+        charra_io_free_file_buffer(&ek_cert_buf);
+        return CHARRA_RC_VERIFICATION_FAILED;
     }
 
-    uint8_t* cert_der = NULL;
-    struct timespec decrypt_start, decrypt_end;
-    clock_gettime(CLOCK_MONOTONIC, &decrypt_start);
-    CHARRA_RC decrypt_rc = charra_crypto_aes256gcm_decrypt(
-            credential->buffer, response_snapshot.ak_certificate,
-            response_snapshot.ak_certificate_len,
-            response_snapshot.aes_gcm_nonce, response_snapshot.aes_gcm_tag,
-            &cert_der);
-    clock_gettime(CLOCK_MONOTONIC, &decrypt_end);
-    double decrypt_duration = (decrypt_end.tv_sec - decrypt_start.tv_sec) +
-                               (decrypt_end.tv_nsec - decrypt_start.tv_nsec) /
-                                       1e9;
-    if ((result = decrypt_rc) != CHARRA_RC_SUCCESS) {
+    /* --- CONFIRM: echo the secret back. Only on a match does the Verifier
+     * sign, record, and release the certificate. ------------------------- */
+    msg_certify_ak_request_dto confirm_req = {0};
+    confirm_req.kind = CHARRA_CERTIFY_AK_CONFIRM;
+    confirm_req.ek_certificate = (uint8_t*)ek_cert_buf;
+    confirm_req.ek_certificate_len = (uint32_t)ek_cert_buf_len;
+    confirm_req.secret_len = credential->size;
+    memcpy(confirm_req.secret, credential->buffer, credential->size);
+    Esys_Free(credential);
+
+    charra_log_info("[" LOG_NAME "] /certify_ak: echoing the secret back "
+                    "(CONFIRM) ...");
+    msg_certify_ak_response_dto confirmed = {0};
+    result = rp_certify_ak_exchange(
+            verifier_host, verifier_port, &confirm_req, &confirmed);
+    charra_io_free_file_buffer(&ek_cert_buf);
+    if (result != CHARRA_RC_SUCCESS) {
         charra_log_error(
-                "[" LOG_NAME "] Could not decrypt AK certificate "
-                "(charra_r=%d: %s) after %.3fs.",
-                result, charra_rc_describe(result), decrypt_duration);
-        Esys_Free(credential);
-        charra_free_if_not_null(response_snapshot.ak_certificate);
+                "[" LOG_NAME "] /certify_ak CONFIRM leg did not complete.");
         return result;
     }
-    charra_log_info(
-            "[" LOG_NAME "] AES-GCM decrypt took %.3fs.", decrypt_duration);
-    uint32_t cert_der_len = response_snapshot.ak_certificate_len;
-    Esys_Free(credential);
-    charra_free_if_not_null(response_snapshot.ak_certificate);
+    if (confirmed.ak_certificate_len == 0 ||
+            confirmed.ak_certificate == NULL) {
+        charra_log_error("[" LOG_NAME "] /certify_ak CONFIRM returned no "
+                         "certificate.");
+        charra_free_if_not_null(confirmed.ak_certificate);
+        return CHARRA_RC_ERROR;
+    }
+
+    uint8_t* cert_der = confirmed.ak_certificate;
+    uint32_t cert_der_len = confirmed.ak_certificate_len;
 
     if ((result = charra_io_write_file(cert_path, cert_der, cert_der_len)) !=
             CHARRA_RC_SUCCESS) {
