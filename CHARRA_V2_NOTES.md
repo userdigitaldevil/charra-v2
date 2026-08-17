@@ -805,12 +805,17 @@ calls to send `Quote_r`+`log_r`+`Quote_a` onward, and which
 RP→Verifier message shape" below for how the two DTOs relate — that
 section documents `msg_rp_appraisal_dto`'s design as originally planned;
 treat it as superseded background, not the current wire format.
-**Untested gap worth knowing about**: `msg_rp_evidence_dto`'s marshal/
-unmarshal pair has no dedicated bounds-check unit test of its own (unlike
-every other message type) — `tests/test_rp_appraisal_marshaling.c` only
-covers the unused `msg_rp_appraisal_dto`. Live/integration runs exercise
-the happy path, but oversized-field rejection isn't independently verified
-for this one.
+**That gap is now closed**: `tests/test_rp_evidence_marshaling.c` (30
+assertions) covers the message that actually travels on every `/appraise`,
+which previously had no bounds test of its own — `tests/test_rp_appraisal_
+marshaling.c` only covers `msg_rp_appraisal_dto`, which is dead code.
+Round-trips all 12 fields; rejects an oversized `verifier_nonce`,
+`rp_signature`, `rp_public_key`, `attester_nonce`, `attestation_data`,
+`tpm2_signature` and `tpm2_public_key`; rejects a `pcr_r` that is either
+too long *or* too short (it is the one field checked for an exact length
+rather than a cap — a SHA-256 digest, so short is as wrong as long);
+rejects a truncated array; and accepts the empty-certificate shape an
+un-provisioned Attester legitimately produces.
 
 ### Step 3a/3b item 1: EK/AK certificate validation
 

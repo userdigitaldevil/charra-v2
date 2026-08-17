@@ -135,6 +135,7 @@ TARGETS = $(addprefix $(BINDIR)/, attester verifier verifier_old relying_party t
         test_marshaling_bounds test_x509_cert_chain \
         test_certify_ak_marshaling test_ak_state test_rp_appraisal_marshaling \
         test_get_verifiers_marshaling test_certify_ak_of_attester_marshaling \
+        test_rp_evidence_marshaling \
         clean
 
 all: $(TARGETS)
@@ -152,11 +153,12 @@ test_x509_cert_chain: $(BINDIR)/test_x509_cert_chain
 test_certify_ak_marshaling: $(BINDIR)/test_certify_ak_marshaling
 test_ak_state: $(BINDIR)/test_ak_state
 test_rp_appraisal_marshaling: $(BINDIR)/test_rp_appraisal_marshaling
+test_rp_evidence_marshaling: $(BINDIR)/test_rp_evidence_marshaling
 test_get_verifiers_marshaling: $(BINDIR)/test_get_verifiers_marshaling
 test_certify_ak_of_attester_marshaling: $(BINDIR)/test_certify_ak_of_attester_marshaling
 
 ## run the test suite
-test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log $(BINDIR)/test_sdk $(BINDIR)/test_rp_qualification $(BINDIR)/test_marshaling_bounds $(BINDIR)/test_x509_cert_chain $(BINDIR)/test_certify_ak_marshaling $(BINDIR)/test_ak_state $(BINDIR)/test_rp_appraisal_marshaling $(BINDIR)/test_get_verifiers_marshaling $(BINDIR)/test_certify_ak_of_attester_marshaling
+test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log $(BINDIR)/test_sdk $(BINDIR)/test_rp_qualification $(BINDIR)/test_marshaling_bounds $(BINDIR)/test_x509_cert_chain $(BINDIR)/test_certify_ak_marshaling $(BINDIR)/test_ak_state $(BINDIR)/test_rp_appraisal_marshaling $(BINDIR)/test_get_verifiers_marshaling $(BINDIR)/test_certify_ak_of_attester_marshaling $(BINDIR)/test_rp_evidence_marshaling
 	./$(BINDIR)/test_event_log
 	./$(BINDIR)/test_synthetic_log
 	./$(BINDIR)/test_sdk
@@ -168,6 +170,7 @@ test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log $(BINDIR)/test_sdk $
 	./$(BINDIR)/test_rp_appraisal_marshaling
 	./$(BINDIR)/test_get_verifiers_marshaling
 	./$(BINDIR)/test_certify_ak_of_attester_marshaling
+	./$(BINDIR)/test_rp_evidence_marshaling
 
 
 # ------------------------------------------------------------------------------
@@ -241,6 +244,10 @@ $(BINDIR)/test_ak_state: tests/test_ak_state.c $(OBJECTS)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
 $(BINDIR)/test_rp_appraisal_marshaling: tests/test_rp_appraisal_marshaling.c $(OBJECTS)
+	@mkdir -p $(@D)
+	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
+
+$(BINDIR)/test_rp_evidence_marshaling: tests/test_rp_evidence_marshaling.c $(OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
