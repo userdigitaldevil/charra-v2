@@ -263,7 +263,8 @@ bool charra_ak_state_is_valid(
 }
 
 bool charra_ak_state_check_serial_valid(const char* ak_state_file_path,
-        const uint8_t serial[16], uint8_t ek_fingerprint_out[32]) {
+        const uint8_t serial[16], uint8_t ek_fingerprint_out[32],
+        time_t* expires_at_out) {
     charra_ak_state_record* records = NULL;
     uint32_t count = 0;
     if (charra_ak_state_load(ak_state_file_path, &records, &count) !=
@@ -283,6 +284,9 @@ bool charra_ak_state_check_serial_valid(const char* ak_state_file_path,
         if (valid) {
             if (ek_fingerprint_out != NULL) {
                 memcpy(ek_fingerprint_out, records[index].ek_fingerprint, 32);
+            }
+            if (expires_at_out != NULL) {
+                *expires_at_out = records[index].expires_at;
             }
         } else {
             charra_log_error("[" LOG_NAME "]     => AK certificate's serial "

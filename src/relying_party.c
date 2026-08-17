@@ -1278,9 +1278,10 @@ static CHARRA_RC rp_perform_qualification_handshake(int verifier_index) {
     }
     if (rp_qualified_until[verifier_index] > now) {
         charra_log_info(
-                "[" LOG_NAME "] Verifier n° %d: cached qualification "
-                "still valid for %ld more second(s), skipping /qualify.",
-                verifier_index + 1,
+                "[" LOG_NAME "] Verifier n° %d (port %u): cached "
+                "qualification still valid for %ld more second(s), "
+                "skipping /qualify.",
+                verifier_index + 1, verifiers[verifier_index].port_number,
                 (long)(rp_qualified_until[verifier_index] - now));
         return CHARRA_RC_SUCCESS;
     }
@@ -1288,7 +1289,9 @@ static CHARRA_RC rp_perform_qualification_handshake(int verifier_index) {
     const verifier_info* verifier = &verifiers[verifier_index];
 
     charra_log_info(
-            "[" LOG_NAME "]  +------------ RP Qualification --------------+");
+            "[" LOG_NAME "]  +------------ RP Qualification (Verifier "
+            "n° %d, port %u) --------------+",
+            verifier_index + 1, verifier->port_number);
 
     CHARRA_RC result = CHARRA_RC_ERROR;
     uint8_t* redacted_log = NULL;
@@ -1401,13 +1404,24 @@ static CHARRA_RC rp_perform_qualification_handshake(int verifier_index) {
     }
 
     if (qualify_submit_qualified) {
-        charra_log_info("[" LOG_NAME "] |  RP QUALIFIED              |");
+        charra_log_info(
+                "[" LOG_NAME "] |  RP QUALIFIED with Verifier n° %d "
+                "(port %u)  |",
+                verifier_index + 1, verifier->port_number);
         time_t expires_at = now + CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS;
         rp_qualified_until[verifier_index] = expires_at;
         rp_qualification_cache_save(verifier_index, expires_at);
+        charra_log_info(
+                "[" LOG_NAME "] Qualification with Verifier n° %d (port "
+                "%u) valid until %ld (%ld second(s) from now).",
+                verifier_index + 1, verifier->port_number, (long)expires_at,
+                (long)CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS);
         result = CHARRA_RC_SUCCESS;
     } else {
-        charra_log_error("[" LOG_NAME "] |  RP NOT QUALIFIED          |");
+        charra_log_error(
+                "[" LOG_NAME
+                "] |  RP NOT QUALIFIED with Verifier n° %d (port %u)  |",
+                verifier_index + 1, verifier->port_number);
         result = CHARRA_RC_VERIFICATION_FAILED;
     }
 
@@ -2194,9 +2208,10 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
          * evidence itself -- signal the caller to re-provision via
          * /certify_ak and retry, rather than just recording a failed
          * vote a blind retry could never fix. */
-        charra_log_info("[" LOG_NAME "] Verifier n° %d rejected our AK "
-                        "certificate as invalid or expired.",
-                *current_thread_index + 1);
+        charra_log_info("[" LOG_NAME "] Verifier n° %d (port %u) rejected "
+                        "our AK certificate as invalid or expired.",
+                *current_thread_index + 1,
+                verifiers[*current_thread_index].port_number);
         snprintf(rejection_reason[*current_thread_index],
                 sizeof(rejection_reason[*current_thread_index]),
                 "AK certificate rejected as invalid or expired");
@@ -2221,9 +2236,10 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
         if (coap_get_data_large(received, &forbidden_data_len,
                     &forbidden_data, &forbidden_data_offset,
                     &forbidden_data_total_len) != 0) {
-            charra_log_info("[" LOG_NAME "] Verifier n° %d: %.*s",
-                    *current_thread_index + 1, (int)forbidden_data_len,
-                    (const char*)forbidden_data);
+            charra_log_info("[" LOG_NAME "] Verifier n° %d (port %u): %.*s",
+                    *current_thread_index + 1,
+                    verifiers[*current_thread_index].port_number,
+                    (int)forbidden_data_len, (const char*)forbidden_data);
             int n = (int)forbidden_data_len <
                                     (int)sizeof(
                                             rejection_reason[0]) - 1
@@ -2233,9 +2249,10 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
                     sizeof(rejection_reason[*current_thread_index]), "%.*s",
                     n, (const char*)forbidden_data);
         } else {
-            charra_log_info("[" LOG_NAME "] Verifier n° %d rejected our "
-                            "qualification.",
-                    *current_thread_index + 1);
+            charra_log_info("[" LOG_NAME "] Verifier n° %d (port %u) "
+                            "rejected our qualification.",
+                    *current_thread_index + 1,
+                    verifiers[*current_thread_index].port_number);
             snprintf(rejection_reason[*current_thread_index],
                     sizeof(rejection_reason[*current_thread_index]),
                     "qualification rejected");
@@ -2736,9 +2753,11 @@ void* get_attestation_results_thread(void *arg) {
     if (rp_perform_qualification_handshake(current_thread_index) !=
             CHARRA_RC_SUCCESS) {
         charra_log_error(
-                "[" LOG_NAME "] Verifier n° %d: qualification handshake did "
-                "not succeed; proceeding to /appraise anyway.",
-                current_thread_index + 1);
+                "[" LOG_NAME "] Verifier n° %d (port %u): qualification "
+                "handshake did not succeed; proceeding to /appraise "
+                "anyway.",
+                current_thread_index + 1,
+                verifiers[current_thread_index].port_number);
     }
 
     if (use_dtls_psk && use_dtls_rpk) {
@@ -3218,7 +3237,7 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
             charra_log_error("[" LOG_NAME"] Error creating thread");
             goto error;
         } else {
-            charra_log_info("[" LOG_NAME "] Forwarding evidence to Verifier n° %d ...", i+1);
+            charra_log_info("[" LOG_NAME "] Forwarding evidence to Verifier n° %d (port %u) ...", i+1, verifiers[i].port_number);
         }
     }
 
@@ -3226,9 +3245,41 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
         pthread_join(threads[i], NULL);
     }
 
+    /* Per-Verifier identity readiness, as of right now -- not "did we redo
+     * either this cycle": rp_ak_cert_ready[]/rp_qualified_until[] are both
+     * independently cached (on disk, per-Verifier -- see their own
+     * comments) and only get touched at all when their cache was missing
+     * or expired, so most cycles this just reports cache state untouched
+     * this round. */
+    int num_not_ready = 0;
+    time_t readiness_now = time(NULL);
     for (int i = 0; i < num_verifiers; ++i) {
-        charra_log_info("[" LOG_NAME "] Verifier %d: %s", i+1, attestation_results[i] ? "Attestation successful!" : "Attestation failed!");
-    }    
+        bool ak_ready = rp_ak_cert_ready[i];
+        bool qualified = rp_qualified_until[i] > readiness_now;
+        if (ak_ready && qualified) {
+            charra_log_info(
+                    "[" LOG_NAME "] Verifier %d (port %u): ready (AK "
+                    "certified, qualified).",
+                    i + 1, verifiers[i].port_number);
+        } else {
+            num_not_ready++;
+            charra_log_info(
+                    "[" LOG_NAME "] Verifier %d (port %u): NOT fully ready "
+                    "(AK certified: %s, qualified: %s).",
+                    i + 1, verifiers[i].port_number,
+                    ak_ready ? "yes" : "no", qualified ? "yes" : "no");
+        }
+    }
+    if (num_not_ready > 0) {
+        charra_log_info("[" LOG_NAME "] %d/%d Verifier(s) not yet fully "
+                        "ready (missing AK certificate and/or "
+                        "qualification).",
+                num_not_ready, num_verifiers);
+    }
+
+    for (int i = 0; i < num_verifiers; ++i) {
+        charra_log_info("[" LOG_NAME "] Verifier %d (port %u): %s", i+1, verifiers[i].port_number, attestation_results[i] ? "Attestation successful!" : "Attestation failed!");
+    }
 
     int num_true = 0;
     for (int i = 0; i < num_verifiers; ++i) {

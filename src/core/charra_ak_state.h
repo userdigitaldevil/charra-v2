@@ -136,10 +136,15 @@ bool charra_ak_state_is_valid(const charra_ak_state_record* record, time_t now);
  * @param[out] ek_fingerprint_out set to the matching record's
  * ek_fingerprint iff this returns true; untouched otherwise. May be NULL if
  * the caller only cares about validity, not identity.
+ * @param[out] expires_at_out set to the matching record's expires_at iff
+ * this returns true; untouched otherwise. May be NULL if the caller
+ * doesn't need it for logging. Lets callers log a certificate's actual
+ * remaining validity on success rather than just "valid!".
  * @returns true iff serial names a currently-valid (unrevoked, unexpired)
  * record. False on any lookup/load failure as well as a genuine miss.
  */
 bool charra_ak_state_check_serial_valid(const char* ak_state_file_path,
-        const uint8_t serial[16], uint8_t ek_fingerprint_out[32]);
+        const uint8_t serial[16], uint8_t ek_fingerprint_out[32],
+        time_t* expires_at_out);
 
 #endif /* CHARRA_AK_STATE_H */

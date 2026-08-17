@@ -38,6 +38,7 @@
 #include "core/charra_key_mgr.h"
 #include "core/charra_marshaling.h"
 #include "util/cbor_util.h"
+#include "util/charra_util.h"
 #include "util/cli_util.h"
 #include "util/coap_util.h"
 #include "util/crypto_util.h"
@@ -50,6 +51,15 @@
 
 /* quit signal */
 static bool quit = false;
+
+/* Counts /attest calls this Attester process has served, purely for the
+ * log delimiter coap_attest_handler() prints -- one /attest call happens
+ * per RP benchmark cycle (its evidence is reused across every Verifier
+ * that cycle forwards to, see relying_party.c's charra_rp_prepare_
+ * evidence()), so this gives an easy-to-scan boundary in a multi-cycle
+ * log, the same way verifier.c's attestation_round_counter and
+ * relying_party.c's "Starting new attestation run" delimiter do. */
+static unsigned int attest_request_counter = 0;
 
 /* logging */
 #define LOG_NAME "attester"
@@ -322,6 +332,50 @@ finish:
 /* --- function definitions ----------------------------------------------- */
 
 static void handle_sigint(int signum CHARRA_UNUSED) { quit = true; }
+
+/**
+ * @brief Logs the requesting peer's address:port for a CoAP handler --
+ * useful once more than one RP can hit one Attester, to tell which
+ * physical connection a given cycle's log lines belong to. Same helper
+ * verifier.c added for the same reason.
+ */
+static void log_peer_address(
+        const char* endpoint_name, struct coap_session_t* session) {
+    const coap_address_t* remote = coap_session_get_addr_remote(session);
+    if (remote == NULL) {
+        return;
+    }
+    unsigned char addr_buf[64] = {0};
+    size_t addr_len = coap_print_addr(remote, addr_buf, sizeof(addr_buf) - 1);
+    addr_buf[addr_len] = '\0';
+    charra_log_info("[" LOG_NAME "] %s: request from %s.", endpoint_name,
+            (const char*)addr_buf);
+}
+
+/**
+ * @brief Formats a TPML_PCR_SELECTION's selected PCR indices (across all
+ * its banks) as a compact "0,1,2,...,10" string, purely for logging what
+ * was actually quoted -- easier to eyeball than cross-referencing the RP's
+ * own request log for the same information.
+ */
+static void format_pcr_selection(
+        const TPML_PCR_SELECTION* sel, char* out, size_t out_len) {
+    size_t pos = 0;
+    out[0] = '\0';
+    for (UINT32 b = 0; b < sel->count && pos < out_len; ++b) {
+        const TPMS_PCR_SELECTION* bank = &sel->pcrSelections[b];
+        for (int i = 0; i < bank->sizeofSelect * 8 && pos < out_len; ++i) {
+            if (bank->pcrSelect[i / 8] & (1 << (i % 8))) {
+                int written = snprintf(out + pos, out_len - pos, "%s%d",
+                        (pos == 0) ? "" : ",", i);
+                if (written < 0) {
+                    break;
+                }
+                pos += (size_t)written;
+            }
+        }
+    }
+}
 
 static void release_data(
         struct coap_session_t* session CHARRA_UNUSED, void* app_ptr) {
@@ -657,6 +711,25 @@ static void coap_attest_handler(struct coap_resource_t* resource,
     TSS2_RC tss_r = 0;
     ESYS_TR sig_key_handle = ESYS_TR_NONE;
     TPM2B_PUBLIC* public_key = NULL;
+    /* Set true only right before falling through to the cleanup label on
+     * the success path below -- every 'goto error' skips that line, so
+     * this distinguishes "evidence actually sent" from any of the many
+     * failure exits for the closing status banner. */
+    bool request_succeeded = false;
+
+    /* Clear delimiter between benchmark cycles -- one /attest call happens
+     * per cycle (see attest_request_counter's own comment), so this marks
+     * where one cycle's evidence generation ends and the next begins, the
+     * same way verifier.c's and relying_party.c's own delimiters do. */
+    attest_request_counter++;
+    charra_log_info("[" LOG_NAME
+                    "] ============================================================");
+    charra_log_info("[" LOG_NAME "] Starting /attest request #%u.",
+            attest_request_counter);
+    charra_log_info("[" LOG_NAME
+                    "] ============================================================");
+    log_peer_address("/attest", session);
+
     /* --- receive incoming data --- */
     charra_log_info(
             "[" LOG_NAME "] Resource '%s': Received message.", "attest");
@@ -671,12 +744,18 @@ static void coap_attest_handler(struct coap_resource_t* resource,
                  request, &data_len, &data, &data_offset, &data_total_len)) == 0) {
         charra_log_error("[" LOG_NAME "] Could not get CoAP PDU data.");
         goto error;
+    } else if (data_len == data_total_len) {
+        /* the common case: no block-wise splitting happened, so the two
+         * lengths are identical -- collapsed into one line instead of two
+         * redundant ones */
+        charra_log_info(
+                "[" LOG_NAME "] Received attestation request of %zu byte(s).",
+                data_len);
     } else {
         charra_log_info(
-                "[" LOG_NAME "] Received data of length %zu.", data_len);
-        charra_log_info("[" LOG_NAME "] Received data of total length %zu.",
-                data_total_len);
-        charra_log_info("[" LOG_NAME "] Received an attestation request.");
+                "[" LOG_NAME "] Received attestation request: %zu byte(s) "
+                "of %zu byte(s) total (block-wise transfer).",
+                data_len, data_total_len);
     }
 
     /* unmarshal data */
@@ -684,7 +763,9 @@ static void coap_attest_handler(struct coap_resource_t* resource,
     msg_attestation_request_dto req = {0};
     if ((charra_r = charra_unmarshal_attestation_request(
                  data_len, data, &req)) != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not parse CBOR data.");
+        charra_log_error(
+                "[" LOG_NAME "] Could not parse CBOR data: CHARRA_RC=%d.",
+                charra_r);
         goto error;
     }
 
@@ -701,17 +782,30 @@ static void coap_attest_handler(struct coap_resource_t* resource,
     qualifying_data.size = req.nonce_len;
     memcpy(qualifying_data.buffer, req.nonce, req.nonce_len);
 
-    charra_log_info("Received nonce of length %d:", req.nonce_len);
+    charra_log_info("[" LOG_NAME "] Received nonce of length %d:", req.nonce_len);
     charra_print_hex(CHARRA_LOG_INFO, req.nonce_len, req.nonce,
             "                                   0x", "\n", false);
+
+    charra_log_info(
+            "[" LOG_NAME "] Signing key ID: '%.*s'.", req.sig_key_id_len,
+            req.sig_key_id);
 
     /* PCR selection */
     TPML_PCR_SELECTION pcr_selection = {0};
     if ((charra_r = charra_pcr_selections_to_tpm_pcr_selections(
                  req.pcr_selections_len, req.pcr_selections, &pcr_selection)) !=
             CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] PCR selection conversion error.");
+        charra_log_error(
+                "[" LOG_NAME "] PCR selection conversion error: "
+                "CHARRA_RC=%d.",
+                charra_r);
         goto error;
+    }
+    {
+        char pcr_list[128] = {0};
+        format_pcr_selection(&pcr_selection, pcr_list, sizeof(pcr_list));
+        charra_log_info(
+                "[" LOG_NAME "] Quoting PCR(s): %s.", pcr_list);
     }
 
     struct timespec start_time, end_time;
@@ -721,14 +815,20 @@ static void coap_attest_handler(struct coap_resource_t* resource,
     /* initialize ESAPI */
     ESYS_CONTEXT* esys_ctx = NULL;
     TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
-    if ((tss_r = Tss2_TctiLdr_Initialize(getenv("CHARRA_TCTI"), &tcti_ctx)) !=
+    const char* charra_tcti = getenv("CHARRA_TCTI");
+    charra_log_info("[" LOG_NAME "] CHARRA_TCTI = '%s'.",
+            (charra_tcti != NULL) ? charra_tcti : "(null)");
+    if ((tss_r = Tss2_TctiLdr_Initialize(charra_tcti, &tcti_ctx)) !=
             TSS2_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Tss2_TctiLdr_Initialize.");
+        charra_log_error(
+                "[" LOG_NAME "] Tss2_TctiLdr_Initialize failed: 0x%x.",
+                tss_r);
         goto error;
     }
     if ((tss_r = Esys_Initialize(&esys_ctx, tcti_ctx, NULL)) !=
             TSS2_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Esys_Initialize.");
+        charra_log_error("[" LOG_NAME "] Esys_Initialize failed: 0x%x.",
+                tss_r);
         goto error;
     }
 
@@ -745,7 +845,9 @@ static void coap_attest_handler(struct coap_resource_t* resource,
             if ((charra_r = charra_extend_pcrs_from_binary_log(
                          esys_ctx, log, log_len)) != CHARRA_RC_SUCCESS) {
                 charra_log_error(
-                        "[" LOG_NAME "] Could not extend PCRs from IMA log.");
+                        "[" LOG_NAME "] Could not extend PCRs from IMA "
+                        "log: CHARRA_RC=%d.",
+                        charra_r);
                 goto error;
             }
         } else {
@@ -753,28 +855,71 @@ static void coap_attest_handler(struct coap_resource_t* resource,
                             "unextended.");
         }
         ima_log_extended = true;
+    } else {
+        charra_log_debug(
+                "[" LOG_NAME "] PCRs already extended from IMA log earlier "
+                "this process's lifetime -- skipping (would grow PCR 10 "
+                "further and break replay if repeated).");
     }
 
     /* load TPM key */
+    struct timespec start_key_load, end_key_load;
+    clock_gettime(CLOCK_MONOTONIC, &start_key_load);
     charra_log_info("[" LOG_NAME "] Loading TPM key.");
     if ((charra_r = charra_load_tpm2_key(esys_ctx, req.sig_key_id_len,
                  req.sig_key_id, &sig_key_handle, &public_key)) !=
             CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not load TPM key.");
+        charra_log_error(
+                "[" LOG_NAME "] Could not load TPM key: CHARRA_RC=%d.",
+                charra_r);
         goto error;
     }
+    clock_gettime(CLOCK_MONOTONIC, &end_key_load);
+    double key_load_duration =
+            (end_key_load.tv_sec - start_key_load.tv_sec) +
+            (end_key_load.tv_nsec - start_key_load.tv_nsec) / 1e9;
+    charra_log_info(
+            "[" LOG_NAME "] Timing: TPM key load took %f second(s).",
+            key_load_duration);
 
     /* do the TPM quote */
+    struct timespec start_quote, end_quote;
+    clock_gettime(CLOCK_MONOTONIC, &start_quote);
     charra_log_info("[" LOG_NAME "] Do TPM Quote.");
     TPM2B_ATTEST* attest_buf = NULL;
     TPMT_SIGNATURE* signature = NULL;
     if ((tss_r = tpm2_quote(esys_ctx, sig_key_handle, &pcr_selection,
                  &qualifying_data, &attest_buf, &signature)) !=
             TSS2_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] TPM2 quote.");
+        charra_log_error("[" LOG_NAME "] TPM2 quote failed: 0x%x.", tss_r);
         goto error;
     } else {
         charra_log_info("[" LOG_NAME "] TPM Quote successful.");
+    }
+    clock_gettime(CLOCK_MONOTONIC, &end_quote);
+    double quote_duration = (end_quote.tv_sec - start_quote.tv_sec) +
+                            (end_quote.tv_nsec - start_quote.tv_nsec) / 1e9;
+    charra_log_info(
+            "[" LOG_NAME "] Timing: TPM Quote itself took %f second(s).",
+            quote_duration);
+
+    /* The quote's own PCR composite digest, straight from the TPM's signed
+     * TPMS_ATTEST -- logged so a PCR mismatch investigation on the
+     * Verifier side (comparing this against its own replayed digest) does
+     * not require re-deriving it from raw evidence bytes. Best-effort:
+     * this is purely informational, so a failure here does not abort the
+     * request. */
+    {
+        TPMS_ATTEST attest_struct = {0};
+        if (charra_unmarshal_tpm2_quote(attest_buf->size,
+                    attest_buf->attestationData,
+                    &attest_struct) == CHARRA_RC_SUCCESS) {
+            charra_print_hex(CHARRA_LOG_INFO,
+                    attest_struct.attested.quote.pcrDigest.size,
+                    attest_struct.attested.quote.pcrDigest.buffer,
+                    "[" LOG_NAME "] Quote's PCR composite digest = 0x", "\n",
+                    false);
+        }
     }
 
     clock_gettime(CLOCK_MONOTONIC, &end_time);
@@ -790,6 +935,10 @@ static void coap_attest_handler(struct coap_resource_t* resource,
 
     /* Write duration to file */
     fprintf(file, "%f\n", duration);
+    charra_log_info(
+            "[" LOG_NAME "] Timing: total /attest handling took %f "
+            "second(s).",
+            duration);
     fclose(file);
 
     /* --- send response data --- */
@@ -800,10 +949,16 @@ static void coap_attest_handler(struct coap_resource_t* resource,
     const uint8_t* ima_event_log = NULL;
     uint32_t ima_event_log_len = 0;
     if (req.event_log_path_len != 0) {
-        charra_log_info("[" LOG_NAME "] Reading IMA event log.");
         char* path = malloc(sizeof(char) * (req.event_log_path_len + 1));
         memcpy(path, req.event_log_path, req.event_log_path_len);
         path[req.event_log_path_len] = '\0';
+        charra_log_info(
+                "[" LOG_NAME "] Reading IMA event log from '%s'%s.", path,
+                (strcmp(path, ima_test_log_path) == 0)
+                        ? " (same file the PCRs were extended from)"
+                        : " (DIFFERENT from the IMA log the PCRs were "
+                          "extended from -- log_a may not reproduce PCR "
+                          "10)");
         CHARRA_RC rc =
                 charra_get_ima_log(path, &ima_event_log, &ima_event_log_len);
         free(path);
@@ -839,6 +994,13 @@ static void coap_attest_handler(struct coap_resource_t* resource,
     memcpy(res.tpm2_signature, signature, res.tpm2_signature_len);
     memcpy(res.tpm2_public_key, public_key, res.tpm2_public_key_len);
 
+    charra_log_info(
+            "[" LOG_NAME "] Response components: attestation_data=%u "
+            "byte(s), tpm2_signature=%u byte(s), tpm2_public_key=%u "
+            "byte(s), event_log=%u byte(s).",
+            res.attestation_data_len, res.tpm2_signature_len,
+            res.tpm2_public_key_len, res.event_log_len);
+
     /* clean up */
     charra_free_and_null(signature);
     charra_free_and_null(attest_buf);
@@ -850,7 +1012,9 @@ static void coap_attest_handler(struct coap_resource_t* resource,
     uint8_t* res_buf = NULL;
     if ((charra_r = charra_marshal_attestation_response(
                  &res, &res_buf_len, &res_buf)) != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Error marshaling data.");
+        charra_log_error(
+                "[" LOG_NAME "] Error marshaling data: CHARRA_RC=%d.",
+                charra_r);
         goto error;
     }
     charra_log_info("[" LOG_NAME "] Size of marshaled response is %d bytes.",
@@ -872,8 +1036,17 @@ static void coap_attest_handler(struct coap_resource_t* resource,
         goto error;
     }
     charra_log_info("[" LOG_NAME "] Evidence sent to the relying party.");
+    request_succeeded = true;
 
 error:
+    charra_log_info("[" LOG_NAME "] +----------------------------+");
+    if (request_succeeded) {
+        charra_log_info("[" LOG_NAME "] |   EVIDENCE GENERATED OK    |");
+    } else {
+        charra_log_info("[" LOG_NAME "] |   /attest REQUEST FAILED   |");
+    }
+    charra_log_info("[" LOG_NAME "] +----------------------------+");
+
     /* free heap objects */
     charra_free_if_not_null(signature);
     charra_free_if_not_null(attest_buf);

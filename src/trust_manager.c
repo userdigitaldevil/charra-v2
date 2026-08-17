@@ -33,6 +33,13 @@ static const char LISTEN_ADDRESS[] = "0.0.0.0";
 int port = 6000;
 bool processing_response = false;
 
+/* Counts /get_verifiers calls this process has served, purely for the log
+ * delimiter coap_handler() prints -- one call happens per RP benchmark
+ * cycle (relying_party.c's get_verifiers(), called once per num_verifiers
+ * value in its 1..N sweep), same cadence as attester.c's /attest, so this
+ * gives the same kind of easy-to-scan boundary in a multi-cycle log. */
+static unsigned int get_verifiers_request_counter = 0;
+
 typedef struct verifier_info {
     char* ip_address;
     unsigned int port_number;
@@ -43,6 +50,23 @@ static void coap_handler(struct coap_resource_t* resource,
                                 const struct coap_pdu_t* request,
                                 const struct coap_string_t* query,
                                 struct coap_pdu_t* response);
+
+/**
+ * @brief Logs the requesting peer's address:port for a CoAP handler --
+ * same helper attester.c/verifier.c already added for the same reason.
+ */
+static void log_peer_address(
+        const char* endpoint_name, struct coap_session_t* session) {
+    const coap_address_t* remote = coap_session_get_addr_remote(session);
+    if (remote == NULL) {
+        return;
+    }
+    unsigned char addr_buf[64] = {0};
+    size_t addr_len = coap_print_addr(remote, addr_buf, sizeof(addr_buf) - 1);
+    addr_buf[addr_len] = '\0';
+    charra_log_info("[" LOG_NAME "] %s: request from %s.", endpoint_name,
+            (const char*)addr_buf);
+}
 
 int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
       
@@ -125,6 +149,17 @@ static void coap_handler(struct coap_resource_t* resource,
     processing_response = true;
     int coap_r = 0;
 
+    /* Clear delimiter between benchmark cycles -- see
+     * get_verifiers_request_counter's own comment. */
+    get_verifiers_request_counter++;
+    charra_log_info("[" LOG_NAME
+                    "] ============================================================");
+    charra_log_info("[" LOG_NAME "] Starting /get_verifiers request #%u.",
+            get_verifiers_request_counter);
+    charra_log_info("[" LOG_NAME
+                    "] ============================================================");
+    log_peer_address("/get_verifiers", session);
+
     /* get data */
     size_t data_len = 0;
     const uint8_t* data = NULL;
@@ -133,24 +168,63 @@ static void coap_handler(struct coap_resource_t* resource,
     if ((coap_r = coap_get_data_large(
                  request, &data_len, &data, &data_offset, &data_total_len)) == 0) {
         charra_log_error("[" LOG_NAME "] Could not get CoAP PDU data.");
-        //goto cleanup;
-    } else {
-        charra_log_info(
-                "[" LOG_NAME "] Received data of length %zu.", data_len);
-        charra_log_info("[" LOG_NAME "] Received data of total length %zu.",
-                data_total_len);
+        /* Nothing allocated yet at this point (verifier_infos/response_data
+         * below don't exist), so a plain return is correct here -- unlike
+         * further down, there is nothing for a 'goto cleanup' to free, and
+         * jumping over a VLA's own declaration the way the old (dead,
+         * commented-out) 'goto cleanup;' here would have done is not
+         * actually legal C: a goto may not jump from outside a variably
+         * modified identifier's scope to inside it. This used to fall
+         * through instead, into memcpy(verifier_list, NULL, 0) below --
+         * technically undefined behavior even at a 0 length, and silently
+         * masked the original failure. */
+        processing_response = false;
+        return;
     }
+    charra_log_info(
+            "[" LOG_NAME "] Received request of %zu byte(s) (%zu byte(s) "
+            "total).",
+            data_len, data_total_len);
+
+    if (data_total_len % sizeof(int) != 0) {
+        charra_log_error(
+                "[" LOG_NAME "] Request length %zu is not a whole number "
+                "of verifier IDs (%zu-byte int) -- rejecting instead of "
+                "silently truncating.",
+                data_total_len, sizeof(int));
+        processing_response = false;
+        return;
+    }
+    const size_t requested_count = data_total_len / sizeof(int);
 
     /* Save the received verifier list */
-    int verifier_list[data_total_len / sizeof(int)];
+    int verifier_list[requested_count];
     memcpy(verifier_list, data, data_total_len);
+
+    {
+        char id_list[256] = {0};
+        size_t pos = 0;
+        for (size_t i = 0; i < requested_count && pos < sizeof(id_list); ++i) {
+            int written = snprintf(id_list + pos, sizeof(id_list) - pos,
+                    "%s%d", (i == 0) ? "" : ",", verifier_list[i]);
+            if (written < 0) {
+                break;
+            }
+            pos += (size_t)written;
+        }
+        charra_log_info(
+                "[" LOG_NAME "] Requested %zu Verifier ID(s): [%s].",
+                requested_count, id_list);
+    }
 
     /* Read verifier information from the configuration file */
     const char* config_filename = "./verifiers_config.txt";
-    verifier_info verifier_infos[data_total_len / sizeof(int)];
+    charra_log_info(
+            "[" LOG_NAME "] Looking up Verifier(s) in '%s'.", config_filename);
+    verifier_info verifier_infos[requested_count];
     size_t verifier_count = 0;
 
-    for (size_t i = 0; i < data_total_len / sizeof(int); i++) {
+    for (size_t i = 0; i < requested_count; i++) {
         if (read_verifier_config(config_filename, verifier_list[i], &verifier_infos[verifier_count]) == 0) {
             charra_log_info("[" LOG_NAME "] Found Verifier ID %d: %s:%u", verifier_list[i], verifier_infos[verifier_count].ip_address, verifier_infos[verifier_count].port_number);
             verifier_count++;
@@ -158,6 +232,10 @@ static void coap_handler(struct coap_resource_t* resource,
             charra_log_error("[" LOG_NAME "] Verifier ID %d not found in configuration file.", verifier_list[i]);
         }
     }
+    charra_log_info(
+            "[" LOG_NAME "] Lookup summary: %zu requested, %zu found, %zu "
+            "missing.",
+            requested_count, verifier_count, requested_count - verifier_count);
 
     /* Send verifier information as a response */
     size_t response_len = verifier_count * (sizeof(verifier_info) - sizeof(char*) + 16 + sizeof(unsigned int));
@@ -174,19 +252,34 @@ static void coap_handler(struct coap_resource_t* resource,
         memcpy(ptr, &verifier_infos[i].port_number, sizeof(unsigned int));
         ptr += sizeof(unsigned int);
     }
+    charra_log_info(
+            "[" LOG_NAME "] Response is %zu byte(s) for %zu Verifier(s).",
+            response_len, verifier_count);
 
     charra_log_info(
             "[" LOG_NAME
             "] Adding marshaled data to CoAP response PDU and send it.");
     coap_pdu_set_code(response, COAP_RESPONSE_CODE_CONTENT);
+    bool send_ok = true;
     if ((coap_r = coap_add_data_large_response(resource, session, request,
                  response, query, COAP_MEDIATYPE_APPLICATION_CBOR, -1, 0,
                  response_len, response_data, NULL, NULL)) == 0) {
         charra_log_error("[" LOG_NAME
                          "] Error invoking coap_add_data_large_response().");
+        send_ok = false;
     }
 
     free(response_data);
+
+    charra_log_info("[" LOG_NAME "] +----------------------------+");
+    if (send_ok && verifier_count == requested_count) {
+        charra_log_info("[" LOG_NAME "] |   REQUEST SUCCESSFUL       |");
+    } else if (send_ok) {
+        charra_log_info("[" LOG_NAME "] |  PARTIAL: SOME IDs MISSING |");
+    } else {
+        charra_log_info("[" LOG_NAME "] |   REQUEST FAILED           |");
+    }
+    charra_log_info("[" LOG_NAME "] +----------------------------+");
 
 cleanup:
     for (size_t i = 0; i < verifier_count; i++) {

@@ -37,6 +37,18 @@
 static bool quit = false;
 static CHARRA_RC attestation_rc = CHARRA_RC_ERROR;
 
+/* Counts attestation rounds this Verifier process has seen, purely for the
+ * log delimiter coap_nonce_handler() prints -- /nonce is always the first
+ * request of a new round (RP requests exactly one fresh nonce per cycle
+ * per Verifier, before building and sending evidence), so incrementing it
+ * there gives an easy-to-scan boundary in this Verifier's own log, the
+ * same way relying_party.c's "Starting new attestation run" delimiter
+ * does on the RP side. Not shared with or derived from the RP's own
+ * num_verifiers/run numbering -- this Verifier has no visibility into
+ * that, it only knows how many rounds *it itself* has been asked to
+ * participate in. */
+static unsigned int attestation_round_counter = 0;
+
 /* logging */
 #define LOG_NAME "verifier"
 static uint8_t tpm_pcr_selection[TPM2_MAX_PCRS] = {0, 1, 2, 3, 4, 5, 6, 7, 10};
@@ -413,7 +425,45 @@ finish:
 
 static void handle_sigint(int signum CHARRA_UNUSED) { quit = true; }
 
-/** @brief Logs subject/issuer/serial/expiry for a cert that passed chain verification. */
+/**
+ * @brief Formats the leading bytes of a buffer as a lowercase hex string,
+ * for compact identity fingerprints/serials/nonces inline in log lines --
+ * a full 32-byte EK fingerprint or 16-byte AK serial is unwieldy to print
+ * in full every time, but a short prefix is still enough to tell two
+ * different identities/values apart at a glance across a busy log.
+ *
+ * @param out_len buffer size in out; at most (out_len - 1) / 2 bytes of buf
+ * are rendered, silently truncating anything beyond that.
+ */
+static void hex_prefix(
+        const uint8_t* buf, size_t buf_len, char* out, size_t out_len) {
+    size_t max_bytes = (out_len - 1) / 2;
+    size_t n = buf_len < max_bytes ? buf_len : max_bytes;
+    for (size_t i = 0; i < n; ++i) {
+        snprintf(out + (i * 2), 3, "%02x", buf[i]);
+    }
+    out[n * 2] = '\0';
+}
+
+/**
+ * @brief Logs the requesting peer's address:port for a CoAP handler --
+ * useful once several RPs (or several redundant requests from the same RP)
+ * can hit one Verifier, to tell which physical connection a given round's
+ * log lines belong to, beyond just the identity fingerprints logged
+ * elsewhere.
+ */
+static void log_peer_address(
+        const char* endpoint_name, struct coap_session_t* session) {
+    const coap_address_t* remote = coap_session_get_addr_remote(session);
+    if (remote == NULL) {
+        return;
+    }
+    unsigned char addr_buf[64] = {0};
+    size_t addr_len = coap_print_addr(remote, addr_buf, sizeof(addr_buf) - 1);
+    addr_buf[addr_len] = '\0';
+    charra_log_info("[" LOG_NAME "] %s: request from %s.", endpoint_name,
+            (const char*)addr_buf);
+}
 static void coap_appraise_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
                                 const struct coap_pdu_t* request,
@@ -421,6 +471,8 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
                                 struct coap_pdu_t* response) {
     int coap_r = 0;
     TSS2_RC tss_r = 0;
+
+    log_peer_address("/appraise", session);
 
     ESYS_TR sig_key_handle = ESYS_TR_NONE;
     TPMT_TK_VERIFIED* validation = NULL;
@@ -489,6 +541,12 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     end_unmarshal = clock();
     unmarshal_duration = ((double) (end_unmarshal - start_unmarshal)) / CLOCKS_PER_SEC;
     fprintf(p_file, "unmarshal evidence took %f seconds to execute \n", unmarshal_duration);
+    charra_log_info(
+            "[" LOG_NAME "] Parsed evidence: log_r is %u byte(s).",
+            res.log_r_len);
+    charra_log_info(
+            "[" LOG_NAME "] Timing: unmarshal evidence took %f second(s).",
+            unmarshal_duration);
 
     /* verify data */
     /* Checked against sizeof(TPMS_ATTEST), not sizeof(TPM2B_ATTEST): this
@@ -550,6 +608,8 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     end_init = clock();
     init_duration = ((double) (end_init - start_init)) / CLOCKS_PER_SEC;
     fprintf(p_file, "init took %f seconds to execute \n", init_duration);
+    charra_log_info("[" LOG_NAME "] Timing: TPM init took %f second(s).",
+            init_duration);
 
     /* Trust anchor for the EK/AK checks below: both EK_r/AK_r (Step 3a item
      * 1) and EK_a/AK_a (Step 3b item 1) are AK certificates issued by this
@@ -606,9 +666,27 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     }
     uint8_t ek_fingerprint_rp[32] = {0};
     if (attestation_result_ekak_rp) {
-        charra_log_info("[" LOG_NAME "]     => RP's AK certificate is valid!");
+        char ak_serial_rp_hex[33] = {0};
+        hex_prefix(ak_serial_rp, sizeof(ak_serial_rp), ak_serial_rp_hex,
+                sizeof(ak_serial_rp_hex));
+        charra_log_info(
+                "[" LOG_NAME "]     => RP's AK certificate is valid! "
+                "(serial %s...)",
+                ak_serial_rp_hex);
+        time_t ak_cert_expires_at_rp = 0;
         attestation_result_ekak_rp = charra_ak_state_check_serial_valid(
-                ak_state_file_path, ak_serial_rp, ek_fingerprint_rp);
+                ak_state_file_path, ak_serial_rp, ek_fingerprint_rp,
+                &ak_cert_expires_at_rp);
+        if (attestation_result_ekak_rp) {
+            char ek_fingerprint_rp_hex[17] = {0};
+            hex_prefix(ek_fingerprint_rp, sizeof(ek_fingerprint_rp),
+                    ek_fingerprint_rp_hex, sizeof(ek_fingerprint_rp_hex));
+            charra_log_info(
+                    "[" LOG_NAME "]     => RP identity %s...: AK certificate "
+                    "is currently valid (expires at %ld, in %ld second(s)).",
+                    ek_fingerprint_rp_hex, (long)ak_cert_expires_at_rp,
+                    (long)(ak_cert_expires_at_rp - time(NULL)));
+        }
     } else {
         charra_log_error("[" LOG_NAME "]     => RP's AK certificate did NOT "
                          "verify (chain or key mismatch)!");
@@ -630,6 +708,7 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
      * and telling it which case this is (see the response message chain
      * below) saves it from having to guess. */
     bool qualification_record_found = false;
+    time_t qualification_expires_at = 0;
     if (attestation_result_ekak_rp) {
         charra_qualification_state_record* qual_records = NULL;
         uint32_t qual_count = 0;
@@ -640,6 +719,7 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
                         qual_records, qual_count, ek_fingerprint_rp,
                         &qual_index)) {
                 qualification_record_found = true;
+                qualification_expires_at = qual_records[qual_index].expires_at;
                 attestation_result_qualified =
                         charra_qualification_state_is_valid(
                                 &qual_records[qual_index], time(NULL));
@@ -649,17 +729,26 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
             charra_log_error(
                     "[" LOG_NAME "] Could not load qualification state.");
         }
+        char ek_fingerprint_rp_hex[17] = {0};
+        hex_prefix(ek_fingerprint_rp, sizeof(ek_fingerprint_rp),
+                ek_fingerprint_rp_hex, sizeof(ek_fingerprint_rp_hex));
         if (attestation_result_qualified) {
             charra_log_info(
-                    "[" LOG_NAME "]     => RP is currently qualified!");
+                    "[" LOG_NAME "]     => RP %s... is currently qualified "
+                    "(expires at %ld, in %ld second(s)).",
+                    ek_fingerprint_rp_hex, (long)qualification_expires_at,
+                    (long)(qualification_expires_at - time(NULL)));
         } else if (qualification_record_found) {
             charra_log_error(
-                    "[" LOG_NAME "]     => RP's qualification has EXPIRED!");
+                    "[" LOG_NAME "]     => RP %s...'s qualification has "
+                    "EXPIRED (was valid until %ld)!",
+                    ek_fingerprint_rp_hex, (long)qualification_expires_at);
         } else {
             charra_log_error(
-                    "[" LOG_NAME "]     => RP is NOT currently qualified "
-                    "(no passing /qualify/submit on record for this "
-                    "identity)!");
+                    "[" LOG_NAME "]     => RP %s... is NOT currently "
+                    "qualified (no passing /qualify/submit on record for "
+                    "this identity)!",
+                    ek_fingerprint_rp_hex);
         }
     }
 
@@ -709,6 +798,10 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     end_verifiy_signature = clock();
     verify_signature_duration = ((double) (end_verifiy_signature - start_verifiy_signature)) / CLOCKS_PER_SEC;
     fprintf(p_file, "verify signature took %f seconds to execute \n", verify_signature_duration);
+    charra_log_info(
+            "[" LOG_NAME "] Timing: verify Quote_r signature took %f "
+            "second(s).",
+            verify_signature_duration);
 
     /* log_r content verification (self-consistency, PCR replay, file-hash
      * policy) is NOT done here -- it is the RP App's own Step 2a
@@ -742,14 +835,28 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
             charra_log_info("[" LOG_NAME "]     => Nonce in Quote_r is "
                             "valid! (matches the one sent)");
         } else {
+            char expected_nonce_hex[17] = {0};
+            char received_nonce_hex[17] = {0};
+            hex_prefix(verifier_challenge_nonce, verifier_challenge_nonce_len,
+                    expected_nonce_hex, sizeof(expected_nonce_hex));
+            hex_prefix(res.verifier_nonce, res.verifier_nonce_len,
+                    received_nonce_hex, sizeof(received_nonce_hex));
             charra_log_error("[" LOG_NAME
                              "]     => Nonce in Quote_r is NOT valid! (does "
                              "not match the one sent)");
+            charra_log_error(
+                    "[" LOG_NAME "]     => expected %u byte(s), starting "
+                    "%s...; received %u byte(s), starting %s...",
+                    verifier_challenge_nonce_len, expected_nonce_hex,
+                    res.verifier_nonce_len, received_nonce_hex);
         }
     }
     end_verifiy_nonce = clock();
     verify_nonce_duration = ((double) (end_verifiy_nonce - start_verifiy_nonce)) / CLOCKS_PER_SEC;
     fprintf(p_file, "verify nonce took %f seconds to execute \n", verify_nonce_duration);
+    charra_log_info(
+            "[" LOG_NAME "] Timing: verify RP nonce took %f second(s).",
+            verify_nonce_duration);
 
     /* Quote_r has no mbedtls-vs-TPM double-check the way Quote_a's TPM
      * quote does (both a TPM-side and an mbedtls-side signature check
@@ -818,10 +925,25 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
                             (TPM2B_PUBLIC*)res.tpm2_public_key, ak_serial) ==
                     CHARRA_RC_SUCCESS;
             if (attestation_result_ekak) {
-                charra_log_info("[" LOG_NAME
-                                "]     => Attester's AK certificate is valid!");
+                char ak_serial_hex[33] = {0};
+                hex_prefix(ak_serial, sizeof(ak_serial), ak_serial_hex,
+                        sizeof(ak_serial_hex));
+                charra_log_info(
+                        "[" LOG_NAME "]     => Attester's AK certificate is "
+                        "valid! (serial %s...)",
+                        ak_serial_hex);
+                time_t ak_cert_expires_at = 0;
                 attestation_result_ekak = charra_ak_state_check_serial_valid(
-                        ak_state_file_path, ak_serial, NULL);
+                        ak_state_file_path, ak_serial, NULL,
+                        &ak_cert_expires_at);
+                if (attestation_result_ekak) {
+                    charra_log_info(
+                            "[" LOG_NAME "]     => Attester's AK certificate "
+                            "is currently valid (expires at %ld, in %ld "
+                            "second(s)).",
+                            (long)ak_cert_expires_at,
+                            (long)(ak_cert_expires_at - time(NULL)));
+                }
             } else {
                 charra_log_error(
                         "[" LOG_NAME "]     => Attester's AK certificate "
@@ -877,9 +999,21 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
             charra_log_info("[" LOG_NAME "]     => Nonce in TPM Quote is "
                             "valid! (matches the one sent)");
         } else {
+            char expected_nonce_hex[17] = {0};
+            char received_nonce_hex[17] = {0};
+            hex_prefix(last_request.nonce, last_request.nonce_len,
+                    expected_nonce_hex, sizeof(expected_nonce_hex));
+            hex_prefix(attest_struct.extraData.buffer,
+                    attest_struct.extraData.size, received_nonce_hex,
+                    sizeof(received_nonce_hex));
             charra_log_error("[" LOG_NAME
                              "]     => Nonce in TPM Quote is NOT valid! (does "
                              "not match the one sent)");
+            charra_log_error(
+                    "[" LOG_NAME "]     => expected %u byte(s), starting "
+                    "%s...; received %u byte(s), starting %s...",
+                    last_request.nonce_len, expected_nonce_hex,
+                    attest_struct.extraData.size, received_nonce_hex);
         }
     }
 
@@ -899,10 +1033,17 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
                               attestation_result_nonce;
 
 
+    char ek_fingerprint_rp_hex_result[17] = {0};
+    hex_prefix(ek_fingerprint_rp, sizeof(ek_fingerprint_rp),
+            ek_fingerprint_rp_hex_result, sizeof(ek_fingerprint_rp_hex_result));
+
     const char* message;
     coap_pdu_code_t response_code = COAP_RESPONSE_CODE_CONTENT;
     /* print attestation result */
     charra_log_info("[" LOG_NAME "] +----------------------------+");
+    charra_log_info("[" LOG_NAME "]   RP identity: %s...",
+            attestation_result_ekak_rp ? ek_fingerprint_rp_hex_result
+                                       : "(unknown -- AK cert rejected)");
     if (attestation_result) {
         attestation_rc = CHARRA_RC_SUCCESS;
         message = "Attestation successful!\0";
@@ -956,6 +1097,10 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
     fprintf(p_file, "appraising took %f seconds to execute \n", appraise_duration);
     double total_measured = unmarshal_duration + init_duration + verify_nonce_duration + verify_signature_duration;
     fprintf(p_file, "total measured %f  \n", total_measured);
+    charra_log_info(
+            "[" LOG_NAME "] Timing: total /appraise handling took %f "
+            "second(s) (%f second(s) measured across sub-phases).",
+            appraise_duration, total_measured);
 
     if ((coap_r = coap_add_data_large_response(resource, session, request, response,
                 query, COAP_MEDIATYPE_TEXT_PLAIN, -1, 0,
@@ -1011,6 +1156,31 @@ static void coap_nonce_handler(struct coap_resource_t* resource,
                                 struct coap_pdu_t* response) {
     CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
     int coap_r = 0;
+
+    /* Clear delimiter between attestation rounds -- without this, a busy
+     * Verifier's log (interleaved /certify_ak, /qualify, /qualify_submit,
+     * /appraise handling across many rounds) has no visible boundary
+     * between one round's requests and the next. /nonce is the best
+     * available anchor for "a new round started": on every round after the
+     * first with a given RP identity, it genuinely IS the first request
+     * (RP's AK certificate and qualification are both cached by then, so
+     * neither /certify_ak nor /qualify/qualify_submit get called at all
+     * that round -- see relying_party.c's rp_perform_qualification_
+     * handshake()). Only on an RP's very first round with this Verifier
+     * does the delimiter print a little late, after /certify_ak and
+     * /qualify already ran -- acceptable since that round is already
+     * self-evidently distinctive in the log (EK/AK certification and
+     * qualification-challenge lines that never repeat afterward). Mirrors
+     * relying_party.c's own "Starting new attestation run" delimiter. */
+    attestation_round_counter++;
+    charra_log_info("[" LOG_NAME
+                    "] ============================================================");
+    charra_log_info(
+            "[" LOG_NAME "] Starting attestation round #%u.",
+            attestation_round_counter);
+    charra_log_info("[" LOG_NAME
+                    "] ============================================================");
+    log_peer_address("/nonce", session);
 
     /* --- receive incoming data --- */
     coap_show_pdu(LOG_DEBUG, request);
@@ -1112,6 +1282,8 @@ static void coap_certify_ak_handler(struct coap_resource_t* resource,
     TSS2_RC tss_r = 0;
     CHARRA_RC charra_r = CHARRA_RC_ERROR;
     coap_pdu_code_t response_code = COAP_RESPONSE_CODE_INTERNAL_ERROR;
+
+    log_peer_address("/certify_ak", session);
 
     msg_certify_ak_request_dto req = {0};
     bool req_unmarshaled = false;
@@ -1368,6 +1540,48 @@ static void coap_certify_ak_handler(struct coap_resource_t* resource,
         charra_r = CHARRA_RC_ERROR;
         goto cleanup;
     }
+
+    char ek_fingerprint_hex[17] = {0};
+    hex_prefix(ek_fingerprint, sizeof(ek_fingerprint), ek_fingerprint_hex,
+            sizeof(ek_fingerprint_hex));
+    /* charra_ak_state_renew() below silently revokes any prior record for
+     * this identity -- looked up here purely so that revocation, an event
+     * worth knowing about (an existing valid identity being superseded, as
+     * opposed to a brand-new one being provisioned), is actually visible in
+     * the log instead of happening invisibly inside the renewal call. */
+    {
+        charra_ak_state_record* existing_records = NULL;
+        uint32_t existing_count = 0;
+        if (charra_ak_state_load(ak_state_file_path, &existing_records,
+                    &existing_count) == CHARRA_RC_SUCCESS) {
+            uint32_t existing_index = 0;
+            if (charra_ak_state_find_by_ek_fingerprint(existing_records,
+                        existing_count, ek_fingerprint, &existing_index)) {
+                char prev_serial_hex[33] = {0};
+                hex_prefix(existing_records[existing_index].serial,
+                        sizeof(existing_records[existing_index].serial),
+                        prev_serial_hex, sizeof(prev_serial_hex));
+                bool prev_was_valid = charra_ak_state_is_valid(
+                        &existing_records[existing_index], time(NULL));
+                charra_log_info(
+                        "[" LOG_NAME "] /certify_ak: identity %s... has a "
+                        "prior AK certificate on record (serial %s..., "
+                        "%s) -- it will now be revoked in favor of the "
+                        "fresh one.",
+                        ek_fingerprint_hex, prev_serial_hex,
+                        prev_was_valid ? "currently valid"
+                                       : "already revoked/expired");
+            } else {
+                charra_log_info(
+                        "[" LOG_NAME "] /certify_ak: identity %s... has no "
+                        "prior AK certificate on record -- provisioning a "
+                        "new identity.",
+                        ek_fingerprint_hex);
+            }
+            free(existing_records);
+        }
+    }
+
     charra_ak_state_record ak_record = {0};
     memcpy(ak_record.ek_fingerprint, ek_fingerprint,
             sizeof(ak_record.ek_fingerprint));
@@ -1382,6 +1596,15 @@ static void coap_certify_ak_handler(struct coap_resource_t* resource,
         charra_log_error("[" LOG_NAME "] /certify_ak: could not record "
                          "issuance in AK-provisioning state.");
         goto cleanup;
+    }
+    {
+        char new_serial_hex[33] = {0};
+        hex_prefix(ak_cert_serial, sizeof(ak_cert_serial), new_serial_hex,
+                sizeof(new_serial_hex));
+        charra_log_info(
+                "[" LOG_NAME "] /certify_ak: identity %s...: new AK "
+                "certificate recorded (serial %s..., expires at %ld).",
+                ek_fingerprint_hex, new_serial_hex, (long)ak_cert_expires_at);
     }
 
     response_code = COAP_RESPONSE_CODE_CONTENT;
@@ -1456,6 +1679,8 @@ static void coap_qualify_handler(struct coap_resource_t* resource,
     int coap_r = 0;
     CHARRA_RC charra_r = CHARRA_RC_ERROR;
     coap_pdu_code_t response_code = COAP_RESPONSE_CODE_INTERNAL_ERROR;
+
+    log_peer_address("/qualify", session);
 
     uint8_t* challenge_log = NULL;
     uint32_t challenge_log_len = 0;
@@ -1557,6 +1782,8 @@ static void coap_qualify_submit_handler(struct coap_resource_t* resource,
     coap_pdu_code_t response_code = COAP_RESPONSE_CODE_INTERNAL_ERROR;
     const char* message = "Qualification check errored!\0";
 
+    log_peer_address("/qualify/submit", session);
+
     /* declared/zeroed here so cleanup can always safely free them,
      * regardless of which check below first failed -- same convention
      * coap_certify_ak_handler() above uses */
@@ -1616,7 +1843,7 @@ static void coap_qualify_submit_handler(struct coap_resource_t* resource,
                             &ak_cert_rp_leaf, req.rp_public_key,
                             req.rp_public_key_len) == CHARRA_RC_SUCCESS &&
                     charra_ak_state_check_serial_valid(ak_state_file_path,
-                            ak_serial_rp, ek_fingerprint);
+                            ak_serial_rp, ek_fingerprint, NULL);
             if (submitter_identity_ok) {
                 charra_crypto_log_cert_summary(
                         "/qualify/submit submitter's AK cert",
@@ -1694,15 +1921,24 @@ static void coap_qualify_submit_handler(struct coap_resource_t* resource,
                              "persist qualification state.");
         }
 
+        char ek_fingerprint_hex[17] = {0};
+        hex_prefix(ek_fingerprint, sizeof(ek_fingerprint), ek_fingerprint_hex,
+                sizeof(ek_fingerprint_hex));
         charra_log_info(
-                "[" LOG_NAME "] /qualify/submit: RP qualified (valid until "
-                "%ld).",
-                (long)qualification_state.expires_at);
+                "[" LOG_NAME "] /qualify/submit: RP %s... qualified (valid "
+                "until %ld, %ld second(s) from now).",
+                ek_fingerprint_hex, (long)qualification_state.expires_at,
+                (long)(qualification_state.expires_at - time(NULL)));
         response_code = COAP_RESPONSE_CODE_CONTENT;
         message = "Qualification successful!\0";
     } else {
-        charra_log_error("[" LOG_NAME "] /qualify/submit: submitted log/PCR "
-                         "did NOT match the golden answer.");
+        char ek_fingerprint_hex[17] = {0};
+        hex_prefix(ek_fingerprint, sizeof(ek_fingerprint), ek_fingerprint_hex,
+                sizeof(ek_fingerprint_hex));
+        charra_log_error(
+                "[" LOG_NAME "] /qualify/submit: RP %s...'s submitted "
+                "log/PCR did NOT match the golden answer.",
+                ek_fingerprint_hex);
         response_code = COAP_RESPONSE_CODE_CONTENT;
         message = "Qualification failed!  \0";
     }
