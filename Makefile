@@ -128,6 +128,11 @@ OBJECTS =  $(addsuffix .o, $(addprefix $(OBJDIR)/common/, charra_log))
 OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log charra_synthetic_log charra_sdk charra_rp_qualification charra_ak_state charra_qualification_state charra_identity_key_mgr))
 OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/util/, cbor_util charra_util coap_util crypto_util io_util tpm2_util cli_util parser_util))
 
+# Relying-Party-only modules (src/rp/). Kept out of $(OBJECTS) on purpose:
+# that list is linked into every binary, and these carry RP-specific state
+# the Attester/Verifier/Trust Manager have no business pulling in.
+RP_OBJECTS = $(addsuffix .o, $(addprefix $(OBJDIR)/rp/, rp_stats rp_config))
+
 TARGETS = $(addprefix $(BINDIR)/, attester verifier verifier_old relying_party trust_manager)
 
 .PHONY: all attester verifier verifier_old relying_party trust_manager \
@@ -195,7 +200,7 @@ ifeq ($(enable_stripping),1)
 	strip --strip-unneeded $@
 endif
 
-$(BINDIR)/relying_party: $(SRCDIR)/relying_party.c $(OBJECTS)
+$(BINDIR)/relying_party: $(SRCDIR)/relying_party.c $(OBJECTS) $(RP_OBJECTS)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ -Wl,--gc-sections $(link_mode)
 ifeq ($(enable_stripping),1)
 	strip --strip-unneeded $@
@@ -260,6 +265,10 @@ $(OBJDIR)/common/%.o: $(SRCDIR)/common/%.c
 	$(CC) $< $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) $(CFLAGS) -g -o $@ -c $(link_mode)
 
 $(OBJDIR)/core/%.o: $(SRCDIR)/core/%.c
+	@mkdir -p $(@D)
+	$(CC) $< $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) $(CFLAGS) -g -o $@ -c $(link_mode)
+
+$(OBJDIR)/rp/%.o: $(SRCDIR)/rp/%.c
 	@mkdir -p $(@D)
 	$(CC) $< $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) $(CFLAGS) -g -o $@ -c $(link_mode)
 
