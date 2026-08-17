@@ -49,10 +49,15 @@ unsigned int trust_manager_port = 6000;
 uint16_t trust_manager_response_timeout = 30;  
 static bool processing_trust_manager_response = false;
 
-/* verifiers config */ 
+/* verifiers config */
 #define MAX_VERIFIERS 10
-int verifier_list[5];
-// size_t num_verifiers = sizeof(verifier_list) / sizeof(verifier_list[0]);
+/* Sized to MAX_VERIFIERS, not the sweep's current hardcoded bound of 5
+ * (see main()'s "for (int num_verifiers = 1; num_verifiers <= 5; ...)"),
+ * so raising that bound later can't silently overflow this array the way
+ * a fixed verifier_list[5] would -- every other per-Verifier array in this
+ * file (attestation_results, verifiers, etc.) is already sized to
+ * MAX_VERIFIERS for the same reason. */
+int verifier_list[MAX_VERIFIERS];
 bool attestation_results[MAX_VERIFIERS];
 /* Set by coap_verifier_handler_appraisal() when a Verifier's /appraise
  * response is specifically "your AK certificate is invalid or expired"
@@ -213,6 +218,25 @@ static pthread_mutex_t rp_tpm_mutex = PTHREAD_MUTEX_INITIALIZER;
  * either, since each thread only ever touches its own rp_ak_cert_der[i]
  * slot. */
 static pthread_mutex_t rp_ak_reprovision_mutex = PTHREAD_MUTEX_INITIALIZER;
+/* Guards the /qualify + /qualify/submit CoAP round trips' shared response
+ * globals (qualify_challenge_log/qualify_challenge_log_len/
+ * qualify_challenge_salt/qualify_response_rc/processing_qualify_response/
+ * qualify_submit_qualified/processing_qualify_submit_response, below) --
+ * same reasoning as rp_ak_reprovision_mutex above, for the same class of
+ * bug: rp_perform_qualification_handshake() runs concurrently, one call
+ * per Verifier thread (all spawned together before any is joined, see
+ * main()'s thread loop), and every one of those globals is a single
+ * shared variable, not a per-Verifier array. Without this, two threads
+ * mid-qualification against different Verifiers at once would race to
+ * write the same globals -- e.g. one thread's challenge log getting
+ * redacted, signed, and submitted under a DIFFERENT thread's Verifier
+ * identity. Reachable on any run where more than one Verifier needs
+ * /qualify in the same cycle, which includes every cold-state run (no
+ * qualification cache yet for any Verifier). A separate mutex from
+ * rp_ak_reprovision_mutex, not a shared one, so AK (re)certification and
+ * qualification can still proceed concurrently against different
+ * Verifiers -- they guard disjoint sets of globals. */
+static pthread_mutex_t rp_qualification_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* Nonces received from each Verifier, indexed by verifier slot. */
 static uint8_t verifier_nonces[MAX_VERIFIERS][sizeof(TPMU_HA)] = {{0}};
 static uint32_t verifier_nonce_lens[MAX_VERIFIERS] = {0};
@@ -580,15 +604,20 @@ static CHARRA_RC create_attestation_request(msg_attestation_request_dto* attesta
     const uint32_t nonce_len = 20;
     uint8_t nonce[nonce_len];
     if (USE_TPM_FOR_RANDOM_NONCE_GENERATION) {
-        if ((err = charra_random_bytes_from_tpm(nonce_len, nonce) !=
-                    CHARRA_RC_SUCCESS)) {
-            charra_log_error("Could not get random bytes from TPM for nonce.");
+        if ((err = charra_random_bytes_from_tpm(nonce_len, nonce)) !=
+                CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Could not get random bytes "
+                             "from TPM for nonce: CHARRA_RC=%d.",
+                    err);
             return err;
         }
     } else {
-        if ((err = charra_random_bytes(nonce_len, nonce) !=
-                    CHARRA_RC_SUCCESS)) {
-            charra_log_error("Could not get random bytes for nonce.");
+        if ((err = charra_random_bytes(nonce_len, nonce)) !=
+                CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] Could not get random bytes for nonce: "
+                    "CHARRA_RC=%d.",
+                    err);
             return err;
         }
     }
@@ -1075,7 +1104,10 @@ static CHARRA_RC rp_coap_fetch(const char* ip_address, unsigned int port,
     *processing_flag = false;
     /* Real elapsed time (CLOCK_MONOTONIC), not a sum of coap_io_process()'s
      * self-reported per-call durations -- that undercounts time spent
-     * scheduled out under concurrent load. */
+     * scheduled out under concurrent load. Also sidesteps the same
+     * counter-overflow class of bug a uint16_t/uint32_t millisecond
+     * accumulator would otherwise have for large timeouts (see
+     * CHARRA_V2_NOTES.md). */
     struct timespec wait_start, wait_now;
     clock_gettime(CLOCK_MONOTONIC, &wait_start);
     int coap_io_process_time = -1;
@@ -1297,6 +1329,17 @@ static CHARRA_RC rp_perform_qualification_handshake(int verifier_index) {
     uint8_t* redacted_log = NULL;
     uint32_t redacted_log_len = 0;
 
+    /* Held across the whole handshake below, not just individual field
+     * accesses: every one of qualify_challenge_log/_len/_salt,
+     * qualify_response_rc, processing_qualify_response,
+     * qualify_submit_qualified, and processing_qualify_submit_response is
+     * a single shared global, and this function runs concurrently, one
+     * call per Verifier thread -- see rp_qualification_mutex's own
+     * comment for why. Mirrors ensure_rp_ak_certificate()'s
+     * rp_ak_reprovision_mutex, held across its own /certify_ak round trip
+     * for the identical reason. */
+    pthread_mutex_lock(&rp_qualification_mutex);
+
     /* --- 1. fetch a fresh challenge --- */
     qualify_response_rc = CHARRA_RC_ERROR;
     result = rp_coap_fetch(verifier->ip_address, verifier->port_number,
@@ -1304,11 +1347,12 @@ static CHARRA_RC rp_perform_qualification_handshake(int verifier_index) {
             &processing_qualify_response);
     if (result != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] /qualify request failed.");
-        return result;
+        goto done;
     }
     if (qualify_response_rc != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] /qualify response invalid.");
-        return qualify_response_rc;
+        result = qualify_response_rc;
+        goto done;
     }
     charra_log_info("[" LOG_NAME "] Received a %u-byte challenge log.",
             qualify_challenge_log_len);
@@ -1429,6 +1473,7 @@ done:
     charra_free_if_not_null(qualify_challenge_log);
     qualify_challenge_log = NULL;
     qualify_challenge_log_len = 0;
+    pthread_mutex_unlock(&rp_qualification_mutex);
     charra_free_if_not_null(redacted_log);
     return result;
 }
@@ -2317,9 +2362,29 @@ static coap_response_t coap_trust_manager_handler(coap_session_t* session,
                 data_total_len);
     }
 
-    /* Parse the received data */
+    /* Parse the received data. Each record is 16 bytes of IP string + a
+     * 4-byte port (see trust_manager.c's response_len computation) -- but
+     * Trust Manager can legitimately return FEWER records than
+     * num_verifiers requested, if some of the requested IDs aren't in its
+     * verifiers_config.txt (see trust_manager.c's "Lookup summary: ...
+     * missing" log). Looping num_verifiers times unconditionally used to
+     * read straight past the end of a shorter response buffer -- bound the
+     * loop by what actually arrived instead. */
+    const size_t record_size = 16 + sizeof(unsigned int);
+    const size_t records_received = data_total_len / record_size;
+    size_t verifiers_to_parse = (size_t)num_verifiers;
+    if (records_received < verifiers_to_parse) {
+        charra_log_error(
+                "[" LOG_NAME "] Trust Manager returned %zu verifier "
+                "record(s), expected %d -- some requested Verifier ID(s) "
+                "are missing from its configuration; only the %zu "
+                "received will be used.",
+                records_received, num_verifiers, records_received);
+        verifiers_to_parse = records_received;
+    }
+
     const uint8_t* ptr = data;
-    for (int i = 0; i < num_verifiers; i++) {
+    for (size_t i = 0; i < verifiers_to_parse; i++) {
         strncpy(verifiers[i].ip_address, (const char*)ptr, 15);
         verifiers[i].ip_address[15] = '\0';  // Ensure null-terminated string
         ptr += 16;
@@ -2328,7 +2393,7 @@ static coap_response_t coap_trust_manager_handler(coap_session_t* session,
     }
 
     /* Print the received verifier information */
-    for (int i = 0; i < num_verifiers; i++) {
+    for (size_t i = 0; i < verifiers_to_parse; i++) {
             charra_log_info(
             "[" LOG_NAME
             "] Verifier ID %d: IP Address = %s, Port Number = %u", verifier_list[i], verifiers[i].ip_address, verifiers[i].port_number);
@@ -2340,6 +2405,15 @@ cleanup:
 }
 
 CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers) {
+
+    if (num_verifiers > MAX_VERIFIERS) {
+        charra_log_error(
+                "[" LOG_NAME "] Requested %d verifier(s), but this process "
+                "only has room for %d (MAX_VERIFIERS) -- refusing to "
+                "overflow verifier_list/verifiers/attestation_results.",
+                num_verifiers, MAX_VERIFIERS);
+        return CHARRA_RC_BAD_ARGUMENT;
+    }
 
     charra_log_info("[" LOG_NAME "]  +------------ Interaction with the Trust Manager --------------+");
 
