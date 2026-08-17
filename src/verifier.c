@@ -317,7 +317,7 @@ int main(int argc, char** argv) {
         coap_show_tls_version(LOG_DEBUG);
     }
 
-    if ((use_dtls_psk || use_dtls_psk) && !coap_dtls_is_supported()) {
+    if ((use_dtls_psk || use_dtls_rpk) && !coap_dtls_is_supported()) {
         charra_log_error("[" LOG_NAME "] CoAP does not support DTLS but the "
                          "configuration enables DTLS. Aborting!");
         goto error;
@@ -433,10 +433,16 @@ static void handle_sigint(int signum CHARRA_UNUSED) { quit = true; }
  * different identities/values apart at a glance across a busy log.
  *
  * @param out_len buffer size in out; at most (out_len - 1) / 2 bytes of buf
- * are rendered, silently truncating anything beyond that.
+ * are rendered, silently truncating anything beyond that. out_len == 0 is
+ * a no-op (not an out-of-bounds write): every current call site passes a
+ * non-zero literal buffer size, but out_len - 1 would otherwise underflow
+ * (it's size_t) into a huge max_bytes and write far past out.
  */
 static void hex_prefix(
         const uint8_t* buf, size_t buf_len, char* out, size_t out_len) {
+    if (out_len == 0) {
+        return;
+    }
     size_t max_bytes = (out_len - 1) / 2;
     size_t n = buf_len < max_bytes ? buf_len : max_bytes;
     for (size_t i = 0; i < n; ++i) {
@@ -1010,7 +1016,7 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
                              "]     => Nonce in TPM Quote is NOT valid! (does "
                              "not match the one sent)");
             charra_log_error(
-                    "[" LOG_NAME "]     => expected %u byte(s), starting "
+                    "[" LOG_NAME "]     => expected %zu byte(s), starting "
                     "%s...; received %u byte(s), starting %s...",
                     last_request.nonce_len, expected_nonce_hex,
                     attest_struct.extraData.size, received_nonce_hex);
@@ -1893,12 +1899,12 @@ static void coap_qualify_submit_handler(struct coap_resource_t* resource,
     }
 
     /* --- the actual qualification comparison: golden answer vs.
-     * submission -- see charra_rp_qualification.h. Known issue (tracked in
-     * CHARRA_V2_NOTES.md): charra_sdk_redact_ima_log() salts each path
-     * freshly per call, so even a correctly-behaving RP's redacted log can
-     * never byte-match this Verifier's own golden_log -- this check is
-     * therefore expected to always fail for now, intentionally left as-is
-     * until that salt handling is redesigned. */
+     * submission -- see charra_rp_qualification.h. The salt used to redact
+     * challenge_log is shared with the RP (see coap_qualify_handler()'s
+     * own comment on qualify_challenge_salt) specifically so a correctly-
+     * behaving RP's redaction comes out byte-identical to golden_log here;
+     * a passing check on a legitimately-behaving RP is the expected,
+     * common case, not a known-broken path. */
     if (charra_rp_qualification_check(&qualification_state,
                 req.submitted_redacted_log, req.submitted_redacted_log_len,
                 req.submitted_pcr_digest, time(NULL)) == CHARRA_RC_SUCCESS) {
