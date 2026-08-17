@@ -310,4 +310,45 @@ typedef struct {
     uint8_t* ak_certificate_rp;
 } msg_qualify_submit_request_dto;
 
+/**
+ * /get_verifiers request: RP -> Trust Manager, which Verifier IDs (the
+ * numbering used as the first column of Trust Manager's own
+ * verifiers_config.txt) to resolve to IP:port.
+ *
+ * A fixed-size field, not heap-allocated, like pcr_selections in
+ * msg_attestation_request_dto above -- the RP already knows how many
+ * Verifiers it is about to fan out to (its own num_verifiers sweep bound),
+ * the same kind of small, caller-controlled count PCR selections are.
+ */
+#define CHARRA_MAX_REQUESTED_VERIFIERS 32
+
+typedef struct {
+    uint32_t verifier_ids_len;
+    int32_t verifier_ids[CHARRA_MAX_REQUESTED_VERIFIERS];
+} msg_get_verifiers_request_dto;
+
+/** One resolved Verifier's connection info -- ip_address is a
+ * NUL-terminated IPv4/hostname string, not raw bytes; MAXLEN includes
+ * room for the terminator, matching verifier_info's own ip_address[16]
+ * field in both trust_manager.c and relying_party.c. */
+#define CHARRA_VERIFIER_IP_MAXLEN 16
+
+typedef struct {
+    char ip_address[CHARRA_VERIFIER_IP_MAXLEN];
+    uint32_t port_number;
+} msg_verifier_endpoint_dto;
+
+/**
+ * /get_verifiers response: Trust Manager -> RP, one entry per requested
+ * Verifier ID that was actually found in verifiers_config.txt -- may be
+ * FEWER than msg_get_verifiers_request_dto.verifier_ids_len if some
+ * requested IDs are missing from that file (see trust_manager.c's
+ * coap_handler(), "Lookup summary: ... missing"); callers must not assume
+ * verifiers_len == the number requested.
+ */
+typedef struct {
+    uint32_t verifiers_len;
+    msg_verifier_endpoint_dto verifiers[CHARRA_MAX_REQUESTED_VERIFIERS];
+} msg_get_verifiers_response_dto;
+
 #endif /* CHARRA_DTO_H */

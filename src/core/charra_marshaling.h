@@ -227,4 +227,45 @@ CHARRA_RC charra_unmarshal_qualify_submit_request(
         const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
         msg_qualify_submit_request_dto* qualify_submit_request);
 
+/**
+ * @brief Marshals a /get_verifiers request DTO (see
+ * msg_get_verifiers_request_dto in charra_dto.h) -- replaces the raw,
+ * hand-packed `int[]` layout relying_party.c and trust_manager.c used to
+ * each independently encode/decode, the one wire format in this codebase
+ * that wasn't going through this shared, tested marshal/unmarshal pattern.
+ */
+CHARRA_RC charra_marshal_get_verifiers_request(
+        const msg_get_verifiers_request_dto* get_verifiers_request,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data);
+
+/**
+ * @brief Unmarshals a /get_verifiers request DTO. Bounds-checks
+ * verifier_ids_len against CHARRA_MAX_REQUESTED_VERIFIERS (the fixed-size
+ * destination array) before writing any element, same defense-in-depth
+ * style as every other unmarshal function in this file.
+ */
+CHARRA_RC charra_unmarshal_get_verifiers_request(
+        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
+        msg_get_verifiers_request_dto* get_verifiers_request);
+
+/**
+ * @brief Marshals a /get_verifiers response DTO (see
+ * msg_get_verifiers_response_dto in charra_dto.h).
+ */
+CHARRA_RC charra_marshal_get_verifiers_response(
+        const msg_get_verifiers_response_dto* get_verifiers_response,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data);
+
+/**
+ * @brief Unmarshals a /get_verifiers response DTO. Bounds-checks
+ * verifiers_len against CHARRA_MAX_REQUESTED_VERIFIERS and each entry's
+ * ip_address string length against CHARRA_VERIFIER_IP_MAXLEN - 1 (room
+ * for the NUL terminator) before writing anything -- this is exactly the
+ * class of check the old hand-packed layout never had, which let a
+ * response shorter than expected be silently over-read.
+ */
+CHARRA_RC charra_unmarshal_get_verifiers_response(
+        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
+        msg_get_verifiers_response_dto* get_verifiers_response);
+
 #endif /* MARSHALING_UTIL_H */

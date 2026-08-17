@@ -1740,3 +1740,328 @@ cbor_parse_error:
 
     return CHARRA_RC_MARSHALING_ERROR;
 }
+
+/* --- /get_verifiers request ---------------------------------------------- */
+
+static CHARRA_RC charra_marshal_get_verifiers_request_internal(
+        const msg_get_verifiers_request_dto* get_verifiers_request,
+        UsefulBuf buf_in, UsefulBufC* buf_out) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    assert(get_verifiers_request != NULL);
+    assert(get_verifiers_request->verifier_ids_len <=
+            CHARRA_MAX_REQUESTED_VERIFIERS);
+
+    QCBOREncodeContext ec = {0};
+    QCBOREncode_Init(&ec, buf_in);
+
+    /* root array */
+    QCBOREncode_OpenArray(&ec);
+
+    /* encode "verifier-ids" */
+    QCBOREncode_OpenArray(&ec);
+    for (uint32_t i = 0; i < get_verifiers_request->verifier_ids_len; ++i) {
+        QCBOREncode_AddInt64(&ec, get_verifiers_request->verifier_ids[i]);
+    }
+    QCBOREncode_CloseArray(&ec);
+
+    /* close array: root_array_encoder */
+    QCBOREncode_CloseArray(&ec);
+
+    if (QCBOREncode_Finish(&ec, buf_out) == QCBOR_SUCCESS) {
+        return CHARRA_RC_SUCCESS;
+    } else {
+        return CHARRA_RC_MARSHALING_ERROR;
+    }
+}
+
+static CHARRA_RC charra_marshal_get_verifiers_request_size(
+        const msg_get_verifiers_request_dto* get_verifiers_request,
+        size_t* marshaled_data_len) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
+
+    UsefulBuf buf_in = {.len = SIZE_MAX, .ptr = NULL};
+    UsefulBufC buf_out = {0};
+
+    if ((charra_r = charra_marshal_get_verifiers_request_internal(
+                 get_verifiers_request, buf_in, &buf_out)) ==
+            CHARRA_RC_SUCCESS) {
+        *marshaled_data_len = buf_out.len;
+    }
+
+    return charra_r;
+}
+
+CHARRA_RC charra_marshal_get_verifiers_request(
+        const msg_get_verifiers_request_dto* get_verifiers_request,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
+
+    assert(get_verifiers_request != NULL);
+    if (get_verifiers_request->verifier_ids_len >
+            CHARRA_MAX_REQUESTED_VERIFIERS) {
+        charra_log_error(
+                "verifier_ids_len exceeds CHARRA_MAX_REQUESTED_VERIFIERS.");
+        return CHARRA_RC_BAD_ARGUMENT;
+    }
+
+    UsefulBuf buf_in = {.len = 0, .ptr = NULL};
+    if ((charra_r = charra_marshal_get_verifiers_request_size(
+                 get_verifiers_request, &(buf_in.len))) != CHARRA_RC_SUCCESS) {
+        charra_log_error("Could not compute size of marshaled data.");
+        return charra_r;
+    }
+
+    if ((buf_in.ptr = malloc(buf_in.len)) == NULL) {
+        charra_log_error("Allocating %zu bytes of memory failed.", buf_in.len);
+        return CHARRA_RC_MARSHALING_ERROR;
+    }
+
+    UsefulBufC buf_out = {.len = 0, .ptr = NULL};
+    if ((charra_r = charra_marshal_get_verifiers_request_internal(
+                 get_verifiers_request, buf_in, &buf_out)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("Could not marshal data.");
+        return charra_r;
+    }
+
+    *marshaled_data_len = buf_out.len;
+    *marshaled_data = (uint8_t*)buf_out.ptr;
+
+    return charra_r;
+}
+
+CHARRA_RC charra_unmarshal_get_verifiers_request(
+        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
+        msg_get_verifiers_request_dto* get_verifiers_request) {
+    msg_get_verifiers_request_dto res = {0};
+
+    QCBORError cborerr = QCBOR_SUCCESS;
+    UsefulBufC marshaled_data_buf = {marshaled_data, marshaled_data_len};
+    QCBORDecodeContext dc = {0};
+    QCBORItem item = {0};
+
+    QCBORDecode_Init(&dc, marshaled_data_buf, QCBOR_DECODE_MODE_NORMAL);
+
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_ARRAY)))
+        goto cbor_parse_error;
+
+    /* parse array "verifier-ids" */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_ARRAY)))
+        goto cbor_parse_error;
+    res.verifier_ids_len = (uint32_t)item.val.uCount;
+    /* Bounds-checked against the fixed-size destination array BEFORE the
+     * loop below writes anything -- an oversized count here used to be
+     * exactly the class of gap that let trust_manager.c's response feed
+     * relying_party.c more "records" than it actually sent (see
+     * CHARRA_V2_NOTES.md); every field in this file is checked the same
+     * way, this one included. */
+    if (res.verifier_ids_len > CHARRA_MAX_REQUESTED_VERIFIERS) {
+        charra_log_error(
+                "CBOR parser: verifier_ids exceeds maximum allowed count.");
+        goto cbor_parse_error;
+    }
+    for (uint32_t i = 0; i < res.verifier_ids_len; ++i) {
+        if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_INT64)))
+            goto cbor_parse_error;
+        res.verifier_ids[i] = (int32_t)item.val.int64;
+    }
+
+    if ((cborerr = QCBORDecode_Finish(&dc))) {
+        charra_log_error("CBOR parser: expected end of input, but could not "
+                         "find it. Continuing.");
+        goto cbor_parse_error;
+    }
+
+    *get_verifiers_request = res;
+
+    return CHARRA_RC_SUCCESS;
+
+cbor_parse_error:
+    charra_log_error("CBOR parser: %s", qcbor_err_to_str(cborerr));
+    charra_log_info("CBOR parser: skipping parsing.");
+
+    return CHARRA_RC_MARSHALING_ERROR;
+}
+
+/* --- /get_verifiers response ---------------------------------------------- */
+
+static CHARRA_RC charra_marshal_get_verifiers_response_internal(
+        const msg_get_verifiers_response_dto* get_verifiers_response,
+        UsefulBuf buf_in, UsefulBufC* buf_out) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    assert(get_verifiers_response != NULL);
+    assert(get_verifiers_response->verifiers_len <=
+            CHARRA_MAX_REQUESTED_VERIFIERS);
+
+    QCBOREncodeContext ec = {0};
+    QCBOREncode_Init(&ec, buf_in);
+
+    /* root array */
+    QCBOREncode_OpenArray(&ec);
+
+    /* encode "verifiers" */
+    QCBOREncode_OpenArray(&ec);
+    for (uint32_t i = 0; i < get_verifiers_response->verifiers_len; ++i) {
+        const msg_verifier_endpoint_dto* v =
+                &get_verifiers_response->verifiers[i];
+
+        QCBOREncode_OpenArray(&ec);
+        /* ip_address's meaningful length is its NUL-terminated string
+         * length, not the full fixed buffer -- same "_len tracks the
+         * real content, not the destination's capacity" convention every
+         * other string/bytes field in this file uses (e.g. sig_key_id). */
+        UsefulBufC ip_address = {.ptr = v->ip_address,
+                .len = strnlen(v->ip_address, sizeof(v->ip_address))};
+        QCBOREncode_AddBytes(&ec, ip_address);
+        QCBOREncode_AddUInt64(&ec, v->port_number);
+        QCBOREncode_CloseArray(&ec);
+    }
+    QCBOREncode_CloseArray(&ec);
+
+    /* close array: root_array_encoder */
+    QCBOREncode_CloseArray(&ec);
+
+    if (QCBOREncode_Finish(&ec, buf_out) == QCBOR_SUCCESS) {
+        return CHARRA_RC_SUCCESS;
+    } else {
+        return CHARRA_RC_MARSHALING_ERROR;
+    }
+}
+
+static CHARRA_RC charra_marshal_get_verifiers_response_size(
+        const msg_get_verifiers_response_dto* get_verifiers_response,
+        size_t* marshaled_data_len) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
+
+    UsefulBuf buf_in = {.len = SIZE_MAX, .ptr = NULL};
+    UsefulBufC buf_out = {0};
+
+    if ((charra_r = charra_marshal_get_verifiers_response_internal(
+                 get_verifiers_response, buf_in, &buf_out)) ==
+            CHARRA_RC_SUCCESS) {
+        *marshaled_data_len = buf_out.len;
+    }
+
+    return charra_r;
+}
+
+CHARRA_RC charra_marshal_get_verifiers_response(
+        const msg_get_verifiers_response_dto* get_verifiers_response,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data) {
+    charra_log_trace("<ENTER> %s()", __func__);
+
+    CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
+
+    assert(get_verifiers_response != NULL);
+    if (get_verifiers_response->verifiers_len >
+            CHARRA_MAX_REQUESTED_VERIFIERS) {
+        charra_log_error(
+                "verifiers_len exceeds CHARRA_MAX_REQUESTED_VERIFIERS.");
+        return CHARRA_RC_BAD_ARGUMENT;
+    }
+
+    UsefulBuf buf_in = {.len = 0, .ptr = NULL};
+    if ((charra_r = charra_marshal_get_verifiers_response_size(
+                 get_verifiers_response, &(buf_in.len))) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("Could not compute size of marshaled data.");
+        return charra_r;
+    }
+
+    if ((buf_in.ptr = malloc(buf_in.len)) == NULL) {
+        charra_log_error("Allocating %zu bytes of memory failed.", buf_in.len);
+        return CHARRA_RC_MARSHALING_ERROR;
+    }
+
+    UsefulBufC buf_out = {.len = 0, .ptr = NULL};
+    if ((charra_r = charra_marshal_get_verifiers_response_internal(
+                 get_verifiers_response, buf_in, &buf_out)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("Could not marshal data.");
+        return charra_r;
+    }
+
+    *marshaled_data_len = buf_out.len;
+    *marshaled_data = (uint8_t*)buf_out.ptr;
+
+    return charra_r;
+}
+
+CHARRA_RC charra_unmarshal_get_verifiers_response(
+        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
+        msg_get_verifiers_response_dto* get_verifiers_response) {
+    msg_get_verifiers_response_dto res = {0};
+
+    QCBORError cborerr = QCBOR_SUCCESS;
+    UsefulBufC marshaled_data_buf = {marshaled_data, marshaled_data_len};
+    QCBORDecodeContext dc = {0};
+    QCBORItem item = {0};
+
+    QCBORDecode_Init(&dc, marshaled_data_buf, QCBOR_DECODE_MODE_NORMAL);
+
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_ARRAY)))
+        goto cbor_parse_error;
+
+    /* parse array "verifiers" */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_ARRAY)))
+        goto cbor_parse_error;
+    res.verifiers_len = (uint32_t)item.val.uCount;
+    /* Bounds-checked against the fixed-size destination array before the
+     * loop writes anything -- this is the exact check the old hand-packed
+     * /get_verifiers layout never had on either side (see
+     * CHARRA_V2_NOTES.md's response_len bug). A malformed or truncated
+     * response is now rejected outright rather than partially parsed. */
+    if (res.verifiers_len > CHARRA_MAX_REQUESTED_VERIFIERS) {
+        charra_log_error(
+                "CBOR parser: verifiers exceeds maximum allowed count.");
+        goto cbor_parse_error;
+    }
+
+    for (uint32_t i = 0; i < res.verifiers_len; ++i) {
+        /* parse array "verifier" */
+        if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_ARRAY)))
+            goto cbor_parse_error;
+
+        /* parse "ip-address" (bytes) */
+        if ((cborerr = charra_cbor_get_next(
+                     &dc, &item, QCBOR_TYPE_BYTE_STRING)))
+            goto cbor_parse_error;
+        if (item.val.string.len >= sizeof(res.verifiers[i].ip_address)) {
+            charra_log_error("CBOR parser: Verifier IP address exceeds "
+                             "maximum allowed size.");
+            goto cbor_parse_error;
+        }
+        memcpy(res.verifiers[i].ip_address, item.val.string.ptr,
+                item.val.string.len);
+        res.verifiers[i].ip_address[item.val.string.len] = '\0';
+
+        /* parse "port-number" */
+        if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_INT64)))
+            goto cbor_parse_error;
+        res.verifiers[i].port_number = (uint32_t)item.val.uint64;
+    }
+
+    if ((cborerr = QCBORDecode_Finish(&dc))) {
+        charra_log_error("CBOR parser: expected end of input, but could not "
+                         "find it. Continuing.");
+        goto cbor_parse_error;
+    }
+
+    *get_verifiers_response = res;
+
+    return CHARRA_RC_SUCCESS;
+
+cbor_parse_error:
+    charra_log_error("CBOR parser: %s", qcbor_err_to_str(cborerr));
+    charra_log_info("CBOR parser: skipping parsing.");
+
+    return CHARRA_RC_MARSHALING_ERROR;
+}

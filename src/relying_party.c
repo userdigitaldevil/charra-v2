@@ -2362,38 +2362,57 @@ static coap_response_t coap_trust_manager_handler(coap_session_t* session,
                 data_total_len);
     }
 
-    /* Parse the received data. Each record is 16 bytes of IP string + a
-     * 4-byte port (see trust_manager.c's response_len computation) -- but
-     * Trust Manager can legitimately return FEWER records than
-     * num_verifiers requested, if some of the requested IDs aren't in its
-     * verifiers_config.txt (see trust_manager.c's "Lookup summary: ...
-     * missing" log). Looping num_verifiers times unconditionally used to
-     * read straight past the end of a shorter response buffer -- bound the
-     * loop by what actually arrived instead. */
-    const size_t record_size = 16 + sizeof(unsigned int);
-    const size_t records_received = data_total_len / record_size;
-    size_t verifiers_to_parse = (size_t)num_verifiers;
-    if (records_received < verifiers_to_parse) {
+    /* Unmarshal via the same shared, tested CBOR marshal/unmarshal pattern
+     * every other endpoint in this codebase uses (charra_marshaling.c) --
+     * replaces the hand-packed raw-byte layout this used to parse
+     * manually, with no bounds check tying the response's declared length
+     * to how many records it actually contains. That gap is exactly what
+     * once let a Trust Manager response shorter (or, via a since-fixed
+     * response_len bug on the Trust Manager side, longer) than expected
+     * be silently over- or mis-read -- see CHARRA_V2_NOTES.md.
+     * charra_unmarshal_get_verifiers_response() rejects a malformed or
+     * oversized response outright instead. */
+    msg_get_verifiers_response_dto resp = {0};
+    CHARRA_RC charra_r = charra_unmarshal_get_verifiers_response(
+            (uint32_t)data_total_len, data, &resp);
+    if (charra_r != CHARRA_RC_SUCCESS) {
         charra_log_error(
-                "[" LOG_NAME "] Trust Manager returned %zu verifier "
-                "record(s), expected %d -- some requested Verifier ID(s) "
-                "are missing from its configuration; only the %zu "
-                "received will be used.",
-                records_received, num_verifiers, records_received);
-        verifiers_to_parse = records_received;
+                "[" LOG_NAME "] Could not parse CBOR response: CHARRA_RC=%d.",
+                charra_r);
+        goto cleanup;
     }
 
-    const uint8_t* ptr = data;
-    for (size_t i = 0; i < verifiers_to_parse; i++) {
-        strncpy(verifiers[i].ip_address, (const char*)ptr, 15);
-        verifiers[i].ip_address[15] = '\0';  // Ensure null-terminated string
-        ptr += 16;
-        memcpy(&verifiers[i].port_number, ptr, sizeof(unsigned int));
-        ptr += sizeof(unsigned int);
+    /* Trust Manager can legitimately return FEWER records than
+     * num_verifiers requested, if some of the requested IDs aren't in its
+     * verifiers_config.txt (see trust_manager.c's "Lookup summary: ...
+     * missing" log) -- copy only as many as actually arrived. num_verifiers
+     * itself was already bounds-checked against MAX_VERIFIERS before this
+     * request was ever sent (see get_verifiers()), so verifiers[] below
+     * can't overflow either way. */
+    size_t verifiers_to_copy = resp.verifiers_len;
+    if (verifiers_to_copy > (size_t)num_verifiers) {
+        charra_log_error(
+                "[" LOG_NAME "] Trust Manager returned %u verifier "
+                "record(s), more than the %d requested -- ignoring the "
+                "extra.",
+                resp.verifiers_len, num_verifiers);
+        verifiers_to_copy = (size_t)num_verifiers;
+    } else if (verifiers_to_copy < (size_t)num_verifiers) {
+        charra_log_error(
+                "[" LOG_NAME "] Trust Manager returned %u verifier "
+                "record(s), expected %d -- some requested Verifier ID(s) "
+                "are missing from its configuration.",
+                resp.verifiers_len, num_verifiers);
+    }
+
+    for (size_t i = 0; i < verifiers_to_copy; i++) {
+        snprintf(verifiers[i].ip_address, sizeof(verifiers[i].ip_address),
+                "%s", resp.verifiers[i].ip_address);
+        verifiers[i].port_number = resp.verifiers[i].port_number;
     }
 
     /* Print the received verifier information */
-    for (size_t i = 0; i < verifiers_to_parse; i++) {
+    for (size_t i = 0; i < verifiers_to_copy; i++) {
             charra_log_info(
             "[" LOG_NAME
             "] Verifier ID %d: IP Address = %s, Port Number = %u", verifier_list[i], verifiers[i].ip_address, verifiers[i].port_number);
@@ -2422,6 +2441,13 @@ CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers) {
     coap_context_t* coap_context = NULL;
     coap_session_t* coap_session = NULL;
     coap_optlist_t* coap_options = NULL;
+    /* Declared/NULLed here, not at first use further down, so the
+     * request-marshaling failure's own 'goto cleanup' (and every other
+     * early exit) can safely charra_free_if_not_null() it -- same
+     * hoisted-declaration convention this file already uses elsewhere
+     * (e.g. get_attestation_results_thread()'s own comment on this exact
+     * pattern). */
+    uint8_t* req_buf = NULL;
 
     charra_log_info("[" LOG_NAME "] Initializing CoAP in block-wise mode.");
     if ((coap_context = charra_coap_new_context(true)) == NULL) {
@@ -2442,8 +2468,28 @@ CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers) {
 
     charra_log_info("[" LOG_NAME "] Registering CoAP response handler.");
     coap_register_response_handler(coap_context, coap_trust_manager_handler);
-    
+
     coap_session_set_app_data(coap_session, (void *)&num_verifiers);
+
+    /* Marshal the request via the shared, tested CBOR marshal/unmarshal
+     * pattern (charra_marshaling.c), replacing the raw int[] this used to
+     * send directly over the wire with no shared format definition tying
+     * it to trust_manager.c's own decoder. num_verifiers is already
+     * bounds-checked against MAX_VERIFIERS (10) above, well under
+     * CHARRA_MAX_REQUESTED_VERIFIERS (32), so the DTO's own fixed array
+     * can't overflow here. */
+    msg_get_verifiers_request_dto req = {0};
+    req.verifier_ids_len = (uint32_t)num_verifiers;
+    for (int i = 0; i < num_verifiers; ++i) {
+        req.verifier_ids[i] = verifier_list[i];
+    }
+    uint32_t req_buf_len = 0;
+    if ((result = charra_marshal_get_verifiers_request(
+                 &req, &req_buf_len, &req_buf)) != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Could not marshal /get_verifiers request.");
+        goto cleanup;
+    }
 
     /* create CoAP option for content type */
     uint8_t coap_mediatype_cbor_buf_n[4] = {0};
@@ -2480,7 +2526,7 @@ CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers) {
     coap_pdu_t* pdu = NULL;
     charra_log_info("[" LOG_NAME "] Creating request PDU.");
     if ((pdu = charra_coap_new_request(coap_session, COAP_MESSAGE_TYPE_CON,
-                 COAP_REQUEST_FETCH, &coap_options, (const uint8_t *)verifier_list, num_verifiers * sizeof(verifier_list[0]))) ==
+                 COAP_REQUEST_FETCH, &coap_options, req_buf, req_buf_len)) ==
             NULL) {
         charra_log_error("[" LOG_NAME "] Cannot create request PDU.");
         result = CHARRA_RC_ERROR;
@@ -2536,6 +2582,7 @@ CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers) {
     result = CHARRA_RC_SUCCESS;
 
 cleanup:
+    charra_free_if_not_null(req_buf);
     /* free CoAP memory */
     charra_free_if_not_null_ex(coap_options, coap_delete_optlist);
     charra_free_if_not_null_ex(coap_session, coap_session_release);

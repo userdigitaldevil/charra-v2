@@ -39,11 +39,6 @@ int port = 6000;
  * gives the same kind of easy-to-scan boundary in a multi-cycle log. */
 static unsigned int get_verifiers_request_counter = 0;
 
-typedef struct verifier_info {
-    char* ip_address;
-    unsigned int port_number;
-} verifier_info;
-
 static void coap_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
                                 const struct coap_pdu_t* request,
@@ -119,15 +114,27 @@ finish:
     return result;
 }
 
-static int read_verifier_config(const char* filename, int verifier_id, verifier_info* info) {
+/**
+ * @brief Looks verifier_id up in filename (format: "<id> <ip> <port>" per
+ * line), writing straight into a msg_verifier_endpoint_dto slot -- no
+ * intermediate heap allocation (strdup) the caller then has to remember to
+ * free, unlike the old verifier_info this replaced. "%15s" is sized for
+ * CHARRA_VERIFIER_IP_MAXLEN - 1 (room for the NUL fscanf itself adds),
+ * matching msg_verifier_endpoint_dto's own ip_address field size.
+ *
+ * @returns true and fills *out on a match, false if verifier_id is not in
+ * the file (or the file can't be opened).
+ */
+static bool read_verifier_config(
+        const char* filename, int verifier_id, msg_verifier_endpoint_dto* out) {
     FILE* file = fopen(filename, "r");
     if (file == NULL) {
         charra_log_error("[" LOG_NAME "] Cannot open configuration file.");
-        return -1;
+        return false;
     }
 
     int id;
-    char ip[16];
+    char ip[CHARRA_VERIFIER_IP_MAXLEN];
     /* Named distinctly from the file-scope "port" (this process's own
      * listen port) -- these are unrelated values (a verifier's config-file
      * port vs. Trust Manager's own) that happened to share a name and
@@ -136,15 +143,15 @@ static int read_verifier_config(const char* filename, int verifier_id, verifier_
     unsigned int config_port;
     while (fscanf(file, "%d %15s %u", &id, ip, &config_port) != EOF) {
         if (id == verifier_id) {
-            info->ip_address = strdup(ip);
-            info->port_number = config_port;
+            snprintf(out->ip_address, sizeof(out->ip_address), "%s", ip);
+            out->port_number = config_port;
             fclose(file);
-            return 0;
+            return true;
         }
     }
 
     fclose(file);
-    return -1;
+    return false;
 }
 
 static void coap_handler(struct coap_resource_t* resource,
@@ -191,86 +198,85 @@ static void coap_handler(struct coap_resource_t* resource,
             "total).",
             data_len, data_total_len);
 
-    if (data_total_len % sizeof(int) != 0) {
+    /* Unmarshal via the same shared, tested CBOR marshal/unmarshal pattern
+     * every other endpoint in this codebase uses (charra_marshaling.c) --
+     * replaces the hand-packed raw-int-array layout this used to decode
+     * manually, with no bounds check tying request length to verifier
+     * count, and no shared code with the encoder in relying_party.c that
+     * has to agree with it. charra_unmarshal_get_verifiers_request()
+     * rejects an oversized/malformed request outright. */
+    msg_get_verifiers_request_dto req = {0};
+    CHARRA_RC charra_r = charra_unmarshal_get_verifiers_request(
+            (uint32_t)data_total_len, data, &req);
+    if (charra_r != CHARRA_RC_SUCCESS) {
         charra_log_error(
-                "[" LOG_NAME "] Request length %zu is not a whole number "
-                "of verifier IDs (%zu-byte int) -- rejecting instead of "
-                "silently truncating.",
-                data_total_len, sizeof(int));
+                "[" LOG_NAME "] Could not parse CBOR request: CHARRA_RC=%d.",
+                charra_r);
         return;
     }
-    const size_t requested_count = data_total_len / sizeof(int);
-
-    /* Save the received verifier list */
-    int verifier_list[requested_count];
-    memcpy(verifier_list, data, data_total_len);
 
     {
         char id_list[256] = {0};
         size_t pos = 0;
-        for (size_t i = 0; i < requested_count && pos < sizeof(id_list); ++i) {
+        for (uint32_t i = 0; i < req.verifier_ids_len && pos < sizeof(id_list);
+                ++i) {
             int written = snprintf(id_list + pos, sizeof(id_list) - pos,
-                    "%s%d", (i == 0) ? "" : ",", verifier_list[i]);
+                    "%s%d", (i == 0) ? "" : ",", req.verifier_ids[i]);
             if (written < 0) {
                 break;
             }
             pos += (size_t)written;
         }
         charra_log_info(
-                "[" LOG_NAME "] Requested %zu Verifier ID(s): [%s].",
-                requested_count, id_list);
+                "[" LOG_NAME "] Requested %u Verifier ID(s): [%s].",
+                req.verifier_ids_len, id_list);
     }
 
     /* Read verifier information from the configuration file */
     const char* config_filename = "./verifiers_config.txt";
     charra_log_info(
             "[" LOG_NAME "] Looking up Verifier(s) in '%s'.", config_filename);
-    verifier_info verifier_infos[requested_count];
-    size_t verifier_count = 0;
 
-    for (size_t i = 0; i < requested_count; i++) {
-        if (read_verifier_config(config_filename, verifier_list[i], &verifier_infos[verifier_count]) == 0) {
-            charra_log_info("[" LOG_NAME "] Found Verifier ID %d: %s:%u", verifier_list[i], verifier_infos[verifier_count].ip_address, verifier_infos[verifier_count].port_number);
-            verifier_count++;
+    msg_get_verifiers_response_dto resp = {0};
+    for (uint32_t i = 0; i < req.verifier_ids_len; i++) {
+        msg_verifier_endpoint_dto* slot = &resp.verifiers[resp.verifiers_len];
+        if (read_verifier_config(config_filename, req.verifier_ids[i], slot)) {
+            charra_log_info("[" LOG_NAME "] Found Verifier ID %d: %s:%u",
+                    req.verifier_ids[i], slot->ip_address, slot->port_number);
+            resp.verifiers_len++;
         } else {
-            charra_log_error("[" LOG_NAME "] Verifier ID %d not found in configuration file.", verifier_list[i]);
+            charra_log_error(
+                    "[" LOG_NAME "] Verifier ID %d not found in "
+                    "configuration file.",
+                    req.verifier_ids[i]);
         }
     }
     charra_log_info(
-            "[" LOG_NAME "] Lookup summary: %zu requested, %zu found, %zu "
+            "[" LOG_NAME "] Lookup summary: %u requested, %u found, %u "
             "missing.",
-            requested_count, verifier_count, requested_count - verifier_count);
+            req.verifier_ids_len, resp.verifiers_len,
+            req.verifier_ids_len - resp.verifiers_len);
 
-    /* Send verifier information as a response -- 16 bytes of IP string
-     * plus a 4-byte port per record, matching exactly what the write loop
-     * below actually fills. The previous formula (sizeof(verifier_info) -
-     * sizeof(char*) + 16 + sizeof(unsigned int)) computed 28 bytes/record
-     * on a 64-bit build (sizeof(verifier_info) is 16 thanks to struct
-     * padding, not 12), 8 bytes more than the loop ever writes -- the
-     * extra tail per record was uninitialized malloc'd memory, sent over
-     * the wire as if it were real IP/port data. relying_party.c's
-     * coap_trust_manager_handler() derives how many records arrived from
-     * this exact length, so an inflated response_len didn't just leak
-     * heap bytes, it made the RP believe MORE verifier records had
-     * arrived than actually did. */
-    const size_t record_size = 16 + sizeof(unsigned int);
-    size_t response_len = verifier_count * record_size;
-    uint8_t* response_data = malloc(response_len);
-    if (response_data == NULL) {
-        charra_log_error("[" LOG_NAME "] Could not allocate memory for response data.");
-        goto cleanup;
-    }
-
-    uint8_t* ptr = response_data;
-    for (size_t i = 0; i < verifier_count; i++) {
-        strcpy((char*)ptr, verifier_infos[i].ip_address);
-        ptr += 16;
-        memcpy(ptr, &verifier_infos[i].port_number, sizeof(unsigned int));
-        ptr += sizeof(unsigned int);
+    /* Marshal the response the same tested way -- the encoder writes
+     * exactly what it declares (QCBOREncode_Finish's own length), so the
+     * response_len/actual-bytes-written mismatch that used to leak
+     * uninitialized heap memory (and make the RP believe more records had
+     * arrived than really did, see CHARRA_V2_NOTES.md) cannot recur here:
+     * there is no separate hand-computed size formula to drift out of
+     * sync with what the write loop fills. */
+    uint32_t marshaled_len = 0;
+    uint8_t* marshaled = NULL;
+    charra_r = charra_marshal_get_verifiers_response(
+            &resp, &marshaled_len, &marshaled);
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Could not marshal response: CHARRA_RC=%d.",
+                charra_r);
+        return;
     }
     charra_log_info(
-            "[" LOG_NAME "] Response is %zu byte(s) for %zu Verifier(s).",
-            response_len, verifier_count);
+            "[" LOG_NAME "] Response is %u byte(s) for %u Verifier(s).",
+            marshaled_len, resp.verifiers_len);
 
     charra_log_info(
             "[" LOG_NAME
@@ -279,16 +285,15 @@ static void coap_handler(struct coap_resource_t* resource,
     bool send_ok = true;
     if ((coap_r = coap_add_data_large_response(resource, session, request,
                  response, query, COAP_MEDIATYPE_APPLICATION_CBOR, -1, 0,
-                 response_len, response_data, NULL, NULL)) == 0) {
+                 marshaled_len, marshaled, NULL, NULL)) == 0) {
         charra_log_error("[" LOG_NAME
                          "] Error invoking coap_add_data_large_response().");
         send_ok = false;
     }
-
-    free(response_data);
+    free(marshaled);
 
     charra_log_info("[" LOG_NAME "] +----------------------------+");
-    if (send_ok && verifier_count == requested_count) {
+    if (send_ok && resp.verifiers_len == req.verifier_ids_len) {
         charra_log_info("[" LOG_NAME "] |   REQUEST SUCCESSFUL       |");
     } else if (send_ok) {
         charra_log_info("[" LOG_NAME "] |  PARTIAL: SOME IDs MISSING |");
@@ -296,10 +301,5 @@ static void coap_handler(struct coap_resource_t* resource,
         charra_log_info("[" LOG_NAME "] |   REQUEST FAILED           |");
     }
     charra_log_info("[" LOG_NAME "] +----------------------------+");
-
-cleanup:
-    for (size_t i = 0; i < verifier_count; i++) {
-        free(verifier_infos[i].ip_address);
-    }
 }
 
