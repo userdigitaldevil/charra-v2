@@ -436,16 +436,15 @@ actual order `run_one_attestation_cycle()` runs things in, for one cycle
 
 ### Still open
 
-- **Attester key is not currently an AK — the single largest remaining
-  gap.** `charra_key_mgr.c` still mints a fresh ephemeral primary key on
-  demand for the Attester: no certification path, no persistence.
-  Consequence: `verifier.c`'s Step 3b special-cases
-  `res.ak_certificate_len == 0` and accepts anyway with a loud `"TEMPORARY"`
-  log line, because that's *always* true today. Needs: a real persistent
-  Attester AK (mirroring RP's `ensure_rp_ak_keypair()`), the Attester
-  calling `/certify_ak` itself, and RP verifying that certificate
-  independently — see "Planned end state" under the Step 3b bypass entry in
-  Part 3, rather than the Verifier's bypass being relied on forever.
+- ~~**Attester key is not currently an AK**~~ **— resolved.** The Attester
+  now has a real, persistent EK+AK (`ensure_attester_ak_keypair()`,
+  mirroring RP's), certified by RP's own CA *and* independently by every
+  Verifier's CA via the RP-relayed `/certify_ak_of_attester` flow. The
+  `"TEMPORARY"` accept-an-empty-certificate bypass is gone from
+  `verifier.c` (`grep -c TEMPORARY src/verifier.c` → 0): Step 3b now fails
+  closed on a missing certificate, chain-checks the one it gets, **and**
+  cross-checks the serial against that Verifier's own issuance ledger. See
+  "`/certify_ak_of_attester`" and "Per-Verifier CA keys" above.
 - **Blind spot in the PCR10-based integrity check**: replay only folds
   entries tagged for the target PCR, so entries for *other* PCRs could be
   added/removed/altered without affecting `X`. Accepted if the check is
@@ -795,9 +794,11 @@ on every run. This closes the gap the `/certify_ak` section below tracks —
 see the correction under its "Planned end state" note.
 
 **Correction — the message-sending step below is done, but not via
-`charra_marshal_rp_appraisal()`.** That function is now dead code: nothing
-in `src/` calls it outside `charra_marshaling.c` itself and its own unit
-test. The design actually shipped as a leaner, separate DTO —
+`charra_marshal_rp_appraisal()`.** That DTO and its marshal/unmarshal pair
+have since been **deleted** (along with `tests/test_rp_appraisal_
+marshaling.c`): nothing outside `charra_marshaling.c` and that test ever
+called them, so they were ~200 lines of maintained-but-unreachable code.
+The section below is kept as design history. The design actually shipped as a leaner, separate DTO —
 `msg_rp_evidence_dto`/`charra_marshal_rp_evidence()`/
 `charra_unmarshal_rp_evidence()` — which `charra_rp_build_evidence_message()`
 calls to send `Quote_r`+`log_r`+`Quote_a` onward, and which
@@ -807,8 +808,8 @@ section documents `msg_rp_appraisal_dto`'s design as originally planned;
 treat it as superseded background, not the current wire format.
 **That gap is now closed**: `tests/test_rp_evidence_marshaling.c` (30
 assertions) covers the message that actually travels on every `/appraise`,
-which previously had no bounds test of its own — `tests/test_rp_appraisal_
-marshaling.c` only covers `msg_rp_appraisal_dto`, which is dead code.
+which previously had no bounds test of its own — the only such test then
+covered `msg_rp_appraisal_dto`, since deleted as dead code.
 Round-trips all 12 fields; rejects an oversized `verifier_nonce`,
 `rp_signature`, `rp_public_key`, `attester_nonce`, `attestation_data`,
 `tpm2_signature` and `tpm2_public_key`; rejects a `pcr_r` that is either
@@ -1143,15 +1144,16 @@ against that Verifier's own CA) and `ak_certificate_attester_by_rp`
 no reason to trust a CA it doesn't recognize; RP's own Step 2a validates
 this one locally instead, see "Step 3a/3b item 1" above).
 
-**Newly true, not yet acted on**: Step 3b item 1's comment in `verifier.c`
-still says a ledger lookup (`charra_ak_state_check_serial_valid()`) would
-"spuriously fail on every other Verifier," since only one Verifier used to
-certify the Attester. That's no longer the premise — every Verifier now
-independently certifies and ledgers the Attester, so *this* Verifier
-always has its own record for whatever it's currently appraising. Adding
-that lookup (symmetric with Step 3a item 1's RP check, using the existing
-`attester_ak_state_file_path`) would close the "revocation isn't tracked"
-gap for free; not yet done.
+**Step 3b now also checks revocation.** The lookup used to be skipped
+because a single relayed Verifier certified the Attester, so every other
+Verifier's ledger had no record and the check would fail spuriously. Once
+each Verifier began certifying the Attester under its own CA and recording
+it in its own `attester/` ledger, that premise disappeared — the Verifier
+appraising a certificate always has its own record of the serial in it. So
+Step 3b item 1 now chain-checks *and* calls
+`charra_ak_state_check_serial_valid(attester_ak_state_file_path, …)`,
+symmetric with Step 3a item 1's RP check, and rejects a certificate that
+chains correctly but was superseded by a later renewal.
 
 **Verified live**: full 5-verifier sweep, all 5 Verifiers independently
 issuing (and ledgering) their own distinct Attester certificate — 5
@@ -1512,12 +1514,14 @@ glue), then reached a genuine `ATTESTATION SUCCESSFUL` for the first time.
   `rp_ak_reprovision_mutex` — was later deleted outright once "RP AK
   certification is now independent per-Verifier" made the shared-identity
   premise it protected against no longer true.)*
-- **Temporary: Verifier accepts an empty Attester AK certificate.** Step 3b
-  item 1 would otherwise hard-fail every attestation (Attester has no
+- **Temporary: Verifier accepts an empty Attester AK certificate.** *(Since
+  removed — the Attester has a real certified AK now; Step 3b fails closed
+  on an empty certificate. Kept here as history.)* Step 3b item 1 would
+  otherwise have hard-failed every attestation (the Attester had no
   `/certify_ak` client yet), making it impossible to exercise anything
-  downstream of Step 3a live. `coap_appraise_handler()` special-cases
-  `ak_certificate_len == 0`: logs a loud `"TEMPORARY"` warning and accepts.
-  A non-empty certificate is still validated normally.
+  downstream of Step 3a live, so `coap_appraise_handler()` special-cased
+  `ak_certificate_len == 0`: logged a loud `"TEMPORARY"` warning and
+  accepted. A non-empty certificate was still validated normally.
 
 **Planned end state (not yet implemented, as of 2026-08-17): the Verifier
 is *not* meant to grow its own independent Attester EK/AK check to replace

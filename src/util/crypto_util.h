@@ -227,19 +227,11 @@ long charra_crypto_x509_days_until_expiry(const mbedtls_x509_crt* cert);
 void charra_crypto_log_cert_summary(
         const char* label, const mbedtls_x509_crt* cert);
 
-/**
- * @brief Parse a "YYYYMMDDHHMMSS" UTC timestamp (the format
- * charra_crypto_sign_ak_certificate()'s not_before_utc/not_after_utc take)
- * into a time_t.
- *
- * @returns true and sets *out on success, false on a malformed string.
- */
-bool charra_crypto_parse_utc_yyyymmddhhmmss(const char* s, time_t* out);
 
 /**
  * @brief Formats a time_t as the "YYYYMMDDHHMMSS" UTC string
  * charra_crypto_sign_ak_certificate() expects -- the inverse of
- * charra_crypto_parse_utc_yyyymmddhhmmss() above.
+ * charra_crypto_sign_ak_certificate() expects.
  *
  * Lets certificate validity be expressed as a duration from issuance
  * (now -> now + validity) rather than a fixed absolute window: with a fixed

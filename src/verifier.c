@@ -959,13 +959,15 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
                     "/certify_ak_of_attester's DELIVER_VERIFIER leg yet.");
             attestation_result_ekak = false;
         } else {
-            /* Chain-check only -- no charra_ak_state_check_serial_valid()
-             * here: the Attester's identity is relayed to and certified by
-             * just one Verifier (they share one CA key), so only that one
-             * Verifier's local issuance ledger has a record of it; a
-             * ledger lookup here would spuriously fail on every other
-             * Verifier. Revocation for this cert isn't tracked per-Verifier
-             * as a result -- accepted tradeoff, see CHARRA_V2_NOTES.md. */
+            /* Chain check, then the revocation check below. The ledger
+             * lookup used to be skipped here because the Attester was
+             * certified by a single relayed Verifier, so every other
+             * Verifier's ledger had no record of it and the lookup would
+             * fail spuriously. That premise is gone: each Verifier now
+             * certifies the Attester under its own CA and records the
+             * issuance in its own attester/ ledger, so the Verifier
+             * appraising this evidence always has its own record of the
+             * serial it is looking at. */
             attestation_result_ekak = charra_crypto_verify_ekak_certificate(
                     res.ak_certificate_attester_by_verifier,
                     res.ak_certificate_attester_by_verifier_len,
@@ -976,10 +978,28 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
                 char ak_serial_hex[33] = {0};
                 hex_prefix(ak_serial, sizeof(ak_serial), ak_serial_hex,
                         sizeof(ak_serial_hex));
-                charra_log_info(
-                        "[" LOG_NAME "]     => Attester's AK certificate is "
-                        "valid! (serial %s...)",
-                        ak_serial_hex);
+                /* Chain validity alone cannot see a certificate that was
+                 * superseded by a later renewal for the same EK -- only the
+                 * issuance ledger knows that. Same check Step 3a item 1
+                 * already runs for the RP's own certificate. */
+                time_t attester_cert_expires_at = 0;
+                attestation_result_ekak = charra_ak_state_check_serial_valid(
+                        attester_ak_state_file_path, ak_serial, NULL,
+                        &attester_cert_expires_at);
+                if (attestation_result_ekak) {
+                    charra_log_info(
+                            "[" LOG_NAME "]     => Attester's AK certificate "
+                            "is valid! (serial %s..., expires at %ld, in %ld "
+                            "second(s))",
+                            ak_serial_hex, (long)attester_cert_expires_at,
+                            (long)(attester_cert_expires_at - time(NULL)));
+                } else {
+                    charra_log_error(
+                            "[" LOG_NAME "]     => Attester's AK certificate "
+                            "(serial %s...) chains correctly but is REVOKED "
+                            "or EXPIRED in this Verifier's issuance ledger!",
+                            ak_serial_hex);
+                }
             } else {
                 charra_log_error(
                         "[" LOG_NAME "]     => Attester's AK certificate "
@@ -1164,7 +1184,7 @@ cleanup:
      * request buffer (the same borrowed-pointer convention msg_rp_evidence_dto
      * uses throughout, see charra_dto.h) rather than heap-allocating a
      * fresh copy -- freeing them here would free memory this handler never
-     * owned. (The old msg_rp_appraisal_dto this handler used before did
+     * owned. (An earlier DTO this handler used, since deleted, did
      * heap-allocate these fields and free them here; that is no longer the
      * wire format in use.) */
 

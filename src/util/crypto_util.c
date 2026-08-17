@@ -605,17 +605,6 @@ bool charra_crypto_format_utc_yyyymmddhhmmss(time_t t, char out[15]) {
     return strftime(out, 15, "%Y%m%d%H%M%S", &tm_utc) == 14;
 }
 
-bool charra_crypto_parse_utc_yyyymmddhhmmss(const char* s, time_t* out) {
-    struct tm tm = {0};
-    if (sscanf(s, "%4d%2d%2d%2d%2d%2d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
-                &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6) {
-        return false;
-    }
-    tm.tm_year -= 1900;
-    tm.tm_mon -= 1;
-    *out = timegm(&tm);
-    return *out != (time_t)-1;
-}
 
 CHARRA_RC charra_crypto_seeded_rng_init(
         mbedtls_ctr_drbg_context* ctr_drbg_out,

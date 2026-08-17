@@ -79,44 +79,8 @@ CHARRA_RC charra_unmarshal_attestation_response(
         const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
         msg_attestation_response_dto* attestation_response);
 
-/**
- * @brief Marshals an RP appraisal DTO (Quote_a + EK_a/AK_a + Quote_r +
- * EK_r/AK_r + log_r, the RP->Verifier message -- see msg_rp_appraisal_dto in
- * charra_dto.h).
- *
- * msg_rp_appraisal_dto itself is the RP-side intern's assigned DTO; this
- * implementation was written to unblock a real end-to-end build/test of the
- * Verifier-side work (see CHARRA_V2_NOTES.md, "Live end-to-end CoAP
- * verification").
- *
- * @param rp_appraisal[in] The RP appraisal DTO.
- * @param marshaled_data_len[out] The length of the marshaled data.
- * @param marshaled_data[out] The marshaled data.
- * @return CHARRA_RC_SUCCESS on success.
- * @return CHARRA_RC_ERROR on error.
- */
-CHARRA_RC charra_marshal_rp_appraisal(
-        const msg_rp_appraisal_dto* rp_appraisal,
-        uint32_t* marshaled_data_len, uint8_t** marshaled_data);
 
-/**
- * @brief Unmarshals an RP appraisal DTO (Quote_a + EK_a/AK_a + Quote_r +
- * EK_r/AK_r + log_r, the RP->Verifier message -- see msg_rp_appraisal_dto in
- * charra_dto.h).
- *
- * Applies the same bounds checks charra_unmarshal_attestation_response()
- * does for its three fixed-size fields (attestation_data_len <=
- * sizeof(TPM2B_ATTEST) i.e. attestation_data's array bound, likewise for
- * tpm2_signature/tpm2_public_key) to all SIX fixed-size fields here.
- * ak_certificate/ak_certificate_rp have no fixed upper bound (real
- * certificates vary in size) and are heap-allocated, same as event_log.
- *
- * @param marshaled_data_len[in] The length of the marshaled data.
- * @param marshaled_data[in] The marshaled data.
- * @param rp_appraisal[out] The RP appraisal DTO.
- * @return CHARRA_RC_SUCCESS on success.
- * @return CHARRA_RC_BAD_ARGUMENT / CHARRA_RC_MARSHALING_ERROR on bad input.
- */
+
 /**
  * @brief Marshals an RP evidence DTO (the RP->Verifier message carrying
  * Quote_r and the redacted log -- see msg_rp_evidence_dto in charra_dto.h).
@@ -145,10 +109,6 @@ CHARRA_RC charra_marshal_rp_evidence(const msg_rp_evidence_dto* rp_evidence,
  */
 CHARRA_RC charra_unmarshal_rp_evidence(const uint32_t marshaled_data_len,
         const uint8_t* marshaled_data, msg_rp_evidence_dto* rp_evidence);
-
-CHARRA_RC charra_unmarshal_rp_appraisal(
-        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
-        msg_rp_appraisal_dto* rp_appraisal);
 
 /**
  * @brief Marshals a /certify_ak request DTO (see msg_certify_ak_request_dto

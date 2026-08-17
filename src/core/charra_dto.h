@@ -110,38 +110,6 @@ typedef struct {
     uint8_t* ak_certificate_attester_by_rp;
 } msg_attestation_response_dto;
 
-typedef struct {
-    /* Attester's evidence, forwarded by RP */
-    uint32_t attestation_data_len;
-    uint8_t attestation_data[sizeof(TPM2B_ATTEST)];
-    uint32_t tpm2_signature_len;
-    uint8_t tpm2_signature[sizeof(TPMT_SIGNATURE)];
-    uint32_t tpm2_public_key_len;
-    uint8_t tpm2_public_key[sizeof(TPM2B_PUBLIC)];
-    /* EK_a/AK_a: the AK certificate (DER) the Attester obtained via its own
-     * earlier /certify_ak call, forwarded by RP -- Step 3b item 1's input.
-     * No fixed upper bound (real certificates vary in size), heap-allocated
-     * on unmarshal, same as event_log below. */
-    uint32_t ak_certificate_len;
-    uint8_t* ak_certificate;
-
-    /* RP's own quote, proving RP genuinely produced event_log below */
-    uint32_t attestation_data_rp_len;
-    uint8_t attestation_data_rp[sizeof(TPM2B_ATTEST)];
-    uint32_t tpm2_signature_rp_len;
-    uint8_t tpm2_signature_rp[sizeof(TPMT_SIGNATURE)];
-    uint32_t tpm2_public_key_rp_len;
-    uint8_t tpm2_public_key_rp[sizeof(TPM2B_PUBLIC)];
-    /* EK_r/AK_r: RP's own AK certificate (DER), obtained via its own
-     * earlier /certify_ak call -- Step 3a item 1's input. Same
-     * no-fixed-bound reasoning as ak_certificate above. */
-    uint32_t ak_certificate_rp_len;
-    uint8_t* ak_certificate_rp;
-
-    /* log_r -- RP's redacted log, not Attester's raw one */
-    uint32_t event_log_len;
-    uint8_t* event_log;
-} msg_rp_appraisal_dto;
 
 /**
  * @brief RP -> Verifier message: the redacted log plus everything needed to
@@ -172,7 +140,7 @@ typedef struct {
     uint32_t verifier_nonce_len;
     uint8_t verifier_nonce[sizeof(TPMU_HA)];
     /** RSA-PSS/SHA-256 over (pcr_r || verifier_nonce), produced by RP's
-     * TPM-resident AK (see charra_rp_key_mgr.h). */
+     * TPM-resident AK (see charra_identity_key_mgr.h). */
     uint32_t rp_signature_len;
     uint8_t rp_signature[CHARRA_RSA_SIGNATURE_LEN];
 
@@ -344,7 +312,7 @@ typedef struct {
  * everything RP needs to drive both certification tracks on the Attester's
  * behalf. The "AK" here is a dedicated identity keypair the Attester
  * creates the same way ensure_rp_ak_keypair() creates the RP's own
- * (charra_rp_key_mgr_create_ek()/_create_ak(), reused as-is) -- NOT the
+ * (charra_identity_key_mgr_create_ek()/_create_ak(), reused as-is) -- NOT the
  * Attester's existing quoting key that signs Quote_a; the two are
  * deliberately independent identities.
  */
@@ -434,7 +402,7 @@ typedef struct {
  * submitted_redacted_log is the RP's own redaction of that challenge log;
  * submitted_pcr_digest is the PCR composite digest a replay of it produces.
  * rp_signature is an RSA-PSS/SHA-256 signature over submitted_pcr_digest,
- * produced by RP's TPM-resident AK (charra_rp_key_mgr_sign()) -- proving
+ * produced by RP's TPM-resident AK (charra_identity_key_mgr_sign()) -- proving
  * *this* already-certified RP produced the submission, not an
  * unauthenticated third party relaying bytes. rp_public_key/
  * ak_certificate_rp are the same DER-encoded key + AK certificate
