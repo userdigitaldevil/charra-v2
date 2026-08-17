@@ -275,17 +275,18 @@ bool charra_event_log_entry_file_digest(const charra_event_log_entry* entry,
         const uint8_t** digest_out, uint32_t* digest_len_out);
 
 /**
- * @brief Check that no log entry's file-content digest appears on a
- * blacklist.
+ * @brief Checks every log entry's file-content digest against the
+ * whitelist/blacklist policy (DRA-TLS Step 2a item 6).
  *
- * Allow-by-default: a digest absent from the list passes, so an empty
- * blacklist passes every entry. Deliberately weaker than the default-deny a
- * whitelist would give; revisit once a list of known-good hashes exists.
+ * The blacklist is an explicit deny and is always enforced. The whitelist
+ * is enforced as default-deny, but only once it has at least one entry --
+ * an empty whitelist falls back to allow-by-default rather than rejecting
+ * every attestation on a fresh checkout. The chosen mode is logged.
  *
- * @param[in] blacklist_path file of "0x<64 hex>" SHA-256 hashes, one per
- * line ('#' comments and blank lines skipped)
+ * @returns true iff every entry is permitted under the policy in force.
  */
-bool charra_verify_log_file_hashes_not_blacklisted(
-        const uint8_t* log, uint32_t log_len, const char* blacklist_path);
+bool charra_verify_log_file_hashes_against_policy(const uint8_t* log,
+        uint32_t log_len, const char* whitelist_path,
+        const char* blacklist_path);
 
 #endif /* CHARRA_EVENT_LOG_H */

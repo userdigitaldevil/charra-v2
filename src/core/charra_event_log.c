@@ -652,34 +652,56 @@ bool charra_event_log_entry_file_digest(const charra_event_log_entry* entry,
     return *digest_len_out > 0;
 }
 
-bool charra_verify_log_file_hashes_not_blacklisted(
-        const uint8_t* log, uint32_t log_len, const char* blacklist_path) {
-    /* Blacklist-only, allow-by-default: an entry whose digest is absent from
-     * the list passes. An empty blacklist therefore passes everything, which
-     * is the intended behaviour while the list is unpopulated. This is
-     * deliberately weaker than default-deny -- revisit once a whitelist of
-     * known-good hashes actually exists. */
+bool charra_verify_log_file_hashes_against_policy(const uint8_t* log,
+        uint32_t log_len, const char* whitelist_path,
+        const char* blacklist_path) {
+    /* Two lists, and which one is authoritative depends on whether a
+     * whitelist actually exists:
+     *   - blacklist: an explicit deny, always enforced. A listed digest is
+     *     rejected even if the whitelist also names it.
+     *   - whitelist: enforced as DEFAULT-DENY, but only when it has at
+     *     least one entry. An unpopulated whitelist falls back to
+     *     allow-by-default, because the alternative is rejecting every
+     *     attestation on a fresh checkout -- which looks like a bug, gets
+     *     worked around, and leaves the check permanently disabled.
+     * So policy strength scales with how much the operator has configured,
+     * and the log says plainly which mode is in force rather than leaving
+     * "passed" ambiguous between "checked and fine" and "nothing to check
+     * against". */
+    uint8_t* whitelist = NULL;
+    uint32_t whitelist_count = 0;
     uint8_t* blacklist = NULL;
     uint32_t blacklist_count = 0;
+
+    if (load_hash_list(whitelist_path, &whitelist, &whitelist_count) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not load whitelist '%s'.",
+                whitelist_path);
+        return false;
+    }
     if (load_hash_list(blacklist_path, &blacklist, &blacklist_count) !=
             CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not load blacklist '%s'.",
                 blacklist_path);
+        free(whitelist);
         return false;
     }
-    if (blacklist_count == 0) {
-        charra_log_info("[" LOG_NAME "] Blacklist '%s' is empty; no file "
-                        "hash can be rejected.",
-                blacklist_path);
+
+    if (whitelist_count > 0) {
+        charra_log_info("[" LOG_NAME "] File-hash policy: DEFAULT-DENY "
+                        "(whitelist '%s', %u entries; blacklist '%s', %u).",
+                whitelist_path, whitelist_count, blacklist_path,
+                blacklist_count);
     } else {
-        charra_log_info(
-                "[" LOG_NAME "] Checking file hashes against blacklist "
-                "'%s' (%u entries).",
-                blacklist_path, blacklist_count);
+        charra_log_warn("[" LOG_NAME "] File-hash policy: allow-by-default "
+                        "-- whitelist '%s' is empty, so only the blacklist "
+                        "('%s', %u entries) can reject anything.",
+                whitelist_path, blacklist_path, blacklist_count);
     }
 
     bool all_ok = true;
-    if (log_len > 0 && blacklist_count > 0) {
+    const bool anything_to_check = whitelist_count > 0 || blacklist_count > 0;
+    if (log_len > 0 && anything_to_check) {
         uint16_t digest_len = 0;
         if (charra_event_log_ima_detect_digest_len(log, log_len,
                     &digest_len) != CHARRA_RC_SUCCESS) {
@@ -699,18 +721,54 @@ bool charra_verify_log_file_hashes_not_blacklisted(
                 uint32_t file_digest_len = 0;
                 if (!charra_event_log_entry_file_digest(
                             &entry, &file_digest, &file_digest_len)) {
-                    charra_log_warn("[" LOG_NAME "] Entry %u carries no "
-                                    "readable file digest; not checked.",
-                            entry_num);
+                    /* Under default-deny an unreadable digest cannot be
+                     * approved -- "I could not tell" must not mean "fine".
+                     * With no whitelist there is nothing to approve it
+                     * against either way, so it stays a warning. */
+                    if (whitelist_count > 0) {
+                        charra_log_error(
+                                "[" LOG_NAME "] Entry %u carries no readable "
+                                "file digest; cannot be matched against the "
+                                "whitelist, rejecting.",
+                                entry_num);
+                        all_ok = false;
+                    } else {
+                        charra_log_warn("[" LOG_NAME "] Entry %u carries no "
+                                        "readable file digest; not checked.",
+                                entry_num);
+                    }
                     entry_num++;
                     continue;
                 }
-                if (file_digest_len == TPM2_SHA256_DIGEST_SIZE &&
+
+                if (file_digest_len != TPM2_SHA256_DIGEST_SIZE) {
+                    if (whitelist_count > 0) {
+                        charra_log_error(
+                                "[" LOG_NAME "] Entry %u's file digest is %u "
+                                "bytes, not SHA-256; cannot be matched "
+                                "against the whitelist, rejecting.",
+                                entry_num, file_digest_len);
+                        all_ok = false;
+                    }
+                    entry_num++;
+                    continue;
+                }
+
+                /* Blacklist first: an explicit deny outranks approval. */
+                if (blacklist_count > 0 &&
                         hash_list_contains(
                                 blacklist, blacklist_count, file_digest)) {
                     charra_log_error(
                             "[" LOG_NAME "] Entry %u's file-content digest "
                             "matches the BLACKLIST.",
+                            entry_num);
+                    all_ok = false;
+                } else if (whitelist_count > 0 &&
+                           !hash_list_contains(
+                                   whitelist, whitelist_count, file_digest)) {
+                    charra_log_error(
+                            "[" LOG_NAME "] Entry %u's file-content digest is "
+                            "NOT on the whitelist (default-deny).",
                             entry_num);
                     all_ok = false;
                 }
@@ -719,6 +777,7 @@ bool charra_verify_log_file_hashes_not_blacklisted(
         }
     }
 
+    free(whitelist);
     free(blacklist);
     return all_ok;
 }

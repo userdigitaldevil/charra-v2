@@ -194,6 +194,29 @@ typedef struct {
 } msg_rp_evidence_dto;
 
 /**
+ * RP -> Attester: the verdict of RP's own Step 2a local verification.
+ *
+ * The spec's Step 2a ends "-> fail: negative proof to Attester", but the
+ * Attester is the *server* of /attest -- its evidence is the last message
+ * of that exchange, so there is no reply slot left for RP to reject it in.
+ * (Steps 3a/3b have no such problem: the Verifier is the server there, so
+ * its verdict rides back as the /appraise response.) Hence a separate
+ * RP-initiated resource, which also keeps the Attester a pure passive
+ * responder with no client logic of its own.
+ *
+ * Advisory only: nothing downstream depends on the Attester receiving it.
+ * It exists so a rejected device can log/alert/re-measure instead of
+ * silently continuing to believe its own state is fine.
+ */
+typedef struct {
+    /** 1 = evidence accepted, 0 = rejected. */
+    uint32_t accepted;
+    /** Human-readable reason, for the Attester's log. May be empty. */
+    uint32_t reason_len;
+    uint8_t reason[128];
+} msg_attestation_result_dto;
+
+/**
  * /certify_ak "kind" values -- the two legs of the credential-activation
  * handshake the Verifier runs before certifying an AK.
  *

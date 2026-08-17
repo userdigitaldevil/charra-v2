@@ -111,6 +111,22 @@ CHARRA_RC charra_unmarshal_rp_evidence(const uint32_t marshaled_data_len,
         const uint8_t* marshaled_data, msg_rp_evidence_dto* rp_evidence);
 
 /**
+ * @brief Marshals an /attest_result DTO -- RP's Step 2a verdict, sent to
+ * the Attester. See msg_attestation_result_dto in charra_dto.h.
+ */
+CHARRA_RC charra_marshal_attestation_result(
+        const msg_attestation_result_dto* attestation_result,
+        uint32_t* marshaled_data_len, uint8_t** marshaled_data);
+
+/**
+ * @brief Unmarshals an /attest_result DTO. reason_len is bounds-checked
+ * against the fixed-size reason buffer.
+ */
+CHARRA_RC charra_unmarshal_attestation_result(
+        const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
+        msg_attestation_result_dto* attestation_result);
+
+/**
  * @brief Marshals a /certify_ak request DTO (see msg_certify_ak_request_dto
  * in charra_dto.h).
  */

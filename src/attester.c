@@ -152,6 +152,15 @@ static void coap_certify_ak_of_attester_handler(
         struct coap_pdu_t* response);
 
 /**
+ * @brief /attest_result: RP's Step 2a verdict on evidence this Attester
+ * produced. Advisory -- nothing here depends on it; it exists so a rejected
+ * device can see that it was rejected instead of assuming success.
+ */
+static void coap_attest_result_handler(struct coap_resource_t* resource,
+        struct coap_session_t* session, const struct coap_pdu_t* request,
+        const struct coap_string_t* query, struct coap_pdu_t* response);
+
+/**
  * @brief Ensure the Attester's own EK/AK identity exists on disk, creating
  * it on first call (mirrors relying_party.c's ensure_rp_ak_keypair()).
  * Idempotent and cheap on every call after the first -- this is a
@@ -374,6 +383,8 @@ int main(int argc, char** argv) {
             coap_context, COAP_REQUEST_FETCH, "attest", coap_attest_handler);
     charra_coap_add_resource(coap_context, COAP_REQUEST_FETCH,
             "certify_ak_of_attester", coap_certify_ak_of_attester_handler);
+    charra_coap_add_resource(coap_context, COAP_REQUEST_FETCH, "attest_result",
+            coap_attest_result_handler);
     /* enter main loop */
     charra_log_debug("[" LOG_NAME "] Entering main loop.");
     while (!quit) {
@@ -1744,4 +1755,51 @@ error:
     if (tcti_ctx != NULL) {
         Tss2_TctiLdr_Finalize(&tcti_ctx);
     }
+}
+
+static void coap_attest_result_handler(
+        struct coap_resource_t* resource CHARRA_UNUSED,
+        struct coap_session_t* session, const struct coap_pdu_t* request,
+        const struct coap_string_t* query CHARRA_UNUSED,
+        struct coap_pdu_t* response) {
+    log_peer_address("/attest_result", session);
+
+    size_t data_len = 0;
+    const uint8_t* data = NULL;
+    size_t data_offset = 0;
+    size_t data_total_len = 0;
+    if (coap_get_data_large(request, &data_len, &data, &data_offset,
+                &data_total_len) == 0) {
+        charra_log_error(
+                "[" LOG_NAME "] /attest_result: could not get CoAP PDU data.");
+        coap_pdu_set_code(response, COAP_RESPONSE_CODE_BAD_REQUEST);
+        return;
+    }
+
+    msg_attestation_result_dto res = {0};
+    if (charra_unmarshal_attestation_result((uint32_t)data_len, data, &res) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] /attest_result: could not parse CBOR data.");
+        coap_pdu_set_code(response, COAP_RESPONSE_CODE_BAD_REQUEST);
+        return;
+    }
+
+    if (res.accepted) {
+        charra_log_info("[" LOG_NAME "]  +--- RP ACCEPTED this Attester's "
+                        "evidence (Step 2a passed) ---+");
+    } else {
+        /* Logged at ERROR precisely so it is visible: this is the only
+         * signal the Attester ever gets that its own evidence was thrown
+         * out, and on a real base station it is what would drive an alert
+         * or a re-measurement. */
+        charra_log_error("[" LOG_NAME "]  +--- RP REJECTED this Attester's "
+                         "evidence (Step 2a failed) ---+");
+        if (res.reason_len > 0) {
+            charra_log_error("[" LOG_NAME "] /attest_result: reason: %.*s",
+                    (int)res.reason_len, (const char*)res.reason);
+        }
+    }
+
+    coap_pdu_set_code(response, COAP_RESPONSE_CODE_CONTENT);
 }

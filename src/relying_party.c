@@ -132,6 +132,7 @@ bool use_ima_test_log = true;
 char* ima_test_log_path = "ima_test_logs.txt";  // path to the IMA test log file for testing purposes
 
 /* RP appraisal config */
+char* whitelist_hashes_path = "whitelist-hashes.txt";
 char* blacklist_hashes_path = "blacklist-hashes.txt";
 
 /* --- privacy-cleaning state, produced once per attestation -------------- */
@@ -1378,9 +1379,10 @@ static bool charra_rp_appraise_evidence(
 
     /* --- 6. no measured file may appear on the blacklist ----------------- */
     charra_log_info("[" LOG_NAME "] Checking file hashes against the "
-                    "blacklist ...");
-    blacklist_ok = charra_verify_log_file_hashes_not_blacklisted(
-            res->event_log, res->event_log_len, blacklist_hashes_path);
+                    "whitelist/blacklist policy ...");
+    blacklist_ok = charra_verify_log_file_hashes_against_policy(
+            res->event_log, res->event_log_len, whitelist_hashes_path,
+            blacklist_hashes_path);
     charra_log_info("[" LOG_NAME "]     => file hashes are %s",
             blacklist_ok ? "not blacklisted!" : "BLACKLISTED!");
 
@@ -3844,6 +3846,58 @@ cleanup:
 
 }
 
+/**
+ * @brief Sends RP's Step 2a verdict to the Attester (/attest_result).
+ *
+ * The spec's Step 2a says "-> fail: negative proof to Attester", but the
+ * Attester is the server of /attest -- its evidence is the final message of
+ * that exchange, leaving RP no reply slot to reject it in. So the verdict
+ * goes as a separate RP-initiated request, which also keeps the Attester a
+ * pure passive responder.
+ *
+ * Deliberately called from get_evidence() *after* its CoAP loop finishes,
+ * never from inside coap_attester_handler(): starting a second exchange
+ * from within a libcoap response callback re-enters the stack while the
+ * first context is still mid-dispatch.
+ *
+ * Advisory: a failure to deliver is logged and otherwise ignored -- the
+ * appraisal verdict itself is already decided.
+ */
+static void rp_send_attestation_result(bool accepted, const char* reason) {
+    msg_attestation_result_dto res = {0};
+    res.accepted = accepted ? 1 : 0;
+    if (reason != NULL) {
+        size_t len = strlen(reason);
+        if (len > sizeof(res.reason)) {
+            len = sizeof(res.reason);
+        }
+        res.reason_len = (uint32_t)len;
+        memcpy(res.reason, reason, len);
+    }
+
+    uint8_t* buf = NULL;
+    uint32_t buf_len = 0;
+    if (charra_marshal_attestation_result(&res, &buf_len, &buf) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Could not marshal /attest_result verdict.");
+        return;
+    }
+
+    if (rp_coap_fetch(attester_host, attester_port, "attest_result", buf,
+                buf_len, coap_certify_ak_of_attester_deliver_response_handler,
+                &processing_certify_ak_of_attester_deliver_response) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not deliver /attest_result "
+                         "verdict to the Attester (non-fatal).");
+    } else {
+        charra_log_info("[" LOG_NAME "] Sent Step 2a verdict (%s) to the "
+                        "Attester.",
+                accepted ? "accepted" : "REJECTED");
+    }
+    free(buf);
+}
+
 CHARRA_RC get_evidence() {
 
     charra_log_info("[" LOG_NAME "]  +------------ Interaction with the Attester --------------+");
@@ -4058,6 +4112,18 @@ cleanup:
 
     /* free variables */
     charra_free_if_not_null(req_buf);
+
+    /* Step 2a's verdict back to the Attester -- only meaningful once we
+     * actually appraised something, so not on a transport failure or a
+     * timeout, where there was no verdict to report. Sent here rather than
+     * from the response handler; see rp_send_attestation_result(). */
+    if (attestation_rc == CHARRA_RC_VERIFICATION_FAILED) {
+        rp_send_attestation_result(
+                false, "Step 2a local verification failed");
+    } else if (result == CHARRA_RC_SUCCESS &&
+               attestation_rc == CHARRA_RC_SUCCESS) {
+        rp_send_attestation_result(true, "Step 2a local verification passed");
+    }
 
     /* No coap_cleanup() here: it tears down libcoap's *global* state, so
      * calling it per cycle (and from each Verifier thread) would pull the

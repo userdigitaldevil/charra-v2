@@ -265,6 +265,26 @@ VERIFIER, Step 3b -- Original Evidence Verification (Evidence_a'):
     -> pass: positive proof to RP App.  -> fail: negative proof to RP App.
 ```
 
+**Both of Step 2a's spec obligations that were previously partial are now
+built.** Item 6 checks a real whitelist/blacklist *policy*
+(`charra_verify_log_file_hashes_against_policy()`): the blacklist is an
+explicit deny checked first, the whitelist is default-deny but only once it
+has entries — an empty one falls back to allow-by-default, since strict
+default-deny against the currently-empty `whitelist-hashes.txt` would reject
+every attestation on a fresh checkout, which reads as a bug and gets worked
+around. Under default-deny an unreadable or non-SHA-256 digest is rejected
+rather than skipped. The mode in force is logged, so "passed" is never
+ambiguous between *checked and fine* and *nothing to check against*.
+And Step 2a's `-> fail: negative proof to Attester` branch exists: the new
+`/attest_result` resource carries RP's verdict back
+(`msg_attestation_result_dto`). It needs to be a separate RP-initiated
+request because the Attester is the *server* of `/attest` — its evidence is
+the last message of that exchange, so unlike Steps 3a/3b there is no reply
+slot to reject it in. RP sends it from `get_evidence()` after the CoAP loop,
+never from inside the response handler (that would re-enter libcoap
+mid-dispatch). Advisory only: nothing downstream depends on it, but a
+rejected device can now log/alert/re-measure instead of assuming success.
+
 **No PCR or log content check exists anywhere in the Verifier's steps** —
 intentional. Steps 4/5/6 (template-hash recompute, PCR-expansion recompute,
 file-hash policy) only ever run once, in the RP App's Step 2a, against the
