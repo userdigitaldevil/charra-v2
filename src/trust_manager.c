@@ -31,7 +31,6 @@
 static bool quit = false;
 static const char LISTEN_ADDRESS[] = "0.0.0.0";
 int port = 6000;
-bool processing_response = false;
 
 /* Counts /get_verifiers calls this process has served, purely for the log
  * delimiter coap_handler() prints -- one call happens per RP benchmark
@@ -69,7 +68,8 @@ static void log_peer_address(
 }
 
 int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
-      
+    int result = EXIT_SUCCESS;
+
     coap_context_t* coap_context = NULL;
     coap_endpoint_t* coap_endpoint = NULL;
 
@@ -108,6 +108,7 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
     goto finish;
 
 error:
+    result = EXIT_FAILURE;
 
 finish:
     /* free CoAP memory */
@@ -115,6 +116,7 @@ finish:
     charra_free_and_null_ex(coap_context, coap_free_context);
     coap_cleanup();
 
+    return result;
 }
 
 static int read_verifier_config(const char* filename, int verifier_id, verifier_info* info) {
@@ -126,11 +128,16 @@ static int read_verifier_config(const char* filename, int verifier_id, verifier_
 
     int id;
     char ip[16];
-    unsigned int port;
-    while (fscanf(file, "%d %15s %u", &id, ip, &port) != EOF) {
+    /* Named distinctly from the file-scope "port" (this process's own
+     * listen port) -- these are unrelated values (a verifier's config-file
+     * port vs. Trust Manager's own) that happened to share a name and
+     * shadow each other, which is a readability trap even though it isn't
+     * functionally wrong. */
+    unsigned int config_port;
+    while (fscanf(file, "%d %15s %u", &id, ip, &config_port) != EOF) {
         if (id == verifier_id) {
             info->ip_address = strdup(ip);
-            info->port_number = port;
+            info->port_number = config_port;
             fclose(file);
             return 0;
         }
@@ -146,7 +153,6 @@ static void coap_handler(struct coap_resource_t* resource,
                                 const struct coap_string_t* query,
                                 struct coap_pdu_t* response) {
 
-    processing_response = true;
     int coap_r = 0;
 
     /* Clear delimiter between benchmark cycles -- see
@@ -178,7 +184,6 @@ static void coap_handler(struct coap_resource_t* resource,
          * through instead, into memcpy(verifier_list, NULL, 0) below --
          * technically undefined behavior even at a 0 length, and silently
          * masked the original failure. */
-        processing_response = false;
         return;
     }
     charra_log_info(
@@ -192,7 +197,6 @@ static void coap_handler(struct coap_resource_t* resource,
                 "of verifier IDs (%zu-byte int) -- rejecting instead of "
                 "silently truncating.",
                 data_total_len, sizeof(int));
-        processing_response = false;
         return;
     }
     const size_t requested_count = data_total_len / sizeof(int);
@@ -237,8 +241,20 @@ static void coap_handler(struct coap_resource_t* resource,
             "missing.",
             requested_count, verifier_count, requested_count - verifier_count);
 
-    /* Send verifier information as a response */
-    size_t response_len = verifier_count * (sizeof(verifier_info) - sizeof(char*) + 16 + sizeof(unsigned int));
+    /* Send verifier information as a response -- 16 bytes of IP string
+     * plus a 4-byte port per record, matching exactly what the write loop
+     * below actually fills. The previous formula (sizeof(verifier_info) -
+     * sizeof(char*) + 16 + sizeof(unsigned int)) computed 28 bytes/record
+     * on a 64-bit build (sizeof(verifier_info) is 16 thanks to struct
+     * padding, not 12), 8 bytes more than the loop ever writes -- the
+     * extra tail per record was uninitialized malloc'd memory, sent over
+     * the wire as if it were real IP/port data. relying_party.c's
+     * coap_trust_manager_handler() derives how many records arrived from
+     * this exact length, so an inflated response_len didn't just leak
+     * heap bytes, it made the RP believe MORE verifier records had
+     * arrived than actually did. */
+    const size_t record_size = 16 + sizeof(unsigned int);
+    size_t response_len = verifier_count * record_size;
     uint8_t* response_data = malloc(response_len);
     if (response_data == NULL) {
         charra_log_error("[" LOG_NAME "] Could not allocate memory for response data.");
@@ -285,6 +301,5 @@ cleanup:
     for (size_t i = 0; i < verifier_count; i++) {
         free(verifier_infos[i].ip_address);
     }
-    processing_response = false;
 }
 
