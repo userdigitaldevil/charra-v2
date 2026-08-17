@@ -923,7 +923,50 @@ per-Verifier" below), a synthetic `manufacturer-root.{key,crt}` standing
 in for a real TPM manufacturer root, `rp-ek.{key,crt}`/
 `attester-ek.{key,crt}` synthetic EK certs — plain openssl RSA keys, not
 yet the TPM simulator's own endorsement hierarchy (tracked in "Not yet
-built"). Certs are DER; keys stay PEM.
+built"). Certs are DER; keys stay PEM. **Those two static `*-ek.crt` files
+are not what runs**: see the entry below.
+
+#### All entities share one TPM, therefore one EK (PoC caveat)
+
+Measured, not inferred: `openssl x509 -pubkey | sha256` over
+`state/relying-party/identity/rp-ek-certificate.der` and
+`state/attester/identity/attester-ek-certificate.der` gives the **same
+digest** (`fbe2fd39…82b2`). Different subjects and serials, one identical
+public key.
+
+Why: `run_live_test.sh` starts a *single* container with a *single*
+`tpm_server`, and `CHARRA_TCTI` is unset, so all eight processes (RP,
+Attester, 5 Verifiers, Trust Manager) drive one simulated TPM. An EK is a
+*primary* key — `Esys_CreatePrimary(ESYS_TR_RH_ENDORSEMENT, …)` derives it
+deterministically from the endorsement seed plus template — so every entity
+on that simulator derives bit-for-bit the same EK. Each then mints its own
+EK certificate over that shared key (`charra_crypto_sign_ak_certificate(
+ek_public, "CN=CHARRA RP EK (test only)", …, manufacturer_root_key_path…)`),
+which is why the static `keys/*-ek.crt` pair (genuinely different keys)
+never gets used for this and the runtime pair collides.
+
+Consequences worth knowing before reading any live result as a security
+claim:
+- The AK-provisioning ledgers key on `SHA-256(EK certificate DER)`, and the
+  two certificates differ, so the identities don't collide *in the ledger*.
+  That is the only reason this works at all.
+- `TPM2_MakeCredential` binds to **EK public + AK Name**. The EK half no
+  longer separates RP from Attester here, so the **AK Name is carrying the
+  entire weight** of identity separation. The AKs are genuinely distinct
+  (separate `Esys_Create` calls, non-deterministic), so the proof still
+  functions.
+- Because one TPM can unwrap either AK blob, any process in the container
+  that reads the other's `*-ak-private.bin` can impersonate it. **Identity
+  separation in this testbed is filesystem permissions, not cryptography.**
+- Both entities also hold `manufacturer-root.key` and self-sign their own
+  EK certificates. In reality only the TPM vendor holds that key and the EK
+  certificate ships with the device.
+
+On real hardware all four collapse into real guarantees: distinct
+endorsement seeds → distinct EKs → `MakeCredential` binds to one physical
+device, AK blobs load only on their own TPM, and no host holds the
+manufacturer key. Accepted for a PoC; **a passing attestation here does not
+demonstrate device-identity binding.**
 
 **Verified**: `tests/test_x509_cert_chain.c` (17 assertions — chain
 verification valid/wrong-root/tampered, key-matching, sign-then-verify round
