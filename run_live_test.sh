@@ -42,6 +42,13 @@
 #      CHARRA_V2_NOTES.md), all backgrounded with DEBUG logging to logs/.
 #   9. Runs relying_party in the foreground (tee'd to logs/relying_party.log
 #      too), which is the actual multi-verifier attestation run.
+#      --benchmark is required, not cosmetic: relying_party's default mode
+#      is now a daemon that loops until signalled, so without it this script
+#      would never return. --benchmark runs the bounded 1..5-verifier sweep
+#      and exits, which is what this script has always meant to do (and it
+#      is what writes timings_RP_multi_verifiers.txt for
+#      plot_multi_verifiers.py). For a bounded *daemon* smoke test instead,
+#      swap it for e.g. --duration 120.
 #
 # Logs land in logs/*.log either way; Ctrl-C stops relying_party, the
 # container itself is --rm'd on exit but the background bin/* processes
@@ -67,8 +74,8 @@ docker run -v "$PWD/:/home/bob/charra" -it --rm --init \
     cd ~/charra
 
     # All of state/ is meaningless (and breaks outright, Esys_Load failing)
-    # against a TPM state that was just re-randomized above -- see this
-    # script's own comment block.
+    # against a TPM state that was just re-randomized above -- see the
+    # comment block at the top of this file.
     rm -rf state
 
     echo "--- PCRs before anything starts (expect all zero) ---"
@@ -88,5 +95,6 @@ docker run -v "$PWD/:/home/bob/charra" -it --rm --init \
     done
     sleep 2
 
-    LOG_LEVEL_CHARRA=DEBUG bin/relying_party 2>&1 | tee logs/relying_party.log
+    LOG_LEVEL_CHARRA=DEBUG bin/relying_party --benchmark 2>&1 \
+        | tee logs/relying_party.log
   '
