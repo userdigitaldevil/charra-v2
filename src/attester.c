@@ -233,7 +233,7 @@ int main(int argc, char** argv) {
         coap_show_tls_version(LOG_DEBUG);
     }
 
-    if ((use_dtls_psk || use_dtls_psk) && !coap_dtls_is_supported()) {
+    if ((use_dtls_psk || use_dtls_rpk) && !coap_dtls_is_supported()) {
         charra_log_error("[" LOG_NAME "] CoAP does not support DTLS but the "
                          "configuration enables DTLS. Aborting!");
         goto error;
@@ -711,6 +711,19 @@ static void coap_attest_handler(struct coap_resource_t* resource,
     TSS2_RC tss_r = 0;
     ESYS_TR sig_key_handle = ESYS_TR_NONE;
     TPM2B_PUBLIC* public_key = NULL;
+    /* Declared here (rather than right before first use, further down) and
+     * initialized to NULL so that every earlier 'goto error' -- including
+     * the "Could not get CoAP PDU data" one right below -- leaves the
+     * error: cleanup block able to safely check them instead of reading
+     * indeterminate values. Skipping over a declaration with an
+     * initializer does not run that initializer; branching on or freeing
+     * an indeterminate pointer is undefined behavior. Mirrors verifier.c's
+     * coap_appraise_handler(), fixed for the exact same reason in an
+     * earlier audit round. */
+    ESYS_CONTEXT* esys_ctx = NULL;
+    TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
+    TPM2B_ATTEST* attest_buf = NULL;
+    TPMT_SIGNATURE* signature = NULL;
     /* Set true only right before falling through to the cleanup label on
      * the success path below -- every 'goto error' skips that line, so
      * this distinguishes "evidence actually sent" from any of the many
@@ -782,13 +795,13 @@ static void coap_attest_handler(struct coap_resource_t* resource,
     qualifying_data.size = req.nonce_len;
     memcpy(qualifying_data.buffer, req.nonce, req.nonce_len);
 
-    charra_log_info("[" LOG_NAME "] Received nonce of length %d:", req.nonce_len);
+    charra_log_info("[" LOG_NAME "] Received nonce of length %zu:", req.nonce_len);
     charra_print_hex(CHARRA_LOG_INFO, req.nonce_len, req.nonce,
             "                                   0x", "\n", false);
 
     charra_log_info(
-            "[" LOG_NAME "] Signing key ID: '%.*s'.", req.sig_key_id_len,
-            req.sig_key_id);
+            "[" LOG_NAME "] Signing key ID: '%.*s'.",
+            (int)req.sig_key_id_len, req.sig_key_id);
 
     /* PCR selection */
     TPML_PCR_SELECTION pcr_selection = {0};
@@ -813,8 +826,6 @@ static void coap_attest_handler(struct coap_resource_t* resource,
     clock_gettime(CLOCK_MONOTONIC, &start_time);
 
     /* initialize ESAPI */
-    ESYS_CONTEXT* esys_ctx = NULL;
-    TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
     const char* charra_tcti = getenv("CHARRA_TCTI");
     charra_log_info("[" LOG_NAME "] CHARRA_TCTI = '%s'.",
             (charra_tcti != NULL) ? charra_tcti : "(null)");
@@ -886,8 +897,6 @@ static void coap_attest_handler(struct coap_resource_t* resource,
     struct timespec start_quote, end_quote;
     clock_gettime(CLOCK_MONOTONIC, &start_quote);
     charra_log_info("[" LOG_NAME "] Do TPM Quote.");
-    TPM2B_ATTEST* attest_buf = NULL;
-    TPMT_SIGNATURE* signature = NULL;
     if ((tss_r = tpm2_quote(esys_ctx, sig_key_handle, &pcr_selection,
                  &qualifying_data, &attest_buf, &signature)) !=
             TSS2_RC_SUCCESS) {
@@ -950,6 +959,12 @@ static void coap_attest_handler(struct coap_resource_t* resource,
     uint32_t ima_event_log_len = 0;
     if (req.event_log_path_len != 0) {
         char* path = malloc(sizeof(char) * (req.event_log_path_len + 1));
+        if (path == NULL) {
+            charra_log_error(
+                    "[" LOG_NAME "] Could not allocate memory for event "
+                    "log path. Sending empty event log!");
+            goto skip_event_log;
+        }
         memcpy(path, req.event_log_path, req.event_log_path_len);
         path[req.event_log_path_len] = '\0';
         charra_log_info(
@@ -973,6 +988,7 @@ static void coap_attest_handler(struct coap_resource_t* resource,
                     ima_event_log_len);
         }
     }
+skip_event_log:
 
     /* prepare response */
     charra_log_info("[" LOG_NAME "] Preparing response.");
