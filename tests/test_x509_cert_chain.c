@@ -30,6 +30,13 @@
 #include "../src/util/crypto_util.h"
 #include "../src/util/io_util.h"
 
+/* Each Verifier port now has its own independent CA (keys/gen-ak-pki.sh),
+ * not one shared verifier-ca.{key,crt} -- any one of them serves equally
+ * well here, since this file only ever needs "a CA, unrelated to the
+ * manufacturer root" for generic chain-validation tests. */
+#define VERIFIER_CA_CERT_PATH "keys/verifier-ca-5684.crt"
+#define VERIFIER_CA_KEY_PATH "keys/verifier-ca-5684.key"
+
 static unsigned int tests_run = 0;
 static unsigned int tests_failed = 0;
 
@@ -147,7 +154,7 @@ static void test_wrong_root_rejected(void) {
     size_t leaf_len = 0, wrong_root_len = 0;
     if (!read_der_file("keys/rp-ek.crt", &leaf, &leaf_len) ||
             !read_der_file(
-                    "keys/verifier-ca.crt", &wrong_root, &wrong_root_len)) {
+                    VERIFIER_CA_CERT_PATH, &wrong_root, &wrong_root_len)) {
         check("setup: could not read test PKI files", false);
         return;
     }
@@ -267,14 +274,14 @@ static void test_sign_and_verify_ak_certificate(void) {
     uint8_t* ca_cert_bytes = NULL;
     size_t ca_cert_len = 0;
     if (!read_der_file(
-                "keys/verifier-ca.crt", &ca_cert_bytes, &ca_cert_len)) {
-        check("setup: could not read verifier-ca.crt", false);
+                VERIFIER_CA_CERT_PATH, &ca_cert_bytes, &ca_cert_len)) {
+        check("setup: could not read verifier CA cert", false);
         return;
     }
     mbedtls_x509_crt ca_cert;
     mbedtls_x509_crt_init(&ca_cert);
     if (mbedtls_x509_crt_parse(&ca_cert, ca_cert_bytes, ca_cert_len) != 0) {
-        check("setup: could not parse verifier-ca.crt", false);
+        check("setup: could not parse verifier CA cert", false);
         free(ca_cert_bytes);
         return;
     }
@@ -301,7 +308,7 @@ static void test_sign_and_verify_ak_certificate(void) {
     uint8_t serial[16] = {0};
     CHARRA_RC rc = charra_crypto_sign_ak_certificate(&ak_public_key,
             "CN=CHARRA Test AK", ca_subject_name, "20240101000000",
-            "20340101000000", "keys/verifier-ca.key", &ak_cert_der,
+            "20340101000000", VERIFIER_CA_KEY_PATH, &ak_cert_der,
             &ak_cert_der_len, serial);
     check("signing succeeds",
             rc == CHARRA_RC_SUCCESS && ak_cert_der != NULL &&
@@ -312,8 +319,8 @@ static void test_sign_and_verify_ak_certificate(void) {
 
     uint8_t* root = NULL;
     size_t root_len = 0;
-    if (!read_der_file("keys/verifier-ca.crt", &root, &root_len)) {
-        check("setup: could not read verifier-ca.crt", false);
+    if (!read_der_file(VERIFIER_CA_CERT_PATH, &root, &root_len)) {
+        check("setup: could not read verifier CA cert", false);
         free(ak_cert_der);
         return;
     }

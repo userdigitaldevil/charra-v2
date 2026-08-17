@@ -1107,6 +1107,9 @@ static CHARRA_RC charra_marshal_certify_ak_request_internal(
     /* encode "kind" */
     QCBOREncode_AddUInt64(&ec, certify_ak_request->kind);
 
+    /* encode "subject" */
+    QCBOREncode_AddUInt64(&ec, certify_ak_request->subject);
+
     /* encode "ek-certificate" */
     UsefulBufC ek_certificate = {.ptr = certify_ak_request->ek_certificate,
             .len = certify_ak_request->ek_certificate_len};
@@ -1214,6 +1217,11 @@ CHARRA_RC charra_unmarshal_certify_ak_request(
     if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_INT64)))
         goto cbor_parse_error;
     res.kind = (uint32_t)item.val.uint64;
+
+    /* parse "subject" */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_INT64)))
+        goto cbor_parse_error;
+    res.subject = (uint32_t)item.val.uint64;
 
     /* parse "ek-certificate" (bytes) -- no fixed upper bound, heap-alloc */
     if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))

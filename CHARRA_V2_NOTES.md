@@ -315,6 +315,87 @@ leak a stronger identifier than any file path redaction protects. The RP's
 *own* EK cert going to the Verifier is intentional and fine: the RP is
 known infrastructure the Verifier is meant to recognise.
 
+#### Beyond the spec: the full current request flow
+
+The diagram above lists the two evidence exchanges (Attester→RP, RP→
+Verifier) and nothing else — it's silent on freshness (how a nonce
+actually gets to each party) and identity (how EK/AK certificates come to
+exist and stay revocable). Those aren't optional extras this fork bolted
+on for fun: Step 2a item 3 ("check nonce consistency") and Step 3a/3b item
+1 ("validate EK/AK certificate") don't work at all without them — the spec
+assumes a live nonce and a valid, checkable certificate already exist.
+Four resources exist purely to make that true: `/nonce`, `/qualify`
+(+`/qualify/submit`), `/certify_ak`, `/certify_ak_of_attester`. None of the
+four appear in the spec text above.
+
+RP is the sole active party throughout this whole flow — Attester and
+every Verifier are pure passive responders, never initiating anything
+themselves (see "Decided" note under `/certify_ak_of_attester`). The
+actual order `relying_party.c`'s `main()` runs things in, one attestation
+cycle:
+
+1. **`/get_verifiers` (Trust Manager)** — resolve this round's Verifier
+   IDs to IP/port (`get_verifiers()`). A static config lookup, nothing
+   cryptographic.
+2. **Attester identity provisioning, once ever** —
+   `ensure_attester_identity_provisioned()`: FETCH the Attester's EK
+   cert/AK public key/AK name, validate the EK chain locally, sign +
+   deliver an AK certificate under RP's own CA (DELIVER_RP). Gated by a
+   cache file; every call after the first no-ops. (The Verifier-CA leg is
+   deferred to step 4's per-Verifier phase — see "RP AK certification is
+   now independent per-Verifier" / "`/certify_ak_of_attester`" above.)
+3. **`/attest` (Attester)** — `get_evidence()`: RP generates its own nonce
+   + PCR selection, sends one request, gets back `Evidence_a` (`Quote_a`,
+   raw `log_a`, the Attester's evidence). The instant the response lands,
+   RP runs **Step 2a** entirely locally against the *raw* log
+   (`charra_rp_appraise_evidence()`): validate the Attester's RP-issued AK
+   cert, verify `Quote_a`'s signature, check nonce freshness, recompute
+   each log entry's template hash, recompute the PCR digest and compare,
+   check file hashes against the blacklist. Any failure here is a hard
+   stop — nothing gets forwarded to any Verifier.
+4. **`get_attestation_results(num_verifiers)`** — shared setup, then
+   per-Verifier work:
+   - **Step 2b, once**: `charra_rp_prepare_evidence()` — redact `log_a`
+     into `log_r` (the SDK), recompute the PCR digest from the redacted
+     log, sign `Quote_r` under RP's own AK. Done once, not per-Verifier:
+     redaction uses fresh randomness, and every Verifier this round must
+     see the *same* `log_r`.
+   - **`/qualify` + `/qualify/submit`, once**: against whichever Verifier
+     answers first — the qualification ledger is shared across every
+     Verifier, so one answer counts for all of them. Hard gate: nobody
+     qualified means the cycle aborts before any per-Verifier thread
+     starts.
+   - **One thread per Verifier**, each independently:
+     1. `ensure_rp_ak_certificate(i)` — RP's own AK cert with Verifier
+        `i` (cached after the first time; `/certify_ak` CHALLENGE/CONFIRM
+        if not).
+     2. `ensure_attester_identity_certified_by_verifier(i)` — the
+        Attester's AK cert issued by Verifier `i`'s *own* CA (cached
+        after the first time; `/certify_ak` CHALLENGE relayed through
+        `/certify_ak_of_attester` ACTIVATE, then CONFIRM, if not).
+     3. **`/nonce` (Verifier `i`)** — a genuinely Verifier-`i`-generated
+        freshness value, independent of every other Verifier's own nonce
+        and of the nonce RP gave the Attester in step 3 (each
+        `bin/verifier` process has its own RNG state; nothing shared).
+     4. Build Verifier `i`'s own evidence message: `Quote_r` (signed over
+        `PCR_r || Verifier i's nonce`), RP's cert for Verifier `i`,
+        `log_r`, the Attester's nonce/`Quote_a`/signature/public key, and
+        both Attester AK certs (RP-issued, and Verifier `i`'s own
+        issuance).
+     5. **`/appraise` (Verifier `i`)** — the first and only point
+        `/appraise` gets called, once per Verifier, near the end of the
+        cycle, not the start. Runs **Step 3a** (`Evidence_r`: RP's AK cert
+        against Verifier `i`'s own CA + RP's qualification, `Quote_r`
+        signature, nonce) gating **Step 3b** (`Evidence_a'`: Attester's
+        cert against Verifier `i`'s own CA, `Quote_a` signature, nonce) —
+        early-exit on 3a failure, matching the spec's wording exactly.
+     6. Rejected specifically for "AK certificate invalid" or "not
+        qualified" → retry once (invalidate that one cache, re-provision,
+        resend). Any other rejection → recorded as a plain fail, no
+        retry.
+5. Threads join; RP tallies pass/fail per Verifier into a majority vote
+   and prints the run summary.
+
 ### Resolved (previously "deliberately out of scope" / "open")
 
 - **Freshness / replay protection on the Verifier side — RESOLVED.** The
@@ -474,13 +555,14 @@ suffix — general log-verification logic, not specific to the redacted log:
 
 | Function | Purpose |
 |---|---|
-| `verify_log_entries_self_consistent` | Step 2a item 4: per entry, `template_digest == SHA256(template_data)`. Catches internal malformation, not content honesty. |
-| `verify_log_matches_quote_r_pcr` | Step 2a item 5: replays the log, checks the result against a quote's `pcrDigest`. Name references `quote_r` from its original context; logic is generic to any single-PCR-selection quote. |
-| `verify_log_file_hashes_against_policy` | Step 2a item 6: default-deny — a digest matching neither list fails, same as an explicit blacklist match. Paths are function parameters, not globals. Reads the file-content digest from the redacted `template_data`'s known layout. |
+| `charra_verify_log_entries_self_consistent` | Step 2a item 4: per entry, `template_digest == SHA256(template_data)`. Catches internal malformation, not content honesty. |
+| `charra_verify_log_matches_quote_pcr_digest` | Step 2a item 5: replays the log, checks the result against a quote's `pcrDigest`. Generic to any single-PCR-selection quote, not specific to `Quote_r` (renamed from `_quote_r_pcr` — see the 2026-08-17 update below). |
+| `charra_verify_log_file_hashes_not_blacklisted` | Step 2a item 6: default-deny — a digest matching neither list fails, same as an explicit blacklist match. Paths are function parameters, not globals. Reads the file-content digest from the redacted `template_data`'s known layout. Renamed from `_against_policy` — see the 2026-08-17 update below. |
 | `compare_hashes` / `load_hash_list` / `hash_list_contains` *(static)* | `qsort`/`bsearch`-based membership check against a `whitelist-hashes.txt`/`blacklist-hashes.txt`-shaped file. |
 
-**Status**: built, unit-tested indirectly; wiring these into
-`relying_party.c`'s actual Step 2a flow is still open (see "Not yet built").
+**Status**: built, unit-tested indirectly. Wiring into `relying_party.c`'s
+actual Step 2a flow was open when this was written; done since — see the
+2026-08-17 update further below (`charra_rp_appraise_evidence()`).
 
 ### `src/core/charra_synthetic_log.h`/`.c` — synthetic IMA log generator
 
@@ -597,8 +679,9 @@ later session as the quote-verification move above, to
 `charra_ak_state_check_serial_valid()` in `src/core/charra_ak_state.h`/`.c`,
 since it's a pure composition of that module's own
 `charra_ak_state_load`/`_find_by_serial`/`_is_valid` and belongs with them.
-`ak_state_file_path` (a `verifier.c` static) became an explicit first
-parameter, matching every other `charra_ak_state_*` function's signature.
+The ledger path (a `verifier.c` static, now `rp_ak_state_file_path`)
+became an explicit first parameter, matching every other
+`charra_ak_state_*` function's signature.
 
 ### `parse_utc_yyyymmddhhmmss` relocated to `crypto_util.c` as `charra_crypto_parse_utc_yyyymmddhhmmss`
 
@@ -688,15 +771,23 @@ verifier_nonce` under the RP's TPM-resident AK). Confirmed live: every
 `relying_party.log` from a live run shows "RP Appraisal Successful" and a
 "RP Privacy Cleaning" block before evidence ever reaches a Verifier.
 
-**Only genuinely unbuilt: EK/AK validation of the Attester.**
-`relying_party.c` has no code that checks the Attester's EK/AK chain at
-all — grepping the file for any Attester-identity check turns up nothing.
-This is the same gap the `/certify_ak` section below tracks (the Attester
-has no `/certify_ak` client yet, so Verifiers currently bypass this check
-too) — see the "Decided (2026-08-17)" note under `/certify_ak`'s "Planned
-end state" for the intended fix: the RP validates the Attester's identity
-itself and relays its `/certify_ak` call, rather than the Attester or the
-Verifier doing it directly.
+**Resolved (2026-08-17): `charra_rp_appraise_evidence()` now validates the
+Attester's RP-issued AK certificate (Step 2a item 1).** Added as the new
+first check, ahead of the quote-signature check (renumbering the rest):
+`charra_crypto_verify_ekak_certificate()` — the same shared chain+key-match
+helper the Verifier uses for its own Step 3a/3b item 1 — against
+`res->ak_certificate_attester_by_rp`, `keys/rp-ca.crt`, and
+`res->tpm2_public_key` (the key that actually signed `Quote_a`). Unlike the
+Verifier-issued leg, RP also cross-checks the resulting serial against its
+own issuance ledger (`charra_ak_state_check_serial_valid()` against
+`attester_ak_state_file_path`) — RP signed this cert itself, so unlike the
+Verifier it isn't blocked by the shared-CA-key/no-cross-instance-ledger
+caveat noted elsewhere. Folded into `appraisal_ok` as a new `ekak_ok` gate;
+an empty/unprovisioned certificate now fails appraisal outright instead of
+silently passing. Confirmed live: 5/5 verifiers pass across a full 1-5
+sweep with `"chain and key valid!"` + `"serial is currently valid"` logged
+on every run. This closes the gap the `/certify_ak` section below tracks —
+see the correction under its "Planned end state" note.
 
 **Correction — the message-sending step below is done, but not via
 `charra_marshal_rp_appraisal()`.** That function is now dead code: nothing
@@ -724,13 +815,14 @@ remaining gap is entirely on the Attester/RP side.
 
 **Check**: `charra_crypto_verify_ekak_certificate()` (`crypto_util.c`) —
 combines chain verification + "cert's key matches the quote's signing key."
-Called once for Step 3a item 1 (RP's cert against `keys/verifier-ca.crt`,
-folds into `step_3a_passed`) and once for Step 3b item 1 (Attester's cert,
-only reached if Step 3a passed). Both call sites originally duplicated this
-logic inline; factored into `crypto_util.c` (not a new `core/` file — judged
-not worth fragmenting a two-call combinator over a directory split). The
-trust anchor (`keys/verifier-ca.crt`) is read once, shared by both checks —
-the same CA `coap_certify_ak_handler` itself signs with.
+Called once for Step 3a item 1 (RP's cert against this instance's own
+`keys/verifier-ca-<port>.crt`, folds into `step_3a_passed`) and once for
+Step 3b item 1 (Attester's cert, only reached if Step 3a passed). Both
+call sites originally duplicated this logic inline; factored into
+`crypto_util.c` (not a new `core/` file — judged not worth fragmenting a
+two-call combinator over a directory split). The trust anchor is read once,
+shared by both checks — the same per-port CA `coap_certify_ak_handler`
+itself signs with.
 
 **Verified live** (via a temporary not-committed client minting two real AK
 certificates directly with the Verifier's own CA key): with genuine
@@ -740,9 +832,10 @@ Step 3b is skipped entirely (early-exit gating holds), ending in
 `ATTESTATION FAILED` with `Quote_a` never inspected — matching the spec's
 early-exit wording.
 
-**Reusable by RP** for its own Step 2a item 1: same
-`charra_crypto_verify_ekak_certificate()`, no new state needed — see the
-"Reusable by RP" note under `/certify_ak` below.
+**Reused by RP** for its own Step 2a item 1: same
+`charra_crypto_verify_ekak_certificate()`, no new state needed — done as of
+2026-08-17, see the "Resolved" note under the message-shape section further
+below (`charra_rp_appraise_evidence()`).
 
 ### `/certify_ak` — Verifier-as-Privacy-CA AK issuance
 
@@ -790,15 +883,15 @@ oversized-field rejection, wrong-size rejection for the fixed-size
 | `charra_crypto_build_ek_tpm2b_public_from_cert` | Reconstructs the full TCG-standard RSA-2048 EK `TPM2B_PUBLIC` (fixed "low range" template) from an already-verified EK certificate — `Esys_MakeCredential` needs the whole public area, not just the modulus. Template values (`objectAttributes 0x300b2`, authPolicy digest) confirmed empirically against a real `tpm2_createek -G rsa` on this project's TPM simulator. |
 | `charra_crypto_aes256gcm_encrypt`/`_decrypt` | Wraps/unwraps the AK certificate under the MakeCredential secret. Decrypt is authenticated (`mbedtls_gcm_auth_decrypt`) — tampered ciphertext or wrong key returns `CHARRA_RC_VERIFICATION_FAILED`, no plaintext. |
 
-**Reusable by RP** for its own Step 2a item 1 (validate Attester's EK/AK):
+**Reused by RP** for its own Step 2a item 1 (validate Attester's EK/AK):
 `charra_crypto_verify_ekak_certificate()` takes no Verifier-specific state —
-`crypto_util.o` is already in every binary's link. RP would call it exactly
-as `coap_appraise_handler` does for Step 3a/3b item 1: against the
-Attester's already-issued AK certificate and `keys/verifier-ca.crt` — the EK
-is validated exactly once, at `/certify_ak` time, never re-checked. The
-issuance-side functions (build-EK-template, sign-AK-cert, MakeCredential,
-AES-GCM *encrypt*) stay Verifier-only; AES-GCM *decrypt* would belong to
-whichever party requests certification.
+`crypto_util.o` is already in every binary's link. RP calls it exactly as
+`coap_appraise_handler` does for Step 3a/3b item 1, but against its *own*
+CA (`keys/rp-ca.crt`, not any Verifier's `keys/verifier-ca-<port>.crt`) —
+see the "Resolved" note under the message-shape section further below. The issuance-side
+functions (build-EK-template, sign-AK-cert, MakeCredential, AES-GCM
+*encrypt*) stay Verifier-only; AES-GCM *decrypt* belongs to whichever party
+requests certification.
 
 **New TPM primitive** (`src/core/charra_key_mgr.h`/`.c`):
 `charra_tpm_make_credential_for_ak()` wraps `Esys_MakeCredential` — loads the
@@ -809,8 +902,9 @@ fails the requester's own later `ActivateCredential`.
 **Handler**: `coap_certify_ak_handler()` in `verifier.c`. Flow: unmarshal →
 verify EK cert chains to `keys/manufacturer-root.crt` (else `4.01
 Unauthorized`) → reconstruct EK `TPM2B_PUBLIC` → sign a fresh AK cert
-(`"CN=CHARRA AK"`, issuer read from `keys/verifier-ca.crt`'s own subject,
-fixed test-only validity `2024`-`2034`) → fresh AES-256 key, AES-GCM-encrypt
+(`"CN=CHARRA AK"`, issuer read from this instance's own
+`keys/verifier-ca-<port>.crt` subject, fixed test-only validity
+`2024`-`2034`) → fresh AES-256 key, AES-GCM-encrypt
 the cert → `Esys_MakeCredential` to wrap that key → record the issuance
 (`charra_ak_state_renew()`, revoking any previous record for this EK) →
 marshal + send. The state-recording step deliberately happens only after
@@ -818,11 +912,13 @@ signing and `MakeCredential` both succeed, so a later failure can never
 revoke a working certificate the requester never actually received.
 
 **Test-only PKI** (`keys/gen-ak-pki.sh`, `keys/README.md`):
-`verifier-ca.{key,crt}` (self-signed), a synthetic
-`manufacturer-root.{key,crt}` standing in for a real TPM manufacturer root,
-`rp-ek.{key,crt}`/`attester-ek.{key,crt}` synthetic EK certs — plain
-openssl RSA keys, not yet the TPM simulator's own endorsement hierarchy
-(tracked in "Not yet built"). Certs are DER; keys stay PEM.
+`verifier-ca-<port>.{key,crt}` (self-signed, one independent pair per port
+in `verifiers_config.txt` — see "RP AK certification is now independent
+per-Verifier" below), a synthetic `manufacturer-root.{key,crt}` standing
+in for a real TPM manufacturer root, `rp-ek.{key,crt}`/
+`attester-ek.{key,crt}` synthetic EK certs — plain openssl RSA keys, not
+yet the TPM simulator's own endorsement hierarchy (tracked in "Not yet
+built"). Certs are DER; keys stay PEM.
 
 **Verified**: `tests/test_x509_cert_chain.c` (17 assertions — chain
 verification valid/wrong-root/tampered, key-matching, sign-then-verify round
@@ -897,68 +993,123 @@ including the invoking shell's own script text if it contains the same
 substring (self-matching, self-killing) — use `pkill`/`pgrep` without `-f`,
 or exact PIDs.
 
-### `/certify_ak_of_attester` — Attester AK provisioning, RP-mediated (2026-08-17)
+### `/certify_ak_of_attester` — Attester AK provisioning, RP-mediated
 
-Closes the empty-AK-certificate gap: the Attester now gets a real,
-persistent AK identity, independently certified by **two** CAs (RP's own,
-and one Verifier's, relayed) — neither trusting the other's issuance. The
-Attester and every Verifier stay fully passive throughout; only the RP
-initiates.
+Closes the empty-AK-certificate gap: the Attester holds a real, persistent
+AK identity, independently certified by RP's own CA (once) *and* by every
+Verifier's own CA (once per Verifier, symmetric with how RP's own AK is
+certified — see "RP AK certification is now independent per-Verifier"
+below) — none of them trusting another's issuance. The Attester and every
+Verifier stay fully passive throughout; only the RP initiates.
 
 **Attester's identity**: dedicated EK (deterministic, mirrors
 `ensure_rp_ak_keypair()`) + AK, both under `state/attester/`. The AK is
-*restricted* (`charra_identity_key_mgr_create_restricted_ak()`, new —
+*restricted* (`charra_identity_key_mgr_create_restricted_ak()` —
 RP's own `create_ak()` is deliberately unrestricted, see that module's
 header) so it doubles as the real `Quote_a`-signing key
-(`coap_attest_handler()` now loads it instead of the old
-`"PK.RSA.default"` key) — otherwise the certified key and the quoting key
-would be two different keys, and Step 3b's cert-matches-quoting-key check
-could never pass.
+(`coap_attest_handler()` loads it instead of the old `"PK.RSA.default"`
+key) — otherwise the certified key and the quoting key would be two
+different keys, and Step 3b's cert-matches-quoting-key check could never
+pass.
 
 **`charra_rp_key_mgr` → `charra_identity_key_mgr`**: the module was
 already fully generic (no RP-specific state), so it was renamed and
 reused as-is by the Attester rather than duplicated.
 
-**One new Attester resource, `/certify_ak_of_attester`**, RP-initiated,
-discriminated by a `kind` field (`FETCH` / `DELIVER_RP` /
+**One Attester resource, `/certify_ak_of_attester`**, RP-initiated,
+discriminated by a `kind` field (`FETCH` / `DELIVER_RP` / `ACTIVATE` /
 `DELIVER_VERIFIER`) in `msg_certify_ak_of_attester_request_dto`:
 - `FETCH`: Attester responds with EK cert + AK public key + AK name
   (`msg_ak_identity_response_dto`).
-- `DELIVER_RP`/`DELIVER_VERIFIER`: RP delivers a credential-wrapped signed
-  cert (reuses `msg_certify_ak_response_dto`'s shape); Attester unwraps via
+- `DELIVER_RP`: RP delivers a credential-wrapped, RP-CA-signed cert
+  (reuses `msg_certify_ak_response_dto`'s shape); Attester unwraps via
   `ActivateCredential` + AES-GCM decrypt and persists it.
+- `ACTIVATE`: RP relays a Verifier's `/certify_ak` CHALLENGE
+  (`credential_blob`/`wrapped_secret`); Attester's `ActivateCredential`
+  recovers the secret and returns it (`msg_activate_credential_response_
+  dto`) for RP to relay onward as that Verifier's CONFIRM.
+- `DELIVER_VERIFIER`: RP delivers the plaintext cert a Verifier released
+  after CONFIRM succeeded — informational only for the Attester (see
+  below), no unwrap needed since ACTIVATE already proved possession.
 
-**RP side** (`ensure_attester_identity_certified()`, runs once per
-process): fetches the identity, then two independent legs:
-- **RP-CA track**: validates the Attester's EK chain itself
+**RP side, two independent CA relationships**:
+- **RP-CA leg** (`ensure_attester_identity_provisioned()`, runs once per
+  process): FETCHes the identity, validates the Attester's EK chain itself
   (`manufacturer-root.crt`) as a hard local gate — aborts the whole cycle
-  on failure. Signs with a new RP CA keypair (`keys/rp-ca.{key,crt}`),
-  wraps via `charra_tpm_make_credential_for_ak()`, records issuance in its
-  own ledger (`state/relying-party/attester-ak-state.txt`), delivers.
-- **Verifier-CA track**: relays the same EK/AK material to **one**
-  Verifier's existing `/certify_ak` (unchanged) and relays the still-
-  encrypted response on to the Attester. Only one Verifier, not all —
-  every `bin/verifier` instance shares one CA key (`keys/verifier-ca.key`,
-  hardcoded, confirmed via `start_verifiers.sh`), so one issuance chain-
-  validates on every instance. Tradeoff: only that one Verifier's local
-  ledger (`state/verifier/ak-provisioning/rp-ak-provisioning-state-<port>.txt`)
-  has a record of it, so Step 3b's Attester-cert check is chain-validation
-  only, no `charra_ak_state_check_serial_valid()` lookup — revocation for
-  this cert isn't tracked per-Verifier as a result. Accepted for a PoC.
+  on failure — signs with RP's own CA keypair (`keys/rp-ca.{key,crt}`),
+  wraps via `charra_tpm_make_credential_for_ak()`, records issuance in
+  RP's own ledger (`state/relying-party/ak-provisioning/
+  attester-ak-state.txt`), delivers.
+  Also caches the fetched identity (`attester_identity_cached`, deep
+  copy) for the per-Verifier leg below to reuse without re-FETCHing.
+- **Verifier-CA leg** (`ensure_attester_identity_certified_by_verifier
+  (verifier_index)`): runs the CHALLENGE/ACTIVATE/CONFIRM/DELIVER_VERIFIER
+  sequence against `verifier_index`'s own `/certify_ak`, called once *per
+  Verifier* from that Verifier's own thread in
+  `get_attestation_results_thread()` — the exact same place and pattern
+  `ensure_rp_ak_certificate(current_thread_index)` already uses for RP's
+  own AK. Every Verifier now signs with its own CA key (see "RP AK
+  certification is now independent per-Verifier" below), so this is
+  genuinely independent per Verifier, not one issuance relayed to all:
+  each result is cached both in memory
+  (`attester_ak_cert_by_verifier_ready/_der/_der_len[MAX_VERIFIERS]`,
+  mirroring `rp_ak_cert_ready/_der/_der_len`) and on disk
+  (`state/relying-party/attester-ak-certificates/
+  attester-ak-certificate-verifier-<port>.der`, mirroring
+  `rp-ak-certificate-<port>.der`), and each Verifier records the issuance
+  in its own ledger (`state/verifier/ak-provisioning/attester/
+  attester-ak-provisioning-state-<port>.txt`). New mutex
+  `attester_identity_relay_mutex`, held for the whole per-Verifier
+  function body (unlike `rp_ak_reprovision_mutex`, which only wraps
+  individual `/certify_ak` exchanges) — protects the Attester-relay round
+  trips' shared response globals (`activate_credential_response` and
+  friends) against concurrent Verifier threads. Held for the whole body,
+  not just per-exchange, because there's no concurrency to preserve:
+  `attester.c` has no threads of its own, so it serializes these requests
+  regardless of how RP locks.
+
+**`charra_rp_build_evidence_message()` substitutes its own cached
+`attester_ak_cert_by_verifier_der[verifier_index]`** into each Verifier's
+evidence, rather than forwarding whatever `msg_attestation_response_dto.
+ak_certificate_attester_by_verifier` the Attester's own `/appraise`
+response carries. RP already holds the authoritative plaintext copy from
+its own CONFIRM exchange, and only RP knows which certificate belongs to
+which Verifier now that there are N of them — not a trust shortcut, since
+a certificate's validity depends only on its own CA signature, not on who
+carried the bytes. This makes the Attester's own `DELIVER_VERIFIER`-leg
+storage (a single file on the Attester's side) purely informational: still
+delivered for the Attester's own records, but whichever Verifier's
+certificate arrives *last* is simply what ends up there; nothing reads it
+back for correctness, and `attester.c` needed no changes for this.
 
 **Both certs reach the Verifier**: `msg_attestation_response_dto` and
 `msg_rp_evidence_dto` each carry two fields —
-`ak_certificate_attester_by_verifier` (what Step 3b actually checks) and
-`ak_certificate_attester_by_rp` (forwarded, not independently validated —
-the Verifier has no reason to trust a CA it doesn't recognize; RP's own
-EK-chain check at provisioning time is what vouches for it).
+`ak_certificate_attester_by_verifier` (what Step 3b actually checks,
+against that Verifier's own CA) and `ak_certificate_attester_by_rp`
+(forwarded to the Verifier but not independently validated there — it has
+no reason to trust a CA it doesn't recognize; RP's own Step 2a validates
+this one locally instead, see "Step 3a/3b item 1" above).
 
-**Verified live**: full 5-verifier sweep (`start_verifiers.sh`-equivalent),
-unanimous `Attestation successful by majority vote! (5/5 Verifiers
-passed)` across every step of the 1..5-verifier benchmark loop, zero
-`ERROR` lines in any of the four entities' logs. New test file
-`tests/test_certify_ak_of_attester_marshaling.c` (24 assertions:
-round-trips for both new DTOs, oversized/wrong-size field rejection).
+**Newly true, not yet acted on**: Step 3b item 1's comment in `verifier.c`
+still says a ledger lookup (`charra_ak_state_check_serial_valid()`) would
+"spuriously fail on every other Verifier," since only one Verifier used to
+certify the Attester. That's no longer the premise — every Verifier now
+independently certifies and ledgers the Attester, so *this* Verifier
+always has its own record for whatever it's currently appraising. Adding
+that lookup (symmetric with Step 3a item 1's RP check, using the existing
+`attester_ak_state_file_path`) would close the "revocation isn't tracked"
+gap for free; not yet done.
+
+**Verified live**: full 5-verifier sweep, all 5 Verifiers independently
+issuing (and ledgering) their own distinct Attester certificate — 5
+separate `attester-ak-certificate-verifier-<port>.der` files, 5 separate
+`attester-ak-provisioning-state-<port>.txt` ledger entries, confirmed via
+`openssl x509 -issuer` that each chains to a genuinely different CA
+(`CN = CHARRA Verifier CA <port>`) — unanimous `Attestation successful by
+majority vote! (5/5 Verifiers passed)`, `make test` all 11 suites passing
+(0 failed). Marshaling coverage: `tests/test_certify_ak_of_attester_
+marshaling.c` (24 assertions: round-trips for both DTOs, oversized/
+wrong-size field rejection).
 
 ### Not yet built (tracked so nothing gets lost between sessions)
 
@@ -1091,14 +1242,26 @@ qualification ledger, folding the result into `attestation_result_
 qualified`, with its own `4.03` message distinguishing "not qualified" from
 "AK certificate invalid" (`4.01`, checked first).
 
-**Deliberately still per-Verifier, not shared like the AK ledger.** Path is
-`qualification-state-<port>.txt`, unique per process — preserves that an RP
-must independently pass `/qualify`+`/qualify_submit` with *each* Verifier,
-since qualification is each Verifier's own assessment of the RP's redaction
-pipeline (unlike AK certification, one CA, valid everywhere). Confirmed
-live with a 2-verifier setup: two independently-populated files, both
-correctly keyed by the same `ek_fingerprint`; restarting one Verifier left
-its file and the RP's earned qualification intact.
+**Superseded (2026-08-17): now deliberately SHARED across every Verifier,
+not per-Verifier.** The "each Verifier independently assesses the RP's
+redaction pipeline" reasoning above turned out not to require separate
+files: `charra_qualification_state_renew()` only ever *appends*, never
+revokes-on-write the way `charra_ak_state_renew()` does (that revoke step
+is the actual reason AK certification has to stay per-Verifier-file —
+concurrent Verifiers sharing one AK ledger would revoke each other's
+freshly-issued certs), and `ek_fingerprint` was already Verifier-agnostic
+(one RP EK/AK keypair, reused for every Verifier). So a single shared file,
+written by concurrent Verifier processes and serialized by the `flock()`
+already inside `_renew()`, is safe. Path is now
+`state/verifier/qualification/rp-qualification-state.txt`, no port suffix
+— qualifying with one Verifier now qualifies with all of them. RP side
+(`relying_party.c`) changed to match: `rp_perform_qualification_handshake(
+verifier_index)` became `rp_perform_qualification_handshake_once(
+num_verifiers)`, run once per attestation cycle (before any per-Verifier
+thread starts, not once per thread) against whichever Verifier is reachable
+first, with `rp_qualified_until` and its on-disk cache collapsing from a
+per-Verifier array/per-port file to a single scalar/file. AK certification
+is untouched by this — still genuinely per-Verifier.
 
 **Not addressed here, fixed later** (see "RP now caches its own
 qualification client-side" below): `relying_party.c` re-ran the full
@@ -1126,8 +1289,12 @@ pointless if the Verifier-side *ledger* is still shared —
 `charra_ak_state_renew()`'s policy revokes any existing record for the same
 `ek_fingerprint`, so if all Verifiers wrote to one ledger file, the second
 Verifier to certify RP would immediately revoke the first's freshly-issued
-certificate, and so on. Fixed by making `ak_state_file_path` per-port too,
-same fix already applied to `qualification_state_file_path`.
+certificate, and so on. Fixed by making the ledger path (now
+`rp_ak_state_file_path`) per-port too, same fix applied to
+`qualification_state_file_path` at the time (since reverted for
+qualification only — see "RP qualification is now identity-bound and
+persisted" above; `rp_ak_state_file_path` stays per-port, that
+revoke-on-write collision is still real for it).
 
 **A pre-existing race surfaced by making this concurrent**: the shared
 `certify_ak_response` global was safe under call-once-per-process but not
@@ -1136,17 +1303,28 @@ unmarshal overwrote `.ak_certificate` (a heap pointer) without freeing the
 previous value. Fixed with a snapshot-then-null-out pattern under
 `rp_ak_reprovision_mutex`.
 
-**What's still shared, deliberately**: the CA key itself
-(`keys/verifier-ca.key`) — every Verifier signs with the same key. The
-*ledger* and *issuance* are now genuinely per-Verifier (separate calls,
-certificates, serials, records) even though cryptographically they all
-chain to one CA. Making the CA itself per-Verifier is a materially bigger,
-out-of-scope change.
+**The CA key itself is also independent per Verifier now.** Originally
+every `bin/verifier` instance signed with one shared
+`keys/verifier-ca.{key,crt}` — genuine key material shared across
+"independent" Verifiers, despite the ledger and issuance already being
+separate. `keys/gen-ak-pki.sh` now generates one CA keypair per port
+listed in `verifiers_config.txt` (`verifier-ca-<port>.{key,crt}`), and
+`verifier.c` computes its own `verifier_ca_cert_path`/`verifier_ca_key_
+path` from `port` at startup, same mechanism as `rp_ak_state_file_path`.
+A compromised or unavailable Verifier's CA no longer affects any other
+Verifier's ability to issue or validate certificates — the same fix later
+motivated making the Attester's own Verifier-CA certification per-Verifier
+too (see `/certify_ak_of_attester` above): with a shared CA key, one
+Verifier certifying the Attester was as good as all of them; with
+independent keys, that becomes a single point of failure, so it's no
+longer done that way either.
 
-**Verified**: full suite, 0 regressions. Live 2-Verifier run: separate
-`.der` files, ledger entries share `ek_fingerprint` but distinct serials,
-two separate `/certify_ak`→`ActivateCredential`→decrypt sequences in the
-log.
+**Verified**: full suite, 0 regressions. Live 2-Verifier run (RP AK
+independence): separate `.der` files, ledger entries share `ek_fingerprint`
+but distinct serials, two separate `/certify_ak`→`ActivateCredential`→
+decrypt sequences in the log. Live 5-Verifier run (independent CA keys):
+`openssl x509 -issuer` on each Verifier-issued certificate confirmed 5
+distinct issuers (`CN = CHARRA Verifier CA <port>`).
 
 ### `state/` layout (final form) — reorg history
 
@@ -1167,9 +1345,12 @@ context since old file/path names still appear in older commit messages:
 state/
   verifier/
     ak-provisioning/
-      rp-ak-provisioning-state-<port>.txt(.lock)
+      rp/
+        rp-ak-provisioning-state-<port>.txt(.lock)
+      attester/
+        attester-ak-provisioning-state-<port>.txt(.lock)
     qualification/
-      rp-qualification-state-<port>.txt(.lock)
+      rp-qualification-state.txt(.lock)
   relying-party/
     identity/
       rp-ek-certificate.der
@@ -1178,7 +1359,20 @@ state/
     ak-certificates/
       rp-ak-certificate-<port>.der
     qualification-cache/
-      rp-qualification-until-<port>.txt
+      rp-qualification-until.txt
+    attester-ak-certificates/
+      attester-ak-certificate-rp.der
+      attester-ak-certificate-verifier-<port>.der
+    ak-provisioning/
+      attester-ak-state.txt(.lock)
+  attester/
+    identity/
+      attester-ek-certificate.der
+      attester-ak-public.bin
+      attester-ak-private.bin
+    ak-certificates/
+      attester-ak-certificate-rp.der
+      attester-ak-certificate-verifier.der
 ```
 
 Both `verifier.c`'s and `relying_party.c`'s `main()` `mkdir()` their own
@@ -1187,6 +1381,21 @@ side of the tree up front. Several fixed-size path buffers were bumped
 `.gitignore` collapsed to a single `state/` wholesale ignore. Verified live:
 a full cold-start run (fresh TPM state, RP identity from scratch) with all
 5 Verifier ports produced exactly this tree; full suite still passes.
+
+**Extended since**: `verifier/ak-provisioning/` split into `rp/`/`attester/`
+subdirectories (see "`/certify_ak_of_attester`" above) and `attester/` was
+added as its own top-level owner once the Attester got a persistent
+identity (same section). `verifier/qualification/` and `relying-party/
+qualification-cache/` both dropped their `-<port>` suffix and became single
+shared files (see "RP qualification is now identity-bound and persisted"
+above). `relying-party/attester-ak-certificates/` gained one
+`attester-ak-certificate-verifier-<port>.der` per Verifier once that leg
+became per-Verifier too (see "RP AK certification is now independent
+per-Verifier" above) — it used to be a single `attester-ak-certificate-
+verifier.der`. `relying-party/attester-ak-state.txt` moved into its own
+`relying-party/ak-provisioning/` subfolder, mirroring the Verifier side's
+split between certificate-byte caches and issuance ledgers (RP is a CA for
+the Attester's RP-issued leg, so it keeps a ledger the same way).
 
 ### Also fixed: synthetic-log generator template_data layout mismatch
 
@@ -1290,6 +1499,18 @@ trust role from "verifies the Attester's identity and forwards a signal"
 its Verifier-facing credentials" — not a new category of trust, but the RP
 now sits on both halves of the Attester-identity leg instead of one.
 
+**Correction (2026-08-17): the "Planned end state" above did not ship as
+signal-forwarding.** No verified/not-verified signal is forwarded from RP
+to Verifier for the Attester's identity. Instead each party independently
+validates the half it's the trust root for: RP validates
+`ak_certificate_attester_by_rp` against its own CA
+(`charra_rp_appraise_evidence()`, see the Step 2a section above), and each
+Verifier independently validates `ak_certificate_attester_by_verifier`
+against its own CA (Step 3b item 1). Simpler than signal-forwarding (no new
+DTO field, no new trust-in-a-boolean issue), and matches
+`ensure_attester_identity_certified()`'s own framing: "Two independent CAs
+certify the Attester's AK identity, neither trusting the other's issuance."
+
 **Result**: a real live run produced `ATTESTATION SUCCESSFUL` end to end —
 both quotes genuinely checked, a 4/5-verifier majority vote surviving a
 timed-out verifier without crashing (double-free fix confirmed under the
@@ -1365,7 +1586,9 @@ its stale cache, gets `4.03 "RP qualification expired!"`, re-qualifies,
 resubmits, reaches `"Attestation successful!"` on the retry; the following
 cycle correctly reuses the freshly-earned cache. Full suite, 0 regressions.
 
-`.gitignore` updated for `rp-qualification-until-*.txt`.
+`.gitignore` updated for `rp-qualification-until-*.txt` at the time; now
+moot — see "state/ layout (final form)" above, `.gitignore` ignores
+`state/` wholesale.
 
 ### `tests/test_rp_appraisal_marshaling.c` — 17 assertions
 

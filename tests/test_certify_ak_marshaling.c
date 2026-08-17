@@ -53,6 +53,7 @@ static void test_request_round_trips(void) {
     req.ak_name_len = sizeof(req.ak_name);
     memset(req.ak_name, 0x33, req.ak_name_len);
     req.kind = CHARRA_CERTIFY_AK_CONFIRM;
+    req.subject = CHARRA_CERTIFY_AK_SUBJECT_ATTESTER;
     req.secret_len = sizeof(req.secret);
     memset(req.secret, 0x44, req.secret_len);
 
@@ -78,6 +79,7 @@ static void test_request_round_trips(void) {
             res.ak_name_len == req.ak_name_len &&
                     memcmp(res.ak_name, req.ak_name, req.ak_name_len) == 0);
     check("kind round-trips", res.kind == req.kind);
+    check("subject round-trips", res.subject == req.subject);
     check("secret round-trips",
             res.secret_len == req.secret_len &&
                     memcmp(res.secret, req.secret, req.secret_len) == 0);
@@ -126,6 +128,7 @@ static void encode_raw_request(const uint8_t* ek_cert, size_t ek_cert_len,
     QCBOREncode_Init(&ec, buf_in);
     QCBOREncode_OpenArray(&ec);
     QCBOREncode_AddUInt64(&ec, CHARRA_CERTIFY_AK_CHALLENGE);
+    QCBOREncode_AddUInt64(&ec, CHARRA_CERTIFY_AK_SUBJECT_RP);
     QCBOREncode_AddBytes(
             &ec, (UsefulBufC){.ptr = ek_cert, .len = ek_cert_len});
     QCBOREncode_AddBytes(&ec, (UsefulBufC){.ptr = ak_pub, .len = ak_pub_len});

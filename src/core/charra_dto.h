@@ -246,12 +246,27 @@ typedef struct {
 #define CHARRA_CERTIFY_AK_SECRET_LEN 32
 
 /**
+ * `subject` values -- whose identity this /certify_ak call is for. Lets the
+ * Verifier route the issuance into a separate ledger per identity kind
+ * (state/verifier/ak-provisioning/rp/ vs .../attester/), since an RP AK
+ * certificate and a relayed Attester AK certificate must never be tracked
+ * (or revoked) as if they were the same kind of thing.
+ */
+#define CHARRA_CERTIFY_AK_SUBJECT_RP 0
+#define CHARRA_CERTIFY_AK_SUBJECT_ATTESTER 1
+
+/**
  * /certify_ak request, both legs (discriminated by `kind`): asks the
  * Verifier, acting as Privacy CA, to certify an AK. Sent by whichever party
  * wants one certified (RP for itself, or relayed for the Attester).
  */
 typedef struct {
     uint32_t kind; /* one of CHARRA_CERTIFY_AK_* above */
+
+    /* CHALLENGE only: one of CHARRA_CERTIFY_AK_SUBJECT_* above. Bound into
+     * the pending challenge, so CONFIRM's ledger routing uses this value
+     * regardless of what (if anything) CONFIRM itself sends. */
+    uint32_t subject;
 
     /* EK certificate (DER). CHALLENGE validates it; CONFIRM uses its
      * SHA-256 to look the pending challenge up. */

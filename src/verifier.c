@@ -106,16 +106,23 @@ static rp_qualification_state qualification_state = {0};
 /* config for /certify_ak (Verifier acting as Privacy CA) -- see
  * keys/gen-ak-pki.sh / keys/README.md for what these test-only files are */
 static char* manufacturer_root_cert_path = "keys/manufacturer-root.crt";
+/* Per-port, NOT one CA shared across every `bin/verifier` instance --
+ * genuine key material isolation, not just independent ledgers: a
+ * compromised or unavailable Verifier's CA no longer affects any other
+ * Verifier's ability to issue or validate certificates. Computed once port
+ * is known, same mechanism as ak_state_file_path_buf below. */
+static char verifier_ca_cert_path_buf[64] = {0};
 static char* verifier_ca_cert_path = "keys/verifier-ca.crt";
+static char verifier_ca_key_path_buf[64] = {0};
 static char* verifier_ca_key_path = "keys/verifier-ca.key";
 /* AK certificate validity window -- fixed test-only window. */
 static const char* ak_cert_not_before_utc = "20240101000000";
 static const char* ak_cert_not_after_utc = "20340101000000";
 /* Persisted record of AK certificates issued via /certify_ak -- see
  * charra_ak_state.h. Deliberately per-Verifier, NOT shared across every
- * `bin/verifier` instance start_verifiers.sh spawns, even though they all
- * sign with one shared CA key: each Verifier now independently certifies
- * (via its own /certify_ak call, see relying_party.c's ensure_rp_ak_
+ * `bin/verifier` instance start_verifiers.sh spawns, now doubly so since
+ * each also signs with its OWN CA key: each Verifier independently
+ * certifies (via its own /certify_ak call, see relying_party.c's ensure_rp_ak_
  * certificate()) and independently tracks RP's AK, since Verifiers are
  * meant to be independent (see CHARRA_V2_NOTES.md). This also isn't
  * optional bookkeeping -- charra_ak_state_renew()'s policy revokes any
@@ -124,29 +131,30 @@ static const char* ak_cert_not_after_utc = "20340101000000";
  * certifying RP would immediately revoke every OTHER Verifier's own,
  * separately-issued certificate for the same RP in that shared file.
  * Keyed by this process's own port, same mechanism (and same comment) as
- * qualification_state_file_path below. Named "rp-..." because this ledger
- * is specifically about the RP's AK -- the Attester has its own EK/AK that
- * may need an analogous ledger of its own one day, and the two must never
- * be mistaken for each other. Lives under state/verifier/ak-provisioning/
- * -- every piece of THIS process's own runtime state lives under
+ * qualification_state_file_path below.
+ *
+ * Two separate ledgers, one per CHARRA_CERTIFY_AK_SUBJECT_* value -- an RP
+ * AK and a relayed Attester AK must never be tracked (or revoked) as if
+ * they were the same identity kind, even though both currently arrive
+ * through this one /certify_ak resource. Live under
+ * state/verifier/ak-provisioning/rp/ and .../attester/ respectively --
+ * every piece of THIS process's own runtime state lives under
  * state/verifier/, split by purpose, mirroring how relying_party.c
  * organizes its own runtime state under state/relying-party/. */
-static char ak_state_file_path_buf[96] = {0};
-static char* ak_state_file_path =
-        "state/verifier/ak-provisioning/rp-ak-provisioning-state.txt";
+static char rp_ak_state_file_path_buf[96] = {0};
+static char* rp_ak_state_file_path =
+        "state/verifier/ak-provisioning/rp/rp-ak-provisioning-state.txt";
+static char attester_ak_state_file_path_buf[96] = {0};
+static char* attester_ak_state_file_path = "state/verifier/ak-provisioning/"
+                                           "attester/attester-ak-provisioning-state.txt";
 
 /* Persisted, per-RP-identity record of who has passed /qualify +
- * /qualify/submit -- see charra_qualification_state.h. Per-Verifier for
- * the same reason as ak_state_file_path above: qualification is each
- * Verifier's own, independent assessment of this RP's redaction pipeline,
- * and an RP is expected to qualify with each of the N Verifiers it submits
- * evidence to separately. Keyed by this process's own port (set once
- * command-line parsing determines it, see main()) so every `bin/verifier`
- * instance -- even though they all run from the same working directory --
- * keeps its own file rather than accidentally sharing one. Lives under
- * state/verifier/qualification/, same reasoning as ak_state_file_path
- * above. */
-static char qualification_state_file_path_buf[96] = {0};
+ * /qualify/submit -- see charra_qualification_state.h. Unlike
+ * rp_ak_state_file_path above, ONE FILE SHARED by every `bin/verifier`
+ * instance: qualifying with one Verifier qualifies with all of them.
+ * Safe because charra_qualification_state_renew() only appends (never
+ * revokes-on-write like charra_ak_state_renew()), and ek_fingerprint is
+ * already Verifier-agnostic (one RP EK/AK keypair, reused everywhere). */
 static char* qualification_state_file_path =
         "state/verifier/qualification/rp-qualification-state.txt";
 
@@ -247,38 +255,57 @@ int main(int argc, char** argv) {
     charra_log_set_level(charra_log_level);
     coap_set_log_level(coap_log_level);
 
-    /* ak_state_file_path/qualification_state_file_path are per-port (see
+    /* rp_ak_state_file_path/attester_ak_state_file_path are per-port (see
      * their own comments above) -- port is only final once command-line
-     * parsing above has run, so this has to happen here, not at static-
-     * initialization time. mkdir() the two subfolders first: fopen(path,
-     * "w") fails outright if any parent directory is missing, and nothing
-     * else in this codebase creates them (they're gitignored, runtime-only
-     * state, not checked in). Ignore EEXIST -- both are expected to already
-     * exist on every run after the first. */
+     * parsing above has run, so this has to happen here, not at
+     * static-initialization time (qualification_state_file_path is shared,
+     * not per-port, so it needs no such assignment). mkdir() the
+     * subfolders first: fopen(path, "w") fails outright if any parent
+     * directory is missing, and nothing else in this codebase creates them
+     * (they're gitignored, runtime-only state, not checked in). Ignore
+     * EEXIST -- all are expected to already exist on every run after the
+     * first. */
     mkdir("state", 0755);
     mkdir("state/verifier", 0755);
     mkdir("state/verifier/ak-provisioning", 0755);
+    mkdir("state/verifier/ak-provisioning/rp", 0755);
+    mkdir("state/verifier/ak-provisioning/attester", 0755);
     mkdir("state/verifier/qualification", 0755);
 
-    snprintf(ak_state_file_path_buf, sizeof(ak_state_file_path_buf),
-            "state/verifier/ak-provisioning/rp-ak-provisioning-state-%u.txt",
+    snprintf(rp_ak_state_file_path_buf, sizeof(rp_ak_state_file_path_buf),
+            "state/verifier/ak-provisioning/rp/rp-ak-provisioning-state-%u."
+            "txt",
             port);
-    ak_state_file_path = ak_state_file_path_buf;
+    rp_ak_state_file_path = rp_ak_state_file_path_buf;
 
-    snprintf(qualification_state_file_path_buf,
-            sizeof(qualification_state_file_path_buf),
-            "state/verifier/qualification/rp-qualification-state-%u.txt",
+    snprintf(attester_ak_state_file_path_buf,
+            sizeof(attester_ak_state_file_path_buf),
+            "state/verifier/ak-provisioning/attester/"
+            "attester-ak-provisioning-state-%u.txt",
             port);
-    qualification_state_file_path = qualification_state_file_path_buf;
+    attester_ak_state_file_path = attester_ak_state_file_path_buf;
+
+    /* qualification_state_file_path stays at its shared, non-per-port
+     * default (see its own comment) -- no snprintf() here. */
+
+    snprintf(verifier_ca_cert_path_buf, sizeof(verifier_ca_cert_path_buf),
+            "keys/verifier-ca-%u.crt", port);
+    verifier_ca_cert_path = verifier_ca_cert_path_buf;
+
+    snprintf(verifier_ca_key_path_buf, sizeof(verifier_ca_key_path_buf),
+            "keys/verifier-ca-%u.key", port);
+    verifier_ca_key_path = verifier_ca_key_path_buf;
 
     /* Self-describing log: everything below is derived from CLI flags/
      * defaults that never appear again in the log stream once startup is
      * done, so a reader coming to this log file cold has no other way to
      * know, e.g., which state files or CA this run was actually using. */
     charra_log_info("[" LOG_NAME "] Effective configuration: port=%d "
-                    "ak_state_file='%s' qualification_state_file='%s' "
+                    "rp_ak_state_file='%s' attester_ak_state_file='%s' "
+                    "qualification_state_file='%s' "
                     "manufacturer_root='%s' verifier_ca_cert='%s'",
-            port, ak_state_file_path, qualification_state_file_path,
+            port, rp_ak_state_file_path, attester_ak_state_file_path,
+            qualification_state_file_path,
             manufacturer_root_cert_path, verifier_ca_cert_path);
 
     charra_log_debug("[" LOG_NAME "] Verifier Configuration:");
@@ -681,7 +708,7 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
                 ak_serial_rp_hex);
         time_t ak_cert_expires_at_rp = 0;
         attestation_result_ekak_rp = charra_ak_state_check_serial_valid(
-                ak_state_file_path, ak_serial_rp, ek_fingerprint_rp,
+                rp_ak_state_file_path, ak_serial_rp, ek_fingerprint_rp,
                 &ak_cert_expires_at_rp);
         if (attestation_result_ekak_rp) {
             char ek_fingerprint_rp_hex[17] = {0};
@@ -703,10 +730,9 @@ static void coap_appraise_handler(struct coap_resource_t* resource,
      * already tracks) passed /qualify + /qualify/submit within the last
      * CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS? Only meaningful once the AK
      * certificate itself checked out -- ek_fingerprint_rp is only valid
-     * when attestation_result_ekak_rp is true. Looked up in this Verifier's
-     * OWN qualification ledger (qualification_state_file_path), not shared
-     * with sibling Verifier instances -- see that variable's comment for
-     * why. */
+     * when attestation_result_ekak_rp is true. Looked up in the
+     * qualification ledger (qualification_state_file_path), shared with
+     * every sibling Verifier instance -- see that variable's comment. */
     bool attestation_result_qualified = false;
     /* Distinguishes "never qualified" from "qualified once, but that record
      * has since expired" -- both leave attestation_result_qualified false,
@@ -1267,11 +1293,44 @@ typedef struct {
     uint8_t ak_public_key[sizeof(TPM2B_PUBLIC)];
     uint32_t ak_name_len;
     uint8_t ak_name[sizeof(TPM2B_NAME)];
+    /* CHARRA_CERTIFY_AK_SUBJECT_* -- which ledger CONFIRM records the
+     * issuance in, bound at CHALLENGE time for the same reason as the key/
+     * name above: CONFIRM re-sending a different subject can't redirect a
+     * proven RP identity into the Attester's ledger or vice versa. */
+    uint32_t subject;
     time_t expires_at;
 } certify_ak_pending_challenge;
 
 static certify_ak_pending_challenge
         certify_ak_pending[CERTIFY_AK_MAX_PENDING] = {0};
+
+/** Maps a CHARRA_CERTIFY_AK_SUBJECT_* value to its ledger path. Returns NULL
+ * for anything else -- callers must reject the request in that case rather
+ * than guess which ledger was meant. */
+static const char* certify_ak_state_path_for_subject(uint32_t subject) {
+    switch (subject) {
+    case CHARRA_CERTIFY_AK_SUBJECT_RP:
+        return rp_ak_state_file_path;
+    case CHARRA_CERTIFY_AK_SUBJECT_ATTESTER:
+        return attester_ak_state_file_path;
+    default:
+        return NULL;
+    }
+}
+
+/** Human-readable subject name for log lines -- shares the same switch as
+ * certify_ak_state_path_for_subject() above so a new subject can't be added
+ * to one without the other being noticed. */
+static const char* certify_ak_subject_name(uint32_t subject) {
+    switch (subject) {
+    case CHARRA_CERTIFY_AK_SUBJECT_RP:
+        return "RP";
+    case CHARRA_CERTIFY_AK_SUBJECT_ATTESTER:
+        return "Attester (relayed)";
+    default:
+        return "unknown";
+    }
+}
 
 /** Constant-time equality -- the secret is a shared authenticator, so its
  * comparison must not leak how far it matched. */
@@ -1361,6 +1420,14 @@ static CHARRA_RC certify_ak_do_challenge(const msg_certify_ak_request_dto* req,
     TPM2B_ID_OBJECT* credential_blob = NULL;
     TPM2B_ENCRYPTED_SECRET* wrapped_secret = NULL;
 
+    if (certify_ak_state_path_for_subject(req->subject) == NULL) {
+        charra_log_error(
+                "[" LOG_NAME "] /certify_ak: unrecognized subject %u.",
+                req->subject);
+        *response_code_out = COAP_RESPONSE_CODE_BAD_REQUEST;
+        return CHARRA_RC_BAD_ARGUMENT;
+    }
+
     if ((charra_r = charra_io_read_file(manufacturer_root_cert_path,
                  &manufacturer_root_der, &manufacturer_root_der_len)) !=
             CHARRA_RC_SUCCESS) {
@@ -1412,6 +1479,7 @@ static CHARRA_RC certify_ak_do_challenge(const msg_certify_ak_request_dto* req,
             req->ak_public_key_len);
     challenge.ak_name_len = req->ak_name_len;
     memcpy(challenge.ak_name, req->ak_name, req->ak_name_len);
+    challenge.subject = req->subject;
     challenge.expires_at = time(NULL) + CERTIFY_AK_PENDING_TTL_SECONDS;
 
     if ((tss_r = Tss2_TctiLdr_Initialize(getenv("CHARRA_TCTI"), &tcti_ctx)) !=
@@ -1460,8 +1528,10 @@ static CHARRA_RC certify_ak_do_challenge(const msg_certify_ak_request_dto* req,
         hex_prefix(challenge.ek_fingerprint, sizeof(challenge.ek_fingerprint),
                 fingerprint_hex, sizeof(fingerprint_hex));
         charra_log_info("[" LOG_NAME "] /certify_ak: CHALLENGE issued to "
-                        "identity %s... (valid %ds); awaiting CONFIRM.",
-                fingerprint_hex, CERTIFY_AK_PENDING_TTL_SECONDS);
+                        "identity %s... (subject=%s, valid %ds); awaiting "
+                        "CONFIRM.",
+                fingerprint_hex, certify_ak_subject_name(req->subject),
+                CERTIFY_AK_PENDING_TTL_SECONDS);
     }
     *response_code_out = COAP_RESPONSE_CODE_CONTENT;
     charra_r = CHARRA_RC_SUCCESS;
@@ -1539,8 +1609,27 @@ static CHARRA_RC certify_ak_do_confirm(const msg_certify_ak_request_dto* req,
     }
     charra_log_info("[" LOG_NAME "] /certify_ak: CONFIRM from identity %s... "
                     "echoed the correct secret (ActivateCredential proves "
-                    "TPM possession); issuing certificate.",
-            ek_fingerprint_hex);
+                    "TPM possession); issuing certificate (subject=%s).",
+            ek_fingerprint_hex, certify_ak_subject_name(challenge.subject));
+
+    /* Ledger this issuance belongs in -- taken from the CHALLENGE-time
+     * binding above, not anything req (CONFIRM) itself carries. Already
+     * validated at CHALLENGE time, so NULL here would mean state corruption
+     * (or a pending-challenge struct that predates this field), not
+     * attacker input -- checked anyway, since silently falling back to
+     * either ledger would be exactly the kind of cross-identity mixup this
+     * whole change exists to prevent. */
+    const char* subject_ak_state_file_path =
+            certify_ak_state_path_for_subject(challenge.subject);
+    if (subject_ak_state_file_path == NULL) {
+        charra_log_error("[" LOG_NAME "] /certify_ak: CONFIRM from identity "
+                         "%s... has an unrecognized subject %u bound into "
+                         "its pending challenge -- refusing to guess which "
+                         "ledger to use.",
+                ek_fingerprint_hex, challenge.subject);
+        charra_r = CHARRA_RC_ERROR;
+        goto cleanup;
+    }
 
     /* --- sign, for the key bound into the challenge --- */
     if ((charra_r = charra_io_read_file(verifier_ca_cert_path,
@@ -1610,7 +1699,7 @@ static CHARRA_RC certify_ak_do_confirm(const msg_certify_ak_request_dto* req,
     {
         charra_ak_state_record* existing_records = NULL;
         uint32_t existing_count = 0;
-        if (charra_ak_state_load(ak_state_file_path, &existing_records,
+        if (charra_ak_state_load(subject_ak_state_file_path, &existing_records,
                     &existing_count) == CHARRA_RC_SUCCESS) {
             uint32_t existing_index = 0;
             if (charra_ak_state_find_by_ek_fingerprint(existing_records,
@@ -1648,9 +1737,8 @@ static CHARRA_RC certify_ak_do_confirm(const msg_certify_ak_request_dto* req,
     memcpy(ak_record.serial, ak_cert_serial, sizeof(ak_record.serial));
     ak_record.issued_at = time(NULL);
     ak_record.expires_at = ak_cert_expires_at;
-    if ((charra_r = charra_ak_state_renew(
-                 ak_state_file_path, ek_fingerprint, &ak_record)) !=
-            CHARRA_RC_SUCCESS) {
+    if ((charra_r = charra_ak_state_renew(subject_ak_state_file_path,
+                 ek_fingerprint, &ak_record)) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] /certify_ak: could not record "
                          "issuance in AK-provisioning state.");
         goto cleanup;
@@ -1954,7 +2042,7 @@ static void coap_qualify_submit_handler(struct coap_resource_t* resource,
                     charra_crypto_verify_cert_public_key_matches_der_key(
                             &ak_cert_rp_leaf, req.rp_public_key,
                             req.rp_public_key_len) == CHARRA_RC_SUCCESS &&
-                    charra_ak_state_check_serial_valid(ak_state_file_path,
+                    charra_ak_state_check_serial_valid(rp_ak_state_file_path,
                             ak_serial_rp, ek_fingerprint, NULL);
             if (submitter_identity_ok) {
                 charra_crypto_log_cert_summary(

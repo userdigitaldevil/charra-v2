@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Generates the test-only PKI for the EK/AK certificate check (Step 3a/3b
-# item 1, DRA-TLS spec): the Verifier's own Privacy-CA pair (signs AK
-# certificates issued via /certify_ak) and a synthetic "manufacturer" root
-# that signs EK certificates for RP and Attester.
+# item 1, DRA-TLS spec): one independent Privacy-CA pair per Verifier port
+# (each signs AK certificates issued via that Verifier's own /certify_ak)
+# and a synthetic "manufacturer" root that signs EK certificates for RP and
+# Attester.
 #
 # The synthetic manufacturer root stands in for a real TPM manufacturer CA,
 # since the dev-env's software TPM simulator has no genuine one. Likewise,
@@ -22,10 +23,20 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-echo "Generating Verifier's Privacy CA pair..."
-openssl req -x509 -newkey rsa:2048 -nodes \
-    -keyout verifier-ca.key -out verifier-ca.crt -outform DER \
-    -days 3650 -subj "/CN=CHARRA Verifier CA (test only)"
+echo "Generating one Privacy CA pair per configured Verifier port..."
+# Each bin/verifier instance now signs AK certificates under its OWN CA key
+# (verifier-ca-<port>.{key,crt}), not one CA shared by every instance --
+# genuine per-Verifier compromise/availability isolation, matching how
+# state/verifier/ak-provisioning/ already tracks each Verifier's issuances
+# independently. Ports come from verifiers_config.txt (the same file
+# trust_manager hands out), so this script and that config never drift.
+while read -r _id _ip port || [ -n "$port" ]; do
+    [ -z "$port" ] && continue
+    openssl req -x509 -newkey rsa:2048 -nodes \
+        -keyout "verifier-ca-$port.key" -out "verifier-ca-$port.crt" \
+        -outform DER -days 3650 \
+        -subj "/CN=CHARRA Verifier CA $port (test only)"
+done < ../verifiers_config.txt
 
 echo "Generating RP's own Privacy CA pair..."
 # Independent from the Verifier's CA above -- deliberately so: RP and every
@@ -66,4 +77,4 @@ echo "Generating a plain test AK key pair (no cert of its own -- gets one"
 echo "minted fresh by charra_crypto_sign_ak_certificate() in tests)..."
 openssl genrsa -out test-ak.key 2048 2>/dev/null
 
-echo "Done. Generated (DER certs, PEM keys): verifier-ca.{key,crt}, rp-ca.{key,crt}, manufacturer-root.{key,crt}, rp-ek.{key,crt}, attester-ek.{key,crt}, test-ak.key"
+echo "Done. Generated (DER certs, PEM keys): verifier-ca-<port>.{key,crt} (one pair per port in verifiers_config.txt), rp-ca.{key,crt}, manufacturer-root.{key,crt}, rp-ek.{key,crt}, attester-ek.{key,crt}, test-ak.key"

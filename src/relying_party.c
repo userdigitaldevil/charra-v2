@@ -138,8 +138,9 @@ static const char* rp_ek_cert_not_after_utc = "20340101000000";
  * certificates that keypair has been issued (see rp_ak_cert_der below;
  * ensure_rp_ak_certificate() computes
  * "state/relying-party/ak-certificates/rp-ak-certificate-<port>.der" per
- * call), and qualification-cache/ holds RP's own per-Verifier belief about
- * whether it's still qualified (rp_qualification_cache_path() above). */
+ * call), and qualification-cache/ holds RP's own belief about whether it's
+ * still qualified, now a single file since qualifying is Verifier-agnostic
+ * (rp_qualification_cache_path above). */
 static char* rp_ek_cert_cache_path =
         "state/relying-party/identity/rp-ek-certificate.der";
 static char* rp_ak_public_path =
@@ -162,31 +163,44 @@ static bool processing_certify_ak_response = false;
 static CHARRA_RC certify_ak_rc = CHARRA_RC_ERROR;
 
 /* --- Attester identity provisioning (/certify_ak_of_attester) -----------
- * Two independent CAs certify the Attester's AK identity, neither trusting
- * the other's issuance -- see CHARRA_V2_NOTES.md. RP acts as the sole
- * initiator for both legs (Attester and every Verifier stay fully
- * passive); the whole sequence runs once per process (like rp_ak_keypair_
- * ready above), not per attestation cycle. */
+ * Two kinds of CA certify the Attester's AK identity, neither trusting the
+ * other's issuance -- see CHARRA_V2_NOTES.md. RP acts as the sole initiator
+ * throughout (Attester and every Verifier stay fully passive):
+ *   - RP's own CA: one relationship, one certificate, provisioned once per
+ *     process (ensure_attester_identity_provisioned() below) -- mirrors
+ *     ensure_rp_ak_keypair() being a one-time thing.
+ *   - Each Verifier's own CA: now symmetric with how RP's own AK is
+ *     certified (ensure_rp_ak_certificate()) -- a SEPARATE certificate per
+ *     Verifier, since Verifiers now hold independent CA keys (see
+ *     verifier.c's verifier_ca_key_path). ensure_attester_identity_
+ *     certified_by_verifier() below runs once per Verifier, from that
+ *     Verifier's own thread, not once globally. */
 static char* rp_ca_cert_path = "keys/rp-ca.crt";
 static char* rp_ca_key_path = "keys/rp-ca.key";
 static const char* attester_ak_cert_not_before_utc = "20240101000000";
 static const char* attester_ak_cert_not_after_utc = "20340101000000";
 static char* attester_ak_state_file_path =
-        "state/relying-party/attester-ak-state.txt";
+        "state/relying-party/ak-provisioning/attester-ak-state.txt";
 /* Cache for the RP-issued leg only -- RP genuinely holds the plaintext for
- * this one (it signed it itself), unlike the Verifier-issued leg, which
- * only the Attester's own TPM ever decrypts. Its presence gates the whole
- * function (both legs), same as ensure_rp_ak_certificate()'s own cache
- * file check, since both legs are written together at the end of a
- * successful run. */
+ * this one (it signed it itself), unlike any Verifier-issued leg, which
+ * only the Attester's own TPM ever decrypts. Its presence gates
+ * ensure_attester_identity_provisioned() (the FETCH + RP-CA leg only, not
+ * any Verifier's leg -- those are gated per-Verifier, below). */
 static char* attester_ak_cert_rp_cache_path =
         "state/relying-party/attester-ak-certificates/"
         "attester-ak-certificate-rp.der";
-static bool attester_identity_certified = false;
+static bool attester_identity_provisioned = false;
 
 static msg_ak_identity_response_dto ak_identity_response = {0};
 static CHARRA_RC ak_identity_rc = CHARRA_RC_ERROR;
 static bool processing_ak_identity_response = false;
+
+/* The Attester's EK certificate + AK public key + AK name, as FETCHed once
+ * by ensure_attester_identity_provisioned() -- doesn't vary per Verifier,
+ * so every ensure_attester_identity_certified_by_verifier() call reuses
+ * this rather than re-FETCHing. Populated once; ek_certificate is this
+ * struct's own heap copy, independent of ak_identity_response above. */
+static msg_ak_identity_response_dto attester_identity_cached = {0};
 
 /* No payload to parse on the DELIVER_RP/DELIVER_VERIFIER leg -- this
  * handler only needs to know the round trip completed, same "ack-only"
@@ -199,10 +213,36 @@ static msg_activate_credential_response_dto activate_credential_response = {0};
 static CHARRA_RC activate_credential_rc = CHARRA_RC_ERROR;
 static bool processing_activate_credential_response = false;
 
+/* Per-Verifier Attester AK certificate, mirroring rp_ak_cert_der/_len/
+ * _ready above exactly -- same pattern, same reason (each Verifier issues
+ * and must be sent back its OWN certificate). Substituted directly into
+ * that Verifier's evidence message by charra_rp_build_evidence_message(),
+ * instead of whatever (if anything) the Attester itself reports in its own
+ * /appraise response: only RP knows which certificate belongs to which
+ * Verifier, and the certificate's validity depends only on its own CA
+ * signature, not on who carried the bytes -- so this is not a trust
+ * shortcut, just cutting out a redundant hop. */
+static bool attester_ak_cert_by_verifier_ready[MAX_VERIFIERS] = {false};
+static uint8_t* attester_ak_cert_by_verifier_der[MAX_VERIFIERS] = {NULL};
+static uint32_t attester_ak_cert_by_verifier_der_len[MAX_VERIFIERS] = {0};
+/* Guards the Attester-relay round trips inside ensure_attester_identity_
+ * certified_by_verifier() (ACTIVATE, DELIVER_VERIFIER) against concurrent
+ * Verifier threads -- both use shared response globals (activate_
+ * credential_response/_rc/processing_ above, processing_certify_ak_of_
+ * attester_deliver_response) the way /certify_ak's own globals need rp_ak_
+ * reprovision_mutex. Held for the whole per-Verifier function body, not
+ * just individual exchanges (unlike rp_ak_reprovision_mutex): the Attester
+ * itself is single-threaded and serializes these anyway (see attester.c),
+ * so there's no concurrency to preserve, only correctness to add. */
+static pthread_mutex_t attester_identity_relay_mutex =
+        PTHREAD_MUTEX_INITIALIZER;
+
 /* --- RP qualification handshake state (/qualify + /qualify/submit) ------
- * See charra_rp_qualification.h. Verifier-local state, so this handshake
- * has to be repeated against each Verifier the RP submits evidence to, not
- * just verifiers[0] like AK provisioning above. */
+ * See charra_rp_qualification.h. Verifier's qualification ledger is now
+ * shared across all Verifier instances (see qualification_state_file_path
+ * in verifier.c), so RP only ever runs this handshake once per validity
+ * window, against whichever Verifier is reachable first -- not once per
+ * Verifier like AK provisioning below. */
 static uint8_t* qualify_challenge_log = NULL;
 static uint32_t qualify_challenge_log_len = 0;
 /* Salt to redact qualify_challenge_log with, sent alongside it -- see
@@ -213,25 +253,27 @@ static CHARRA_RC qualify_response_rc = CHARRA_RC_ERROR;
 static bool processing_qualify_response = false;
 static bool qualify_submit_qualified = false;
 static bool processing_qualify_submit_response = false;
-/* Per-Verifier client-side qualification cache: the RP's own record of
- * "qualified with this Verifier until when", persisted to
- * rp-qualification-until-<port>.txt (mirrors rp-ak-certificate-<port>.der's
- * cache-to-disk pattern) so a fresh RP process doesn't redo /qualify +
- * /qualify/submit if a previous run's qualification is still within its
- * validity window. 0 means "unknown/not currently valid" -- both "never
- * loaded from disk this process" and "loaded, nothing there" collapse to
- * the same value, since either way the next step is the same: try loading
- * from disk, and if that doesn't produce a still-future timestamp, redo the
- * handshake. Without this, RP re-qualifies on every single attestation
- * cycle regardless of how much of the previous grant is left -- see
- * CHARRA_V2_NOTES.md. */
-static time_t rp_qualified_until[MAX_VERIFIERS] = {0};
+/* RP's own client-side qualification cache: "qualified until when",
+ * persisted to rp-qualification-until.txt so a fresh RP process doesn't
+ * redo /qualify + /qualify/submit if a previous run's qualification is
+ * still valid. Single value, not per-Verifier, since qualifying is now a
+ * one-time, Verifier-agnostic fact. 0 means "unknown/not currently
+ * valid". */
+static time_t rp_qualified_until = 0;
+/* How many verifiers[] entries rp_perform_qualification_handshake_once()
+ * may try, set once by get_attestation_results() before spawning threads --
+ * threads themselves only know their own index (see get_attestation_
+ * results_thread()'s arg), so the retry-on-rejection path reads this
+ * instead of a parameter. */
+static int rp_num_verifiers_this_cycle = 0;
 /* Set by coap_verifier_handler_appraisal() when a Verifier's /appraise
  * response is 4.03 Forbidden specifically because our qualification is
  * missing or expired (as opposed to 4.01 Unauthorized for a bad AK
  * certificate, see rp_ak_cert_rejected) -- signals
- * get_attestation_results_thread()'s retry loop to invalidate the local
- * cache above, redo the handshake, and resubmit once. */
+ * get_attestation_results_thread()'s retry loop to invalidate the cache
+ * above, redo the handshake, and resubmit once. Still per-Verifier: it's
+ * whichever Verifier's /appraise response we're reacting to, even though
+ * the underlying cache it invalidates is now global. */
 static bool rp_qualification_rejected[MAX_VERIFIERS];
 /* Guards every TPM connection RP opens (provisioning and, later, each
  * Quote_r signing operation): the TPM simulator this dev environment uses
@@ -260,21 +302,15 @@ static pthread_mutex_t rp_ak_reprovision_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* Guards the /qualify + /qualify/submit CoAP round trips' shared response
  * globals (qualify_challenge_log/qualify_challenge_log_len/
  * qualify_challenge_salt/qualify_response_rc/processing_qualify_response/
- * qualify_submit_qualified/processing_qualify_submit_response, below) --
- * same reasoning as rp_ak_reprovision_mutex above, for the same class of
- * bug: rp_perform_qualification_handshake() runs concurrently, one call
- * per Verifier thread (all spawned together before any is joined, see
- * main()'s thread loop), and every one of those globals is a single
- * shared variable, not a per-Verifier array. Without this, two threads
- * mid-qualification against different Verifiers at once would race to
- * write the same globals -- e.g. one thread's challenge log getting
- * redacted, signed, and submitted under a DIFFERENT thread's Verifier
- * identity. Reachable on any run where more than one Verifier needs
- * /qualify in the same cycle, which includes every cold-state run (no
- * qualification cache yet for any Verifier). A separate mutex from
- * rp_ak_reprovision_mutex, not a shared one, so AK (re)certification and
- * qualification can still proceed concurrently against different
- * Verifiers -- they guard disjoint sets of globals. */
+ * qualify_submit_qualified/processing_qualify_submit_response, below).
+ * The handshake itself now runs at most once per attestation cycle (see
+ * rp_perform_qualification_handshake_once()), but the retry-on-rejection
+ * path can still call it from more than one Verifier thread concurrently
+ * -- this mutex serializes those calls onto the shared globals; the first
+ * one through re-qualifies, the rest observe the now-valid cache and
+ * short-circuit. Separate from rp_ak_reprovision_mutex so AK
+ * (re)certification and qualification can still proceed concurrently --
+ * they guard disjoint globals. */
 static pthread_mutex_t rp_qualification_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* Nonces received from each Verifier, indexed by verifier slot. */
 static uint8_t verifier_nonces[MAX_VERIFIERS][sizeof(TPMU_HA)] = {{0}};
@@ -370,22 +406,29 @@ static coap_response_t coap_certify_ak_of_attester_deliver_response_handler(
         const coap_mid_t mid CHARRA_UNUSED);
 
 /**
- * @brief Ensure the Attester's AK identity is certified by both CAs (RP's
- * own, and one Verifier's, relayed) -- see CHARRA_V2_NOTES.md,
- * "/certify_ak_of_attester". Runs once per process (like ensure_rp_ak_
- * keypair() above); every call after the first returns immediately.
+ * @brief Ensure the Attester's identity is FETCHed and certified by RP's
+ * own CA -- see CHARRA_V2_NOTES.md, "/certify_ak_of_attester". Runs once
+ * per process (like ensure_rp_ak_keypair() above); every call after the
+ * first returns immediately. Also populates attester_identity_cached for
+ * ensure_attester_identity_certified_by_verifier() below to reuse.
  *
- * The RP-CA leg is a hard local gate: if the Attester's EK certificate
- * does not chain to the manufacturer root, this returns an error and the
- * caller is expected to abort the whole attestation cycle rather than
- * proceed with an unverified Attester identity.
- *
- * @param[in] relay_verifier_index which entry in verifiers[] to relay the
- * Verifier-CA leg to -- only one Verifier ever certifies this identity
- * (they share one CA key, see CHARRA_V2_NOTES.md), not one per Verifier
- * the way ensure_rp_ak_certificate() works for RP's own AK.
+ * This is a hard local gate: if the Attester's EK certificate does not
+ * chain to the manufacturer root, this returns an error and the caller is
+ * expected to abort the whole attestation cycle rather than proceed with
+ * an unverified Attester identity.
  */
-static CHARRA_RC ensure_attester_identity_certified(int relay_verifier_index);
+static CHARRA_RC ensure_attester_identity_provisioned(void);
+
+/**
+ * @brief Ensure the Attester's identity is certified by verifier_index's
+ * OWN CA -- symmetric with ensure_rp_ak_certificate(): one independent
+ * certificate per Verifier, since each now holds its own CA key. Requires
+ * ensure_attester_identity_provisioned() to have already succeeded (calls
+ * it defensively if not). Every call after the first, for a given
+ * verifier_index, returns immediately (cached in memory and on disk).
+ */
+static CHARRA_RC ensure_attester_identity_certified_by_verifier(
+        int verifier_index);
 
 /**
  * @brief Ensure RP's TPM-resident EK+AK keypair exists (creating it once,
@@ -427,13 +470,13 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index);
 static void invalidate_cached_rp_ak_certificate(int verifier_index);
 
 /**
- * @brief Forget verifiers[verifier_index]'s cached qualification: delete
- * its on-disk cache file and reset rp_qualified_until[verifier_index] to 0,
- * so the next rp_perform_qualification_handshake() call redoes /qualify +
- * /qualify/submit instead of trusting a grant this Verifier just told us
+ * @brief Forget RP's cached qualification: delete its on-disk cache file
+ * and reset rp_qualified_until to 0, so the next
+ * rp_perform_qualification_handshake_once() call redoes /qualify +
+ * /qualify/submit instead of trusting a grant a Verifier just told us
  * (via a 4.03 Forbidden /appraise response) it no longer honors.
  */
-static void invalidate_cached_rp_qualification(int verifier_index);
+static void invalidate_cached_rp_qualification(void);
 
 /** @brief See its own definition's docstring, above ensure_rp_ak_certificate()
  * in the .c file -- forward-declared here so charra_rp_build_evidence_
@@ -454,31 +497,26 @@ static coap_response_t coap_qualify_submit_response_handler(
 
 /**
  * @brief Run the RP qualification handshake (charra_rp_qualification.h)
- * against verifiers[verifier_index]: fetch a fresh /qualify challenge,
- * redact it with the same pipeline real evidence uses, sign the resulting
- * PCR digest with RP's TPM-resident AK, and submit it all via
- * /qualify/submit.
+ * once: short-circuits to CHARRA_RC_SUCCESS if rp_qualified_until (or its
+ * on-disk cache file) says we're already qualified; otherwise tries
+ * verifiers[0..num_verifiers) in order, using the first one reachable at
+ * the network level to fetch a /qualify challenge, redact it with the same
+ * pipeline real evidence uses, sign the resulting PCR digest with RP's
+ * TPM-resident AK, and submit via /qualify/submit. A network-level failure
+ * against one Verifier tries the next; a received verdict (qualified or
+ * not) stops the loop -- the qualification ledger is shared across all
+ * Verifiers now (see qualification_state_file_path in verifier.c), so
+ * qualifying with one qualifies with all of them, and a "not qualified"
+ * verdict would be identical everywhere.
  *
- * Short-circuits to CHARRA_RC_SUCCESS without the /qualify round trip
- * itself if rp_qualified_until[verifier_index] (or its on-disk cache file,
- * rp-qualification-until-<port>.txt) says we're already qualified with
- * this Verifier and haven't hit CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS
- * yet -- see rp_qualified_until's own comment. Still always calls
- * ensure_rp_ak_certificate(verifier_index) first regardless of the cache
- * (cheap on its own cache hit), since AK certificate readiness is needed
- * downstream for evidence-building either way.
- *
- * Verifier-local state, same as the AK certificate now is (see
- * ensure_rp_ak_certificate()'s docstring) -- has to be repeated per
- * Verifier the RP intends to submit evidence to.
- *
- * @returns CHARRA_RC_SUCCESS if already cached as qualified, or if the
+ * @param[in] num_verifiers how many entries of verifiers[] to try.
+ * @returns CHARRA_RC_SUCCESS if already cached as qualified, or if some
  * Verifier's /qualify/submit response reports the RP as qualified (and
- * caches that). Any other outcome (transport failure, or a genuine "not
- * qualified" verdict) returns a non-success code -- the caller decides
- * whether that's fatal.
+ * caches that). Any other outcome (every Verifier unreachable, or a
+ * genuine "not qualified" verdict) returns a non-success code -- the
+ * caller decides whether that's fatal.
  */
-static CHARRA_RC rp_perform_qualification_handshake(int verifier_index);
+static CHARRA_RC rp_perform_qualification_handshake_once(int num_verifiers);
 
 CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers);
 
@@ -537,7 +575,7 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
             use_ima_test_log ? "true" : "false");
 
     /* RP's own runtime state (TPM identity, per-Verifier AK certificates,
-     * per-Verifier qualification cache) lives under state/relying-party/ --
+     * shared qualification cache) lives under state/relying-party/ --
      * mkdir() it once, up front, same reasoning verifier.c's main() already
      * documents: fopen(path, "w") fails outright if a parent directory is
      * missing, and nothing else creates these (gitignored, runtime-only). */
@@ -547,6 +585,7 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
     mkdir("state/relying-party/ak-certificates", 0755);
     mkdir("state/relying-party/qualification-cache", 0755);
     mkdir("state/relying-party/attester-ak-certificates", 0755);
+    mkdir("state/relying-party/ak-provisioning", 0755);
 
     double verifier_durations[NUM_RUNS];
     double evidence_durations[NUM_RUNS];
@@ -599,17 +638,18 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
              * per-Verifier, inside get_attestation_results_thread(), not
              * once here against a single verifiers[0]. */
 
-            /* The Attester's own identity, by contrast, only needs
-             * certifying once per process (both CAs' issuances are
-             * meaningful to every Verifier -- see CHARRA_V2_NOTES.md) --
-             * ensure_attester_identity_certified() itself no-ops on every
-             * call after the first. Hard fail-closed: this is RP's own
-             * local gate on the Attester's identity, so any failure here
-             * aborts the whole cycle rather than proceeding with
-             * unverified evidence. */
-            if ((result = ensure_attester_identity_certified(0)) !=
+            /* The Attester's identity is FETCHed and certified by RP's own
+             * CA only once per process -- ensure_attester_identity_
+             * provisioned() itself no-ops on every call after the first.
+             * Hard fail-closed: this is RP's own local gate on the
+             * Attester's identity, so any failure here aborts the whole
+             * cycle rather than proceeding with unverified evidence. Each
+             * Verifier's OWN certificate is ensured per-Verifier instead,
+             * inside get_attestation_results_thread(), the same way RP's
+             * own AK certificate already is (see the comment above). */
+            if ((result = ensure_attester_identity_provisioned()) !=
                     CHARRA_RC_SUCCESS) {
-                charra_log_error("[" LOG_NAME "] Could not certify the "
+                charra_log_error("[" LOG_NAME "] Could not provision the "
                                  "Attester's identity.");
                 goto error;
             }
@@ -805,13 +845,13 @@ static bool charra_rp_appraise_evidence(
     charra_log_info("[" LOG_NAME
             "]  +------------ RP Appraisal of the Evidence --------------+");
 
+    bool ekak_ok = false;
     bool signature_ok = false;
     bool nonce_ok = false;
     bool entries_ok = false;
     bool pcr_ok = false;
     bool blacklist_ok = false;
 
-    /* --- 1. quote signature, under the Attester's own public key --------- */
     /* Bounds are re-checked here even though charra_unmarshal_attestation_
      * response() has its own: these three fields are attacker-reachable and
      * are about to be memcpy'd into fixed-size structs. */
@@ -827,6 +867,54 @@ static bool charra_rp_appraise_evidence(
     memcpy(&signature, res->tpm2_signature, res->tpm2_signature_len);
     TPM2B_PUBLIC* tpm2_public_key = (TPM2B_PUBLIC*)res->tpm2_public_key;
 
+    /* --- 1. Attester's AK certificate, issued by RP's own CA -------------
+     * DRA-TLS Step 2a item 1. Same chain+key check the Verifier runs for
+     * Step 3a/3b item 1 (charra_crypto_verify_ekak_certificate() is written
+     * to be shared by both, see its docstring), but RP additionally checks
+     * the serial against its own issuance ledger: unlike the Verifier-issued
+     * leg (one shared CA, no cross-Verifier ledger), RP signed this cert
+     * itself, so revocation is actually checkable here. */
+    charra_log_info(
+            "[" LOG_NAME "] Verifying Attester's RP-issued AK certificate ...");
+    if (res->ak_certificate_attester_by_rp_len == 0) {
+        charra_log_error("[" LOG_NAME "]     => certificate is EMPTY -- "
+                         "/certify_ak_of_attester's DELIVER_RP leg has not "
+                         "completed yet.");
+    } else {
+        char* rp_ca_cert_der = NULL;
+        size_t rp_ca_cert_der_len = 0;
+        if (charra_io_read_file(rp_ca_cert_path, &rp_ca_cert_der,
+                    &rp_ca_cert_der_len) != CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "]     => could not read RP CA "
+                             "certificate ('%s').",
+                    rp_ca_cert_path);
+        } else {
+            uint8_t ak_serial[16] = {0};
+            ekak_ok = charra_crypto_verify_ekak_certificate(
+                    res->ak_certificate_attester_by_rp,
+                    res->ak_certificate_attester_by_rp_len,
+                    (uint8_t*)rp_ca_cert_der, rp_ca_cert_der_len,
+                    tpm2_public_key, ak_serial) == CHARRA_RC_SUCCESS;
+            charra_io_free_file_buffer(&rp_ca_cert_der);
+            if (!ekak_ok) {
+                charra_log_error("[" LOG_NAME "]     => certificate did NOT "
+                                 "verify (chain or key mismatch)!");
+            } else {
+                charra_print_hex(CHARRA_LOG_INFO, sizeof(ak_serial),
+                        ak_serial,
+                        "[" LOG_NAME "]     => chain and key valid! serial 0x",
+                        "\n", false);
+                ekak_ok = charra_ak_state_check_serial_valid(
+                        attester_ak_state_file_path, ak_serial, NULL, NULL);
+                charra_log_info(
+                        "[" LOG_NAME "]     => serial is %s",
+                        ekak_ok ? "currently valid (not revoked/expired)!"
+                                : "REVOKED or EXPIRED!");
+            }
+        }
+    }
+
+    /* --- 2. quote signature, under the Attester's own public key --------- */
     /* mbedTLS rather than the TPM-backed path verifier.c also has: verifying
      * an RSA-PSS signature needs no TPM, and the software TPM serves one
      * client at a time -- the RP opening its own session while fanning out
@@ -857,7 +945,7 @@ static bool charra_rp_appraise_evidence(
         goto done;
     }
 
-    /* --- 2. nonce: the quote must answer the challenge we just sent ------ */
+    /* --- 3. nonce: the quote must answer the challenge we just sent ------ */
     charra_log_info("[" LOG_NAME "] Verifying nonce ...");
     nonce_ok = charra_verify_tpm2_quote_qualifying_data(
             (uint16_t)last_request.nonce_len, last_request.nonce,
@@ -866,14 +954,14 @@ static bool charra_rp_appraise_evidence(
             nonce_ok ? "matches the one sent!"
                      : "does NOT match the one sent!");
 
-    /* --- 3. every entry's template_digest == hash(template_data) -------- */
+    /* --- 4. every entry's template_digest == hash(template_data) -------- */
     charra_log_info("[" LOG_NAME "] Verifying log entry self-consistency ...");
     entries_ok = charra_verify_log_entries_self_consistent(
             res->event_log, res->event_log_len);
     charra_log_info("[" LOG_NAME "]     => log entries are %s",
             entries_ok ? "self-consistent!" : "NOT self-consistent!");
 
-    /* --- 4. replay the log and rebuild the PCR composite digest ---------- */
+    /* --- 5. replay the log and rebuild the PCR composite digest ---------- */
     charra_log_info("[" LOG_NAME "] Replaying the log into the PCRs ...");
     pcr_ok = charra_verify_log_matches_quote_pcr_digest(res->event_log,
             res->event_log_len, tpm_pcr_selection, tpm_pcr_selection_len,
@@ -881,7 +969,7 @@ static bool charra_rp_appraise_evidence(
     charra_log_info("[" LOG_NAME "]     => PCR composite digest %s",
             pcr_ok ? "matches the quote!" : "does NOT match the quote!");
 
-    /* --- 5. no measured file may appear on the blacklist ----------------- */
+    /* --- 6. no measured file may appear on the blacklist ----------------- */
     charra_log_info("[" LOG_NAME "] Checking file hashes against the "
                     "blacklist ...");
     blacklist_ok = charra_verify_log_file_hashes_not_blacklisted(
@@ -890,8 +978,8 @@ static bool charra_rp_appraise_evidence(
             blacklist_ok ? "not blacklisted!" : "BLACKLISTED!");
 
 done:;
-    const bool appraisal_ok = signature_ok && nonce_ok && entries_ok &&
-                              pcr_ok && blacklist_ok;
+    const bool appraisal_ok = ekak_ok && signature_ok && nonce_ok &&
+                              entries_ok && pcr_ok && blacklist_ok;
     charra_log_info("[" LOG_NAME "] +----------------------------+");
     if (appraisal_ok) {
         charra_log_info("[" LOG_NAME "] |  RP Appraisal Successful   |");
@@ -1069,12 +1157,18 @@ static CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
     memcpy(ev.tpm2_public_key, last_response.tpm2_public_key,
             last_response.tpm2_public_key_len);
 
-    /* EK_a/AK_a: Attester's Verifier-issued AK cert, forwarded from
-     * /attest's response -- RP never decrypts it itself. */
+    /* EK_a/AK_a: the Attester's AK certificate issued by THIS Verifier's
+     * own CA -- substituted from RP's own per-Verifier cache
+     * (attester_ak_cert_by_verifier_der[], populated by ensure_attester_
+     * identity_certified_by_verifier()), not whatever last_response itself
+     * carries. Only RP knows which certificate belongs to which Verifier
+     * now that each Verifier has an independent CA; the certificate's
+     * validity depends only on its own CA signature, not on who forwarded
+     * the bytes, so this is not a trust shortcut. */
     ev.ak_certificate_attester_by_verifier_len =
-            last_response.ak_certificate_attester_by_verifier_len;
+            attester_ak_cert_by_verifier_der_len[verifier_index];
     ev.ak_certificate_attester_by_verifier =
-            last_response.ak_certificate_attester_by_verifier;
+            attester_ak_cert_by_verifier_der[verifier_index];
 
     /* RP-issued cert, forwarded alongside the Verifier-issued one above */
     ev.ak_certificate_attester_by_rp_len =
@@ -1207,7 +1301,7 @@ static coap_response_t coap_certify_ak_of_attester_deliver_response_handler(
  * Factors out the create-context/create-session/build-and-send-PDU/wait-
  * for-response/tear-down sequence every one-shot RP-as-client exchange in
  * this file repeats (ensure_rp_ak_certificate()'s /certify_ak call,
- * rp_perform_qualification_handshake()'s /qualify and /qualify/submit).
+ * rp_perform_qualification_handshake_once()'s /qualify and /qualify/submit).
  * response_handler is expected to record the exchange's actual content-
  * level result (parsed data, or a parse failure) in its own dedicated
  * global, the same way coap_certify_ak_response_handler() does for
@@ -1436,31 +1530,20 @@ static coap_response_t coap_qualify_submit_response_handler(
     return COAP_RESPONSE_OK;
 }
 
-/**
- * @brief Path of verifier_index's qualification cache file
- * (state/relying-party/qualification-cache/rp-qualification-until-<port>.txt),
- * same per-port-filename convention invalidate_cached_rp_ak_certificate()
- * uses for the AK certificate cache.
- */
-static void rp_qualification_cache_path(
-        int verifier_index, char* path_out, size_t path_out_len) {
-    snprintf(path_out, path_out_len,
-            "state/relying-party/qualification-cache/"
-            "rp-qualification-until-%u.txt",
-            verifiers[verifier_index].port_number);
-}
+/* Single, not per-port, cache file path -- qualification is Verifier-
+ * agnostic now (see rp_qualified_until's comment). */
+static const char* rp_qualification_cache_path =
+        "state/relying-party/qualification-cache/rp-qualification-until.txt";
 
 /**
- * @brief Read verifier_index's cached qualification expiry from disk.
+ * @brief Read the cached qualification expiry from disk.
  *
  * @returns the cached expires_at, or 0 if the file doesn't exist or is
  * unparseable (treated the same as "no cache" -- not an error, a fresh
  * deployment or a first run simply hasn't qualified yet).
  */
-static time_t rp_qualification_cache_load(int verifier_index) {
-    char path[96] = {0};
-    rp_qualification_cache_path(verifier_index, path, sizeof(path));
-    FILE* f = fopen(path, "r");
+static time_t rp_qualification_cache_load(void) {
+    FILE* f = fopen(rp_qualification_cache_path, "r");
     if (f == NULL) {
         return 0;
     }
@@ -1474,229 +1557,242 @@ static time_t rp_qualification_cache_load(int verifier_index) {
 }
 
 /**
- * @brief Persist verifier_index's freshly-earned qualification expiry to
- * disk, so a later process invocation can skip the handshake while it's
- * still valid.
+ * @brief Persist RP's freshly-earned qualification expiry to disk, so a
+ * later process invocation can skip the handshake while it's still valid.
  */
-static void rp_qualification_cache_save(int verifier_index, time_t expires_at) {
-    char path[96] = {0};
-    rp_qualification_cache_path(verifier_index, path, sizeof(path));
-    FILE* f = fopen(path, "w");
+static void rp_qualification_cache_save(time_t expires_at) {
+    FILE* f = fopen(rp_qualification_cache_path, "w");
     if (f == NULL) {
         charra_log_error(
                 "[" LOG_NAME "] Could not write qualification cache '%s'.",
-                path);
+                rp_qualification_cache_path);
         return;
     }
     fprintf(f, "%lld\n", (long long)expires_at);
     fclose(f);
 }
 
-static void invalidate_cached_rp_qualification(int verifier_index) {
-    char path[96] = {0};
-    rp_qualification_cache_path(verifier_index, path, sizeof(path));
-    remove(path);
-    rp_qualified_until[verifier_index] = 0;
+static void invalidate_cached_rp_qualification(void) {
+    remove(rp_qualification_cache_path);
+    rp_qualified_until = 0;
 }
 
-static CHARRA_RC rp_perform_qualification_handshake(int verifier_index) {
+static CHARRA_RC rp_perform_qualification_handshake_once(int num_verifiers) {
     /* AK certificate readiness is orthogonal to the qualification cache
-     * below and always needed downstream (charra_rp_build_evidence_message()
-     * reads rp_ak_cert_der[verifier_index], regardless of whether the
-     * /qualify round trip itself runs) -- this call is cheap on a cache hit
-     * (ensure_rp_ak_certificate() has its own on-disk cache, checked before
-     * any network round trip), so it always runs, even when the
-     * qualification short-circuit below skips everything else. */
-    CHARRA_RC keypair_and_cert_rc = ensure_rp_ak_certificate(verifier_index);
-    if (keypair_and_cert_rc != CHARRA_RC_SUCCESS) {
-        charra_log_error(
-                "[" LOG_NAME "] Cannot run qualification handshake: RP AK "
-                "certificate for this Verifier not provisioned.");
-        return keypair_and_cert_rc;
-    }
+     * below: /qualify/submit needs an AK cert issued by whichever Verifier
+     * we end up qualifying against, so it's provisioned per-candidate
+     * inside the loop below, not once up front. */
 
     /* Cache short-circuit: if we already hold a still-valid qualification
-     * for this Verifier -- either from earlier this process, or loaded just
-     * now from a previous process run's cache file -- skip the /qualify +
-     * /qualify/submit round trip itself. Re-checked against the wall clock
-     * on every call (not just once), so this stays correct even if a single
-     * process run happens to straddle the expiry moment. This is what makes
-     * CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS actually matter: without it,
-     * RP re-qualified unconditionally on every single attestation cycle
-     * regardless of how much of a previous grant was left. See
-     * CHARRA_V2_NOTES.md. */
+     * -- either from earlier this process, or loaded just now from a
+     * previous process run's cache file -- skip the /qualify +
+     * /qualify/submit round trip entirely. Re-checked against the wall
+     * clock on every call (not just once), so this stays correct even if a
+     * single process run happens to straddle the expiry moment. This is
+     * what makes CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS actually matter:
+     * without it, RP re-qualified unconditionally on every single
+     * attestation cycle regardless of how much of a previous grant was
+     * left. See CHARRA_V2_NOTES.md. */
     time_t now = time(NULL);
-    if (rp_qualified_until[verifier_index] <= now) {
-        rp_qualified_until[verifier_index] =
-                rp_qualification_cache_load(verifier_index);
+    if (rp_qualified_until <= now) {
+        rp_qualified_until = rp_qualification_cache_load();
     }
-    if (rp_qualified_until[verifier_index] > now) {
+    if (rp_qualified_until > now) {
         charra_log_info(
-                "[" LOG_NAME "] Verifier n° %d (port %u): cached "
-                "qualification still valid for %ld more second(s), "
-                "skipping /qualify.",
-                verifier_index + 1, verifiers[verifier_index].port_number,
-                (long)(rp_qualified_until[verifier_index] - now));
+                "[" LOG_NAME "] Cached qualification still valid for %ld "
+                "more second(s), skipping /qualify.",
+                (long)(rp_qualified_until - now));
         return CHARRA_RC_SUCCESS;
     }
 
-    const verifier_info* verifier = &verifiers[verifier_index];
-
-    charra_log_info(
-            "[" LOG_NAME "]  +------------ RP Qualification (Verifier "
-            "n° %d, port %u) --------------+",
-            verifier_index + 1, verifier->port_number);
-
     CHARRA_RC result = CHARRA_RC_ERROR;
-    uint8_t* redacted_log = NULL;
-    uint32_t redacted_log_len = 0;
 
     /* Held across the whole handshake below, not just individual field
      * accesses: every one of qualify_challenge_log/_len/_salt,
      * qualify_response_rc, processing_qualify_response,
      * qualify_submit_qualified, and processing_qualify_submit_response is
-     * a single shared global, and this function runs concurrently, one
-     * call per Verifier thread -- see rp_qualification_mutex's own
-     * comment for why. Mirrors ensure_rp_ak_certificate()'s
-     * rp_ak_reprovision_mutex, held across its own /certify_ak round trip
-     * for the identical reason. */
+     * a single shared global -- see rp_qualification_mutex's own comment
+     * for why this still matters even though the handshake itself now
+     * runs once per cycle. */
     pthread_mutex_lock(&rp_qualification_mutex);
 
-    /* --- 1. fetch a fresh challenge --- */
-    qualify_response_rc = CHARRA_RC_ERROR;
-    result = rp_coap_fetch(verifier->ip_address, verifier->port_number,
-            "qualify", NULL, 0, coap_qualify_response_handler,
-            &processing_qualify_response);
-    if (result != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] /qualify request failed.");
-        goto done;
-    }
-    if (qualify_response_rc != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] /qualify response invalid.");
-        result = qualify_response_rc;
-        goto done;
-    }
-    charra_log_info("[" LOG_NAME "] Received a %u-byte challenge log.",
-            qualify_challenge_log_len);
+    /* Try each Verifier in order, stopping at the first one reachable at
+     * the network level for /qualify -- a transport failure moves on to
+     * the next candidate, but a received verdict (qualified or not) stops
+     * the search: the qualification ledger is shared, so the verdict would
+     * be the same everywhere. */
+    for (int verifier_index = 0; verifier_index < num_verifiers;
+            ++verifier_index) {
+        CHARRA_RC keypair_and_cert_rc =
+                ensure_rp_ak_certificate(verifier_index);
+        if (keypair_and_cert_rc != CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] Verifier n° %d (port %u): RP AK "
+                    "certificate not provisioned, trying next Verifier.",
+                    verifier_index + 1, verifiers[verifier_index].port_number);
+            continue;
+        }
 
-    /* --- 2. redact it with the exact same pipeline real evidence uses --- */
-    result = charra_sdk_redact_ima_log(qualify_challenge_log,
-            qualify_challenge_log_len, qualify_challenge_salt, &redacted_log,
-            &redacted_log_len);
-    if (result != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not redact the qualification "
-                         "challenge log.");
-        goto done;
-    }
+        const verifier_info* verifier = &verifiers[verifier_index];
+        uint8_t* redacted_log = NULL;
+        uint32_t redacted_log_len = 0;
 
-    /* --- 3. replay the redacted log into its PCR digest --- */
-    uint8_t submitted_pcr_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
-    result = charra_replay_ima_log(redacted_log, redacted_log_len,
-            CHARRA_IMA_PCR_INDEX, submitted_pcr_digest);
-    if (result != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not replay the redacted "
-                         "challenge log.");
-        goto done;
-    }
+        charra_log_info(
+                "[" LOG_NAME "]  +------------ RP Qualification (Verifier "
+                "n° %d, port %u) --------------+",
+                verifier_index + 1, verifier->port_number);
 
-    /* --- 4. sign the PCR digest with RP's TPM-resident AK, same
-     * short-lived-connection pattern charra_rp_build_evidence_message()
-     * uses for Quote_r --- */
-    uint8_t rp_signature[CHARRA_RSA_SIGNATURE_LEN] = {0};
-    pthread_mutex_lock(&rp_tpm_mutex);
-    ESYS_CONTEXT* sign_esys_ctx = NULL;
-    TSS2_TCTI_CONTEXT* sign_tcti_ctx = NULL;
-    ESYS_TR sign_ek_handle = ESYS_TR_NONE;
-    ESYS_TR sign_ak_handle = ESYS_TR_NONE;
-    TPM2B_NAME* sign_ak_name = NULL;
-    result = rp_open_tpm_and_load_ak(&sign_esys_ctx, &sign_tcti_ctx,
-            &sign_ek_handle, &sign_ak_handle, &sign_ak_name);
-    if (result != CHARRA_RC_SUCCESS) {
+        /* --- 1. fetch a fresh challenge --- */
+        qualify_response_rc = CHARRA_RC_ERROR;
+        result = rp_coap_fetch(verifier->ip_address, verifier->port_number,
+                "qualify", NULL, 0, coap_qualify_response_handler,
+                &processing_qualify_response);
+        if (result != CHARRA_RC_SUCCESS || qualify_response_rc != CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] Verifier n° %d (port %u) unreachable "
+                    "for /qualify, trying next Verifier.",
+                    verifier_index + 1, verifier->port_number);
+            continue;
+        }
+        charra_log_info("[" LOG_NAME "] Received a %u-byte challenge log.",
+                qualify_challenge_log_len);
+
+        /* --- 2. redact it with the exact same pipeline real evidence uses --- */
+        result = charra_sdk_redact_ima_log(qualify_challenge_log,
+                qualify_challenge_log_len, qualify_challenge_salt,
+                &redacted_log, &redacted_log_len);
+        if (result != CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Could not redact the "
+                             "qualification challenge log.");
+            goto done;
+        }
+
+        /* --- 3. replay the redacted log into its PCR digest --- */
+        uint8_t submitted_pcr_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
+        result = charra_replay_ima_log(redacted_log, redacted_log_len,
+                CHARRA_IMA_PCR_INDEX, submitted_pcr_digest);
+        if (result != CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Could not replay the redacted "
+                             "challenge log.");
+            charra_free_if_not_null(redacted_log);
+            goto done;
+        }
+
+        /* --- 4. sign the PCR digest with RP's TPM-resident AK, same
+         * short-lived-connection pattern charra_rp_build_evidence_message()
+         * uses for Quote_r --- */
+        uint8_t rp_signature[CHARRA_RSA_SIGNATURE_LEN] = {0};
+        pthread_mutex_lock(&rp_tpm_mutex);
+        ESYS_CONTEXT* sign_esys_ctx = NULL;
+        TSS2_TCTI_CONTEXT* sign_tcti_ctx = NULL;
+        ESYS_TR sign_ek_handle = ESYS_TR_NONE;
+        ESYS_TR sign_ak_handle = ESYS_TR_NONE;
+        TPM2B_NAME* sign_ak_name = NULL;
+        result = rp_open_tpm_and_load_ak(&sign_esys_ctx, &sign_tcti_ctx,
+                &sign_ek_handle, &sign_ak_handle, &sign_ak_name);
+        if (result != CHARRA_RC_SUCCESS) {
+            pthread_mutex_unlock(&rp_tpm_mutex);
+            charra_log_error("[" LOG_NAME "] Could not open TPM connection "
+                             "to sign the qualification PCR digest.");
+            charra_free_if_not_null(redacted_log);
+            goto done;
+        }
+        Esys_Free(sign_ak_name);
+
+        result = charra_identity_key_mgr_sign(sign_esys_ctx, sign_ak_handle,
+                submitted_pcr_digest, sizeof(submitted_pcr_digest),
+                rp_signature);
+
+        Esys_FlushContext(sign_esys_ctx, sign_ak_handle);
+        Esys_FlushContext(sign_esys_ctx, sign_ek_handle);
+        Esys_Finalize(&sign_esys_ctx);
+        Tss2_TctiLdr_Finalize(&sign_tcti_ctx);
         pthread_mutex_unlock(&rp_tpm_mutex);
-        charra_log_error("[" LOG_NAME "] Could not open TPM connection to "
-                         "sign the qualification PCR digest.");
+
+        if (result != CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] Could not sign the qualification PCR "
+                    "digest.");
+            charra_free_if_not_null(redacted_log);
+            goto done;
+        }
+
+        /* --- 5. submit --- */
+        msg_qualify_submit_request_dto submit_req = {
+                .submitted_redacted_log_len = redacted_log_len,
+                .submitted_redacted_log = redacted_log,
+                .rp_signature_len = sizeof(rp_signature),
+                .rp_public_key_len = rp_public_key_der_len,
+                .ak_certificate_rp_len = rp_ak_cert_der_len[verifier_index],
+                .ak_certificate_rp = rp_ak_cert_der[verifier_index],
+        };
+        memcpy(submit_req.submitted_pcr_digest, submitted_pcr_digest,
+                sizeof(submitted_pcr_digest));
+        memcpy(submit_req.rp_signature, rp_signature, sizeof(rp_signature));
+        memcpy(submit_req.rp_public_key, rp_public_key_der,
+                rp_public_key_der_len);
+
+        uint8_t* submit_buf = NULL;
+        uint32_t submit_buf_len = 0;
+        result = charra_marshal_qualify_submit_request(
+                &submit_req, &submit_buf_len, &submit_buf);
+        if (result != CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] Could not marshal /qualify/submit "
+                    "request.");
+            charra_free_if_not_null(redacted_log);
+            goto done;
+        }
+
+        result = rp_coap_fetch(verifier->ip_address, verifier->port_number,
+                "qualify_submit", submit_buf, submit_buf_len,
+                coap_qualify_submit_response_handler,
+                &processing_qualify_submit_response);
+        charra_free_if_not_null(submit_buf);
+        if (result != CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] Verifier n° %d (port %u) unreachable "
+                    "for /qualify_submit, trying next Verifier.",
+                    verifier_index + 1, verifier->port_number);
+            charra_free_if_not_null(redacted_log);
+            continue;
+        }
+
+        if (qualify_submit_qualified) {
+            charra_log_info(
+                    "[" LOG_NAME "] |  RP QUALIFIED with Verifier n° %d "
+                    "(port %u)  |",
+                    verifier_index + 1, verifier->port_number);
+            time_t expires_at = now + CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS;
+            rp_qualified_until = expires_at;
+            rp_qualification_cache_save(expires_at);
+            charra_log_info(
+                    "[" LOG_NAME "] Qualification valid until %ld (%ld "
+                    "second(s) from now); shared with every other "
+                    "Verifier.",
+                    (long)expires_at,
+                    (long)CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS);
+            result = CHARRA_RC_SUCCESS;
+        } else {
+            charra_log_error(
+                    "[" LOG_NAME
+                    "] |  RP NOT QUALIFIED with Verifier n° %d (port %u)  |",
+                    verifier_index + 1, verifier->port_number);
+            result = CHARRA_RC_VERIFICATION_FAILED;
+        }
+        charra_free_if_not_null(redacted_log);
         goto done;
     }
-    Esys_Free(sign_ak_name);
 
-    result = charra_identity_key_mgr_sign(sign_esys_ctx, sign_ak_handle,
-            submitted_pcr_digest, sizeof(submitted_pcr_digest), rp_signature);
-
-    Esys_FlushContext(sign_esys_ctx, sign_ak_handle);
-    Esys_FlushContext(sign_esys_ctx, sign_ek_handle);
-    Esys_Finalize(&sign_esys_ctx);
-    Tss2_TctiLdr_Finalize(&sign_tcti_ctx);
-    pthread_mutex_unlock(&rp_tpm_mutex);
-
-    if (result != CHARRA_RC_SUCCESS) {
-        charra_log_error(
-                "[" LOG_NAME "] Could not sign the qualification PCR "
-                "digest.");
-        goto done;
-    }
-
-    /* --- 5. submit --- */
-    msg_qualify_submit_request_dto submit_req = {
-            .submitted_redacted_log_len = redacted_log_len,
-            .submitted_redacted_log = redacted_log,
-            .rp_signature_len = sizeof(rp_signature),
-            .rp_public_key_len = rp_public_key_der_len,
-            .ak_certificate_rp_len = rp_ak_cert_der_len[verifier_index],
-            .ak_certificate_rp = rp_ak_cert_der[verifier_index],
-    };
-    memcpy(submit_req.submitted_pcr_digest, submitted_pcr_digest,
-            sizeof(submitted_pcr_digest));
-    memcpy(submit_req.rp_signature, rp_signature, sizeof(rp_signature));
-    memcpy(submit_req.rp_public_key, rp_public_key_der, rp_public_key_der_len);
-
-    uint8_t* submit_buf = NULL;
-    uint32_t submit_buf_len = 0;
-    result = charra_marshal_qualify_submit_request(
-            &submit_req, &submit_buf_len, &submit_buf);
-    if (result != CHARRA_RC_SUCCESS) {
-        charra_log_error(
-                "[" LOG_NAME "] Could not marshal /qualify/submit request.");
-        goto done;
-    }
-
-    result = rp_coap_fetch(verifier->ip_address, verifier->port_number,
-            "qualify_submit", submit_buf, submit_buf_len,
-            coap_qualify_submit_response_handler,
-            &processing_qualify_submit_response);
-    charra_free_if_not_null(submit_buf);
-    if (result != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] /qualify/submit request failed.");
-        goto done;
-    }
-
-    if (qualify_submit_qualified) {
-        charra_log_info(
-                "[" LOG_NAME "] |  RP QUALIFIED with Verifier n° %d "
-                "(port %u)  |",
-                verifier_index + 1, verifier->port_number);
-        time_t expires_at = now + CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS;
-        rp_qualified_until[verifier_index] = expires_at;
-        rp_qualification_cache_save(verifier_index, expires_at);
-        charra_log_info(
-                "[" LOG_NAME "] Qualification with Verifier n° %d (port "
-                "%u) valid until %ld (%ld second(s) from now).",
-                verifier_index + 1, verifier->port_number, (long)expires_at,
-                (long)CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS);
-        result = CHARRA_RC_SUCCESS;
-    } else {
-        charra_log_error(
-                "[" LOG_NAME
-                "] |  RP NOT QUALIFIED with Verifier n° %d (port %u)  |",
-                verifier_index + 1, verifier->port_number);
-        result = CHARRA_RC_VERIFICATION_FAILED;
-    }
+    charra_log_error("[" LOG_NAME "] Could not qualify: no Verifier was "
+                     "reachable for /qualify.");
+    result = CHARRA_RC_ERROR;
 
 done:
     charra_free_if_not_null(qualify_challenge_log);
     qualify_challenge_log = NULL;
     qualify_challenge_log_len = 0;
     pthread_mutex_unlock(&rp_qualification_mutex);
-    charra_free_if_not_null(redacted_log);
     return result;
 }
 
@@ -1787,20 +1883,20 @@ static void invalidate_cached_rp_ak_certificate(int verifier_index) {
     rp_ak_cert_was_cached[verifier_index] = false;
 }
 
-static CHARRA_RC ensure_attester_identity_certified(int relay_verifier_index) {
-    if (attester_identity_certified) {
+static CHARRA_RC ensure_attester_identity_provisioned(void) {
+    if (attester_identity_provisioned) {
         return CHARRA_RC_SUCCESS;
     }
     if (charra_io_file_exists(attester_ak_cert_rp_cache_path) ==
             CHARRA_RC_SUCCESS) {
         charra_log_info("[" LOG_NAME "] Attester identity already "
                         "provisioned (cached); skipping re-certification.");
-        attester_identity_certified = true;
+        attester_identity_provisioned = true;
         return CHARRA_RC_SUCCESS;
     }
 
     charra_log_info("[" LOG_NAME "]  +------------ Attester Identity "
-                    "Certification --------------+");
+                    "Provisioning --------------+");
 
     CHARRA_RC result = CHARRA_RC_ERROR;
 
@@ -2117,29 +2213,121 @@ static CHARRA_RC ensure_attester_identity_certified(int relay_verifier_index) {
     }
     charra_free_if_not_null(rp_signed_cert_der);
 
-    /* --- 4. Verifier-CA track: relay to ONE Verifier's existing
-     * /certify_ak (they share one CA key -- see CHARRA_V2_NOTES.md -- so a
-     * single Verifier's issuance is enough for every Verifier's own
-     * chain-validation to accept it later). --------------------------- */
+    /* Cache the fetched identity itself (not just the RP-signed cert) --
+     * ensure_attester_identity_certified_by_verifier() below reuses this
+     * for every Verifier rather than re-FETCHing per Verifier. Deep copy:
+     * `identity` is a local about to go out of scope. */
+    attester_identity_cached = identity;
+    attester_identity_cached.ek_certificate = NULL;
+    if (identity.ek_certificate_len > 0) {
+        attester_identity_cached.ek_certificate =
+                malloc(identity.ek_certificate_len);
+        if (attester_identity_cached.ek_certificate == NULL) {
+            charra_log_error("[" LOG_NAME "] Could not cache Attester "
+                             "identity for per-Verifier certification.");
+            charra_free_if_not_null(identity.ek_certificate);
+            return CHARRA_RC_ERROR;
+        }
+        memcpy(attester_identity_cached.ek_certificate, identity.ek_certificate,
+                identity.ek_certificate_len);
+        attester_identity_cached.ek_certificate_len = identity.ek_certificate_len;
+    }
+    charra_free_if_not_null(identity.ek_certificate);
+
+    charra_log_info(
+            "[" LOG_NAME "] Attester identity provisioned (RP's own CA); "
+            "ready for per-Verifier certification.");
+    attester_identity_provisioned = true;
+    return CHARRA_RC_SUCCESS;
+}
+
+static CHARRA_RC ensure_attester_identity_certified_by_verifier(
+        int verifier_index) {
+    if (attester_ak_cert_by_verifier_ready[verifier_index]) {
+        return CHARRA_RC_SUCCESS;
+    }
+
+    CHARRA_RC result = ensure_attester_identity_provisioned();
+    if (result != CHARRA_RC_SUCCESS) {
+        return result;
+    }
+
+    const char* verifier_host = verifiers[verifier_index].ip_address;
+    unsigned int verifier_port = verifiers[verifier_index].port_number;
+
+    char cert_path[112] = {0};
+    snprintf(cert_path, sizeof(cert_path),
+            "state/relying-party/attester-ak-certificates/"
+            "attester-ak-certificate-verifier-%u.der",
+            verifier_port);
+
+    if (charra_io_file_exists(cert_path) == CHARRA_RC_SUCCESS) {
+        char* cert_buf = NULL;
+        size_t cert_buf_len = 0;
+        if ((result = charra_io_read_file(cert_path, &cert_buf,
+                     &cert_buf_len)) != CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Could not read cached "
+                             "Attester AK certificate for this Verifier.");
+            return result;
+        }
+        uint8_t* cert_der = malloc(cert_buf_len);
+        if (cert_der == NULL) {
+            charra_io_free_file_buffer(&cert_buf);
+            return CHARRA_RC_ERROR;
+        }
+        memcpy(cert_der, cert_buf, cert_buf_len);
+        charra_io_free_file_buffer(&cert_buf);
+
+        mbedtls_x509_crt cached_cert;
+        mbedtls_x509_crt_init(&cached_cert);
+        if (mbedtls_x509_crt_parse(&cached_cert, cert_der, cert_buf_len) ==
+                0) {
+            charra_log_info("[" LOG_NAME "] Reloading previously issued "
+                            "Attester AK certificate for Verifier %s:%u "
+                            "(cached, expires in %ld day(s)).",
+                    verifier_host, verifier_port,
+                    charra_crypto_x509_days_until_expiry(&cached_cert));
+        } else {
+            charra_log_info("[" LOG_NAME "] Reloading previously issued "
+                            "Attester AK certificate for Verifier %s:%u "
+                            "(cached).",
+                    verifier_host, verifier_port);
+        }
+        mbedtls_x509_crt_free(&cached_cert);
+
+        attester_ak_cert_by_verifier_der[verifier_index] = cert_der;
+        attester_ak_cert_by_verifier_der_len[verifier_index] =
+                (uint32_t)cert_buf_len;
+        attester_ak_cert_by_verifier_ready[verifier_index] = true;
+        return CHARRA_RC_SUCCESS;
+    }
+
+    charra_log_info("[" LOG_NAME "]  +------------ Attester Identity "
+                    "Certification (Verifier %s:%u) --------------+",
+            verifier_host, verifier_port);
+
+    pthread_mutex_lock(&attester_identity_relay_mutex);
+
     msg_certify_ak_request_dto verifier_req = {0};
     verifier_req.kind = CHARRA_CERTIFY_AK_CHALLENGE;
-    verifier_req.ek_certificate = identity.ek_certificate;
-    verifier_req.ek_certificate_len = identity.ek_certificate_len;
-    verifier_req.ak_public_key_len = identity.ak_public_key_len;
-    memcpy(verifier_req.ak_public_key, identity.ak_public_key,
-            identity.ak_public_key_len);
-    verifier_req.ak_name_len = identity.ak_name_len;
-    memcpy(verifier_req.ak_name, identity.ak_name, identity.ak_name_len);
+    verifier_req.subject = CHARRA_CERTIFY_AK_SUBJECT_ATTESTER;
+    verifier_req.ek_certificate = attester_identity_cached.ek_certificate;
+    verifier_req.ek_certificate_len =
+            attester_identity_cached.ek_certificate_len;
+    verifier_req.ak_public_key_len = attester_identity_cached.ak_public_key_len;
+    memcpy(verifier_req.ak_public_key, attester_identity_cached.ak_public_key,
+            attester_identity_cached.ak_public_key_len);
+    verifier_req.ak_name_len = attester_identity_cached.ak_name_len;
+    memcpy(verifier_req.ak_name, attester_identity_cached.ak_name,
+            attester_identity_cached.ak_name_len);
 
     msg_certify_ak_response_dto verifier_challenge = {0};
     result = rp_certify_ak_exchange(
-            verifiers[relay_verifier_index].ip_address,
-            verifiers[relay_verifier_index].port_number, &verifier_req,
-            &verifier_challenge);
+            verifier_host, verifier_port, &verifier_req, &verifier_challenge);
     if (result != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Relayed /certify_ak CHALLENGE to "
                          "the Verifier failed.");
-        charra_free_if_not_null(identity.ek_certificate);
+        pthread_mutex_unlock(&attester_identity_relay_mutex);
         return result;
     }
 
@@ -2162,7 +2350,7 @@ static CHARRA_RC ensure_attester_identity_certified(int relay_verifier_index) {
             &activate_req, &activate_buf_len, &activate_buf);
     if (result != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not marshal ACTIVATE request.");
-        charra_free_if_not_null(identity.ek_certificate);
+        pthread_mutex_unlock(&attester_identity_relay_mutex);
         return result;
     }
 
@@ -2181,7 +2369,7 @@ static CHARRA_RC ensure_attester_identity_certified(int relay_verifier_index) {
     if (result != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Attester could not activate the "
                          "Verifier's challenge.");
-        charra_free_if_not_null(identity.ek_certificate);
+        pthread_mutex_unlock(&attester_identity_relay_mutex);
         return result;
     }
     charra_log_info("[" LOG_NAME "] Attester activated the Verifier's "
@@ -2191,35 +2379,40 @@ static CHARRA_RC ensure_attester_identity_certified(int relay_verifier_index) {
     /* --- CONFIRM on the Attester's behalf, echoing its secret --- */
     msg_certify_ak_request_dto verifier_confirm = {0};
     verifier_confirm.kind = CHARRA_CERTIFY_AK_CONFIRM;
-    verifier_confirm.ek_certificate = identity.ek_certificate;
-    verifier_confirm.ek_certificate_len = identity.ek_certificate_len;
+    verifier_confirm.ek_certificate = attester_identity_cached.ek_certificate;
+    verifier_confirm.ek_certificate_len =
+            attester_identity_cached.ek_certificate_len;
     verifier_confirm.secret_len = activate_credential_response.secret_len;
     memcpy(verifier_confirm.secret, activate_credential_response.secret,
             activate_credential_response.secret_len);
 
     msg_certify_ak_response_dto verifier_cert_response = {0};
-    result = rp_certify_ak_exchange(
-            verifiers[relay_verifier_index].ip_address,
-            verifiers[relay_verifier_index].port_number, &verifier_confirm,
-            &verifier_cert_response);
-    charra_free_if_not_null(identity.ek_certificate);
+    result = rp_certify_ak_exchange(verifier_host, verifier_port,
+            &verifier_confirm, &verifier_cert_response);
     if (result != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Relayed /certify_ak CONFIRM to the "
                          "Verifier failed.");
+        pthread_mutex_unlock(&attester_identity_relay_mutex);
         return result;
     }
     if (verifier_cert_response.ak_certificate_len == 0) {
         charra_log_error("[" LOG_NAME "] Verifier's CONFIRM returned no "
                          "certificate for the Attester.");
         charra_free_if_not_null(verifier_cert_response.ak_certificate);
+        pthread_mutex_unlock(&attester_identity_relay_mutex);
         return CHARRA_RC_ERROR;
     }
 
     charra_log_info(
             "[" LOG_NAME "] Verifier certified the Attester's AK (relayed).");
 
-    /* --- deliver the plaintext certificate; the ACTIVATE leg above already
-     * supplied the possession proof. ------------------------------------ */
+    /* --- deliver a copy to the Attester too, for its own records. RP
+     * itself is what actually forwards the right certificate to each
+     * Verifier during /appraise (charra_rp_build_evidence_message()
+     * substitutes attester_ak_cert_by_verifier_der[] directly), so this
+     * leg is informational only now, not load-bearing -- non-fatal on
+     * failure, and harmless if a later Verifier's copy overwrites it
+     * (attester.c caches only the most recent one). --------------------- */
     msg_certify_ak_of_attester_request_dto deliver_verifier_req = {0};
     deliver_verifier_req.kind = CHARRA_CERTIFY_AK_OF_ATTESTER_DELIVER_VERIFIER;
     deliver_verifier_req.ak_certificate_len =
@@ -2228,31 +2421,47 @@ static CHARRA_RC ensure_attester_identity_certified(int relay_verifier_index) {
 
     uint8_t* deliver_verifier_buf = NULL;
     uint32_t deliver_verifier_buf_len = 0;
-    result = charra_marshal_certify_ak_of_attester_request(&deliver_verifier_req,
-            &deliver_verifier_buf_len, &deliver_verifier_buf);
-    charra_free_if_not_null(verifier_cert_response.ak_certificate);
-    if (result != CHARRA_RC_SUCCESS) {
+    if (charra_marshal_certify_ak_of_attester_request(&deliver_verifier_req,
+                &deliver_verifier_buf_len, &deliver_verifier_buf) !=
+            CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not marshal DELIVER_VERIFIER "
-                         "request.");
+                         "request (non-fatal).");
+    } else if (rp_coap_fetch(attester_host, attester_port,
+                       "certify_ak_of_attester", deliver_verifier_buf,
+                       deliver_verifier_buf_len,
+                       coap_certify_ak_of_attester_deliver_response_handler,
+                       &processing_certify_ak_of_attester_deliver_response) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] DELIVER_VERIFIER round trip to the "
+                         "Attester failed (non-fatal -- RP already holds "
+                         "the certificate itself).");
+    }
+    free(deliver_verifier_buf);
+
+    pthread_mutex_unlock(&attester_identity_relay_mutex);
+
+    if ((result = charra_io_write_file(cert_path,
+                 verifier_cert_response.ak_certificate,
+                 verifier_cert_response.ak_certificate_len)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not cache Attester AK "
+                         "certificate for this Verifier.");
+        charra_free_if_not_null(verifier_cert_response.ak_certificate);
         return result;
     }
 
-    result = rp_coap_fetch(attester_host, attester_port,
-            "certify_ak_of_attester", deliver_verifier_buf,
-            deliver_verifier_buf_len,
-            coap_certify_ak_of_attester_deliver_response_handler,
-            &processing_certify_ak_of_attester_deliver_response);
-    free(deliver_verifier_buf);
-    if (result != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] DELIVER_VERIFIER round trip to the "
-                         "Attester failed.");
-        return result;
-    }
+    attester_ak_cert_by_verifier_der[verifier_index] =
+            verifier_cert_response.ak_certificate;
+    attester_ak_cert_by_verifier_der_len[verifier_index] =
+            verifier_cert_response.ak_certificate_len;
+    attester_ak_cert_by_verifier_ready[verifier_index] = true;
 
     charra_log_info(
-            "[" LOG_NAME "] Attester identity fully certified by both CAs "
-            "(RP's own and the Verifier's).");
-    attester_identity_certified = true;
+            "[" LOG_NAME "] Attester's AK certified by Verifier %s:%u "
+            "(%u-byte certificate).",
+            verifier_host, verifier_port,
+            verifier_cert_response.ak_certificate_len);
+
     return CHARRA_RC_SUCCESS;
 }
 
@@ -2621,6 +2830,7 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
      * AFTER the TPM connection below is closed -------------------------- */
     msg_certify_ak_request_dto req = {0};
     req.kind = CHARRA_CERTIFY_AK_CHALLENGE;
+    req.subject = CHARRA_CERTIFY_AK_SUBJECT_RP;
     req.ek_certificate = (uint8_t*)ek_cert_buf;
     req.ek_certificate_len = (uint32_t)ek_cert_buf_len;
     req.ak_public_key_len = sizeof(ak_public);
@@ -3428,21 +3638,30 @@ void* get_attestation_results_thread(void *arg) {
     coap_session_t* coap_session_verifier_appraisal = NULL;
     coap_optlist_t* coap_options_verifier_appraisal = NULL;
 
-    /* RP qualification handshake (/qualify + /qualify/submit) -- Verifier-
-     * local state, same as the AK certificate now is (see
-     * rp_perform_qualification_handshake()'s docstring), so this has to
-     * run against every Verifier, not just verifiers[0]. Also ensures this
-     * Verifier's AK certificate itself (calling ensure_rp_ak_certificate()
-     * internally) before attempting the handshake. Not fatal here if
-     * qualification specifically fails: coap_appraise_handler() on the
-     * Verifier side is the actual enforcement point; a failed handshake
-     * here just means the /appraise call below is expected to come back
-     * rejected. */
-    if (rp_perform_qualification_handshake(current_thread_index) !=
+    /* RP qualification is now handled once, up front, by
+     * get_attestation_results() before any thread starts (see
+     * rp_perform_qualification_handshake_once()) -- the shared
+     * qualification ledger means one Verifier's answer is every Verifier's
+     * answer, so nothing to do here. This thread still needs its OWN
+     * Verifier's AK *certificate* though (orthogonal, still per-Verifier --
+     * charra_rp_build_evidence_message() below only checks rp_ak_cert_
+     * ready[current_thread_index], it doesn't provision it). */
+    if (ensure_rp_ak_certificate(current_thread_index) != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Verifier n° %d (port %u): RP AK certificate "
+                "not provisioned; proceeding to /appraise anyway.",
+                current_thread_index + 1,
+                verifiers[current_thread_index].port_number);
+    }
+
+    /* Symmetric with the above: the Attester's AK certificate, issued by
+     * THIS Verifier's own CA, is also per-Verifier now (see
+     * ensure_attester_identity_certified_by_verifier()'s docstring). */
+    if (ensure_attester_identity_certified_by_verifier(current_thread_index) !=
             CHARRA_RC_SUCCESS) {
         charra_log_error(
-                "[" LOG_NAME "] Verifier n° %d (port %u): qualification "
-                "handshake did not succeed; proceeding to /appraise "
+                "[" LOG_NAME "] Verifier n° %d (port %u): Attester AK "
+                "certificate not provisioned; proceeding to /appraise "
                 "anyway.",
                 current_thread_index + 1,
                 verifiers[current_thread_index].port_number);
@@ -3866,9 +4085,9 @@ void* get_attestation_results_thread(void *arg) {
                             "n\u00b0 %d after rejection (reason: %s) ...",
                     current_thread_index + 1,
                     rejection_reason[current_thread_index]);
-            invalidate_cached_rp_qualification(current_thread_index);
-            CHARRA_RC requalify_rc =
-                    rp_perform_qualification_handshake(current_thread_index);
+            invalidate_cached_rp_qualification();
+            CHARRA_RC requalify_rc = rp_perform_qualification_handshake_once(
+                    rp_num_verifiers_this_cycle);
 
             if (requalify_rc != CHARRA_RC_SUCCESS) {
                 charra_log_error(
@@ -3911,6 +4130,20 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
         return CHARRA_RC_ERROR;
     }
 
+    /* Qualify once, before any verifier thread starts -- the qualification
+     * ledger is shared across all Verifiers (see qualification_state_file_
+     * path in verifier.c), so one Verifier's answer is every Verifier's
+     * answer. No Verifier will accept /appraise without it, so abort here
+     * rather than spawning threads that would all fail identically. */
+    rp_num_verifiers_this_cycle = num_verifiers;
+    if (rp_perform_qualification_handshake_once(num_verifiers) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not qualify with any "
+                         "reachable Verifier; aborting attestation run.");
+        charra_rp_release_evidence();
+        return CHARRA_RC_ERROR;
+    }
+
     CHARRA_RC result = EXIT_FAILURE;
 
     charra_log_info("[" LOG_NAME "] Forwarding (redacted) evidence to the verifiers.");
@@ -3933,17 +4166,17 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
         pthread_join(threads[i], NULL);
     }
 
-    /* Per-Verifier identity readiness, as of right now -- not "did we redo
-     * either this cycle": rp_ak_cert_ready[]/rp_qualified_until[] are both
-     * independently cached (on disk, per-Verifier -- see their own
-     * comments) and only get touched at all when their cache was missing
-     * or expired, so most cycles this just reports cache state untouched
-     * this round. */
+    /* Identity readiness, as of right now -- not "did we redo either this
+     * cycle": rp_ak_cert_ready[] is per-Verifier, rp_qualified_until is now
+     * a single shared value (qualifying is Verifier-agnostic); both are
+     * independently cached on disk and only get touched when their cache
+     * was missing or expired, so most cycles this just reports cache state
+     * untouched this round. */
     int num_not_ready = 0;
     time_t readiness_now = time(NULL);
+    bool qualified = rp_qualified_until > readiness_now;
     for (int i = 0; i < num_verifiers; ++i) {
         bool ak_ready = rp_ak_cert_ready[i];
-        bool qualified = rp_qualified_until[i] > readiness_now;
         if (ak_ready && qualified) {
             charra_log_info(
                     "[" LOG_NAME "] Verifier %d (port %u): ready (AK "

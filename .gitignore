@@ -14,21 +14,35 @@ obj/*
 # All runtime-generated state (regenerated at runtime, mkdir'd by each
 # binary's own main() -- never commit, includes private key material).
 # Split by owner, mirroring the code:
-#   state/verifier/ak-provisioning/       -- AK-certificate issuance ledger,
-#     one file per Verifier port (each Verifier independently certifies and
-#     tracks RP's AK -- see ak_state_file_path in verifier.c)
+#   state/verifier/ak-provisioning/rp/       -- AK-certificate issuance
+#     ledger for RP identities, one file per Verifier port (each Verifier
+#     independently certifies and tracks RP's AK -- see rp_ak_state_file_path
+#     in verifier.c)
+#   state/verifier/ak-provisioning/attester/ -- same, for Attester identities
+#     relayed via RP (see attester_ak_state_file_path in verifier.c) -- kept
+#     separate from the RP ledger above, never the same identity kind
 #   state/verifier/qualification/         -- RP-qualification ledger, one
-#     file per Verifier port (see qualification_state_file_path in
-#     verifier.c)
+#     file SHARED by every Verifier instance (see qualification_state_
+#     file_path in verifier.c) -- qualifying with one Verifier qualifies
+#     with all of them
 #   state/relying-party/identity/         -- RP's own TPM-resident EK
 #     certificate + AK keypair, verifier-agnostic (see rp_ek_cert_cache_path/
 #     rp_ak_public_path/rp_ak_private_path in relying_party.c)
 #   state/relying-party/ak-certificates/  -- per-Verifier AK certificates RP
 #     has been issued, one file per Verifier port (see rp_ak_cert_der in
 #     relying_party.c)
-#   state/relying-party/qualification-cache/ -- RP's own per-Verifier belief
-#     about whether it's still qualified, one file per Verifier port (see
+#   state/relying-party/qualification-cache/ -- RP's own belief about
+#     whether it's still qualified, a single shared file (see
 #     rp_qualified_until in relying_party.c)
+#   state/relying-party/attester-ak-certificates/ -- cached AK certificate
+#     bytes for the Attester's identity: one from RP's own CA, one per
+#     Verifier from that Verifier's CA (see attester_ak_cert_rp_cache_path/
+#     attester_ak_cert_by_verifier_der in relying_party.c)
+#   state/relying-party/ak-provisioning/  -- RP's own issuance ledger for
+#     the identity it acts as a CA for (the Attester's RP-issued AK cert --
+#     see attester_ak_state_file_path in relying_party.c); the certificate
+#     bytes above are a separate cache, this is bookkeeping (serial/expiry/
+#     revocation), same split as state/verifier/ak-provisioning/
 state/
 
 # per-component runtime logs (overwritten on every run)
