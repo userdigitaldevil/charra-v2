@@ -3297,8 +3297,16 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
     req.ek_certificate_len = (uint32_t)ek_cert_buf_len;
     req.ak_public_key_len = sizeof(ak_public);
     memcpy(req.ak_public_key, &ak_public, sizeof(ak_public));
+    /* Copy only the meaningful prefix (size field + size bytes) and
+     * zero the rest: Esys_TR_GetName() leaves the tail of the
+     * TPM2B_NAME allocation uninitialised, and copying the whole
+     * struct put those heap bytes straight onto the wire (caught by
+     * valgrind via libcoap reading them while building the PDU).
+     * The field stays fixed-size, so the wire format is unchanged --
+     * the tail is now deterministic zeros instead of stale heap. */
     req.ak_name_len = sizeof(*ak_name);
-    memcpy(req.ak_name, ak_name, sizeof(*ak_name));
+    memset(req.ak_name, 0, sizeof(req.ak_name));
+    memcpy(req.ak_name, ak_name, sizeof(ak_name->size) + ak_name->size);
     Esys_Free(ak_name);
 
     Esys_FlushContext(esys_ctx, ak_handle);

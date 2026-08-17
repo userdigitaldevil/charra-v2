@@ -1698,9 +1698,19 @@ votes / 11 qualification renewals at `--interval 1 --verifiers 2`, with
 against 75,050 frees over 30.4 MB churned, the 5-block difference being the
 constant `still reachable` libcoap/OpenSSL globals rather than growth. The
 same run before the `last_response` fix would have orphaned roughly 666 KB
-(111 x ~6 KB). Note the run also reports `ERROR SUMMARY: 2 errors from 2
-contexts` — not leaks (leak counts are all zero); uninvestigated, and
-tracked as such rather than claimed clean.
+(111 x ~6 KB). That run also reported `ERROR SUMMARY: 2 errors from
+2 contexts`, which were worth chasing rather than dismissing as
+not-a-leak: **uninitialised heap bytes were being transmitted.**
+`Esys_TR_GetName()` initialises only the first `2 + size` bytes of the
+68-byte `TPM2B_NAME` it allocates, but `attester.c` and `relying_party.c`
+both copied the *whole* struct into their DTO, so ~34 bytes of stale heap
+went onto the wire on every `/certify_ak` CHALLENGE and
+`/certify_ak_of_attester` FETCH — valgrind caught it where libcoap read
+those bytes building the PDU. A minor information-disclosure bug, not a
+crash or a leak. Fixed by copying only the meaningful prefix and zeroing
+the remainder; the field stays fixed-size, so the wire format is unchanged.
+Re-verified: `ERROR SUMMARY: 0 errors from 0 contexts`, leak counts still
+all zero, 3/3 votes.
 
 **Verified live**: 7 daemon cycles, 7/7 unanimous votes, clean SIGINT
 shutdown; with `bin/verifier --qualification-validity 90 --ak-validity 600`
