@@ -142,10 +142,28 @@ CHARRA_RC charra_check_pcr_digest_against_reference(const char* filename,
     }
 
     // allocate memory for the pcr values read from the file
+    /* calloc, not malloc: every slot must be NULL until its own malloc
+     * below actually succeeds, so that if an allocation partway through
+     * the loop fails, free_reference_pcrs() below can safely free()
+     * every slot -- free(NULL) is a no-op, but free()ing an
+     * uninitialized/indeterminate pointer (what malloc's own
+     * moved-in-adjacent-memory garbage would otherwise leave in the
+     * not-yet-allocated slots) is undefined behavior. */
     uint8_t** reference_pcrs =
-            malloc(reference_pcr_selection_len * sizeof(uint8_t*));
+            calloc(reference_pcr_selection_len, sizeof(uint8_t*));
+    if (reference_pcrs == NULL) {
+        charra_log_error(
+                "Could not allocate memory for reference PCR pointers.");
+        return CHARRA_RC_ERROR;
+    }
     for (uint32_t i = 0; i < reference_pcr_selection_len; i++) {
         reference_pcrs[i] = malloc(TPM2_SHA256_DIGEST_SIZE * sizeof(uint8_t));
+        if (reference_pcrs[i] == NULL) {
+            charra_log_error(
+                    "Could not allocate memory for reference PCR %u.", i);
+            free_reference_pcrs(reference_pcrs, reference_pcr_selection_len);
+            return CHARRA_RC_ERROR;
+        }
     }
     char* file_content = NULL;
 
@@ -157,7 +175,13 @@ CHARRA_RC charra_check_pcr_digest_against_reference(const char* filename,
         CHARRA_RC read_result =
                 charra_io_read_file(filename, &file_content, &file_size);
         if (read_result != CHARRA_RC_SUCCESS) {
-            return read_result;
+            /* goto returns, not a plain return: reference_pcrs was already
+             * allocated above and must still be freed on this path -- a
+             * plain return here used to leak it (and every one of its
+             * TPM2_SHA256_DIGEST_SIZE-byte entries) on every failed
+             * reference-PCR-file read. */
+            charra_rc = read_result;
+            goto returns;
         }
 
         pcr_selection_index = 0;
