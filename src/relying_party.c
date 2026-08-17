@@ -31,7 +31,9 @@
 #include "util/crypto_util.h"
 #include "util/io_util.h"
 #include "util/tpm2_util.h"
+#include "rp/rp_coap.h"
 #include "rp/rp_config.h"
+#include "rp/rp_qualification.h"
 #include "rp/rp_shared.h"
 #include "rp/rp_stats.h"
 
@@ -53,7 +55,6 @@ unsigned long rp_max_cycles = 0;
 #define CHARRA_UNUSED __attribute__((unused))
 #define LOG_NAME "relying party"
 // #define LOG_LEVEL_CBOR LOG_DEBUG
-#define COAP_IO_PROCESS_TIME_MS 2000  // CoAP IO process time in milliseconds
 coap_log_t coap_log_level = LOG_INFO;
 charra_log_t charra_log_level = CHARRA_LOG_INFO;
 CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
@@ -83,10 +84,6 @@ bool rp_ak_cert_rejected[MAX_VERIFIERS];
 static bool rp_ak_cert_was_cached[MAX_VERIFIERS];
 static long verifier_latency_ms[MAX_VERIFIERS];
 static char rejection_reason[MAX_VERIFIERS][128];
-typedef struct verifier_info {
-    char ip_address[16];
-    unsigned int port_number;
-} verifier_info;
 verifier_info verifiers[MAX_VERIFIERS];
 /* Was 6000 -- 1000x too large: this feeds libcoap's ack_timeout (seconds),
  * so a stray retransmission could take tens of real seconds to resolve. */
@@ -128,8 +125,8 @@ static uint8_t rp_pcr_r[TPM2_SHA256_DIGEST_SIZE] = {0};
  * lifetime, unlike the throwaway software key this used to be. Verifier-
  * agnostic: the same keypair signs Quote_r for every Verifier -- only its
  * CERTIFICATE differs per Verifier, see rp_ak_cert_der below. */
-static uint8_t rp_public_key_der[CHARRA_RSA_PUB_KEY_DER_MAX] = {0};
-static uint32_t rp_public_key_der_len = 0;
+uint8_t rp_public_key_der[CHARRA_RSA_PUB_KEY_DER_MAX] = {0};
+uint32_t rp_public_key_der_len = 0;
 
 /* --- RP TPM identity / /certify_ak config -------------------------------- */
 /* Same synthetic test PKI keys/gen-ak-pki.sh generates. manufacturer_root_key
@@ -170,9 +167,9 @@ static bool rp_ak_keypair_ready = false;
  * AK public key -- since Verifiers are independent, RP's AK certification
  * has to be too, not a single certificate obtained from verifiers[0] and
  * assumed good everywhere (see CHARRA_V2_NOTES.md). */
-static bool rp_ak_cert_ready[MAX_VERIFIERS] = {false};
-static uint8_t* rp_ak_cert_der[MAX_VERIFIERS] = {NULL};
-static uint32_t rp_ak_cert_der_len[MAX_VERIFIERS] = {0};
+bool rp_ak_cert_ready[MAX_VERIFIERS] = {false};
+uint8_t* rp_ak_cert_der[MAX_VERIFIERS] = {NULL};
+uint32_t rp_ak_cert_der_len[MAX_VERIFIERS] = {0};
 static bool processing_certify_ak_response = false;
 static CHARRA_RC certify_ak_rc = CHARRA_RC_ERROR;
 
@@ -266,26 +263,26 @@ static pthread_mutex_t attester_identity_relay_mutex =
  * in verifier.c), so RP only ever runs this handshake once per validity
  * window, against whichever Verifier is reachable first -- not once per
  * Verifier like AK provisioning below. */
-static uint8_t* qualify_challenge_log = NULL;
-static uint32_t qualify_challenge_log_len = 0;
+uint8_t* qualify_challenge_log = NULL;
+uint32_t qualify_challenge_log_len = 0;
 /* Salt to redact qualify_challenge_log with, sent alongside it -- see
  * msg_qualify_response_dto's docstring in charra_dto.h for why sharing a
  * salt is safe here (and only here). */
-static uint8_t qualify_challenge_salt[CHARRA_SDK_PATH_SALT_LEN] = {0};
-static CHARRA_RC qualify_response_rc = CHARRA_RC_ERROR;
-static bool processing_qualify_response = false;
-static bool qualify_submit_qualified = false;
+uint8_t qualify_challenge_salt[CHARRA_SDK_PATH_SALT_LEN] = {0};
+CHARRA_RC qualify_response_rc = CHARRA_RC_ERROR;
+bool processing_qualify_response = false;
+bool qualify_submit_qualified = false;
 /* Deadline the Verifier reported granting, straight off the wire --
  * authoritative, unlike the old "assume the same constant" approach. */
-static time_t qualify_submit_expires_at = 0;
-static bool processing_qualify_submit_response = false;
+time_t qualify_submit_expires_at = 0;
+bool processing_qualify_submit_response = false;
 /* RP's own client-side qualification cache: "qualified until when",
  * persisted to rp-qualification-until.txt so a fresh RP process doesn't
  * redo /qualify + /qualify/submit if a previous run's qualification is
  * still valid. Single value, not per-Verifier, since qualifying is now a
  * one-time, Verifier-agnostic fact. 0 means "unknown/not currently
  * valid". */
-static time_t rp_qualified_until = 0;
+time_t rp_qualified_until = 0;
 /* How many verifiers[] entries rp_perform_qualification_handshake_once()
  * may try, set once by get_attestation_results() before spawning threads --
  * threads themselves only know their own index (see get_attestation_
@@ -311,7 +308,7 @@ static bool rp_qualification_rejected[MAX_VERIFIERS];
  * directly (killing the RP process immediately unblocked the Verifier).
  * This mutex keeps RP's own accesses serialized and, just as importantly,
  * keeps each one short-lived so other processes get a turn. */
-static pthread_mutex_t rp_tpm_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t rp_tpm_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* Guards the /certify_ak CoAP round trip's shared response globals
  * (certify_ak_response/certify_ak_rc/processing_certify_ak_response,
  * above) against concurrent verifier threads: each thread now
@@ -337,7 +334,7 @@ static pthread_mutex_t rp_ak_reprovision_mutex = PTHREAD_MUTEX_INITIALIZER;
  * short-circuit. Separate from rp_ak_reprovision_mutex so AK
  * (re)certification and qualification can still proceed concurrently --
  * they guard disjoint globals. */
-static pthread_mutex_t rp_qualification_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t rp_qualification_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* Nonces received from each Verifier, indexed by verifier slot. */
 static uint8_t verifier_nonces[MAX_VERIFIERS][sizeof(TPMU_HA)] = {{0}};
 static uint32_t verifier_nonce_lens[MAX_VERIFIERS] = {0};
@@ -485,7 +482,7 @@ static CHARRA_RC ensure_rp_ak_keypair(void);
  * Signing later reopens a short-lived connection via
  * rp_open_tpm_and_load_ak().
  */
-static CHARRA_RC ensure_rp_ak_certificate(int verifier_index);
+CHARRA_RC ensure_rp_ak_certificate(int verifier_index);
 
 /**
  * @brief Discard RP's cached AK certificate for verifiers[verifier_index]
@@ -500,61 +497,12 @@ static CHARRA_RC ensure_rp_ak_certificate(int verifier_index);
  */
 static void invalidate_cached_rp_ak_certificate(int verifier_index);
 
-/**
- * @brief Forget RP's cached qualification: delete its on-disk cache file
- * and reset rp_qualified_until to 0, so the next
- * rp_perform_qualification_handshake_once() call redoes /qualify +
- * /qualify/submit instead of trusting a grant a Verifier just told us
- * (via a 4.03 Forbidden /appraise response) it no longer honors.
- */
-static void invalidate_cached_rp_qualification(void);
-
 /** @brief See its own definition's docstring, above ensure_rp_ak_certificate()
  * in the .c file -- forward-declared here so charra_rp_build_evidence_
  * message() (defined earlier in the file) can call it too. */
-static CHARRA_RC rp_open_tpm_and_load_ak(ESYS_CONTEXT** esys_ctx_out,
+CHARRA_RC rp_open_tpm_and_load_ak(ESYS_CONTEXT** esys_ctx_out,
         TSS2_TCTI_CONTEXT** tcti_ctx_out, ESYS_TR* ek_handle_out,
         ESYS_TR* ak_handle_out, TPM2B_NAME** ak_name_out);
-
-static coap_response_t coap_qualify_response_handler(
-        coap_session_t* session CHARRA_UNUSED,
-        const coap_pdu_t* sent CHARRA_UNUSED, const coap_pdu_t* received,
-        const coap_mid_t mid CHARRA_UNUSED);
-
-static coap_response_t coap_qualify_submit_response_handler(
-        coap_session_t* session CHARRA_UNUSED,
-        const coap_pdu_t* sent CHARRA_UNUSED, const coap_pdu_t* received,
-        const coap_mid_t mid CHARRA_UNUSED);
-
-/**
- * @brief Run the RP qualification handshake (charra_rp_qualification.h)
- * once: short-circuits to CHARRA_RC_SUCCESS if rp_qualified_until (or its
- * on-disk cache file) says we're already qualified; otherwise tries
- * verifiers[0..num_verifiers) in order, using the first one reachable at
- * the network level to fetch a /qualify challenge, redact it with the same
- * pipeline real evidence uses, sign the resulting PCR digest with RP's
- * TPM-resident AK, and submit via /qualify/submit. A network-level failure
- * against one Verifier tries the next; a received verdict (qualified or
- * not) stops the loop -- the qualification ledger is shared across all
- * Verifiers now (see qualification_state_file_path in verifier.c), so
- * qualifying with one qualifies with all of them, and a "not qualified"
- * verdict would be identical everywhere.
- *
- * @param[in] num_verifiers how many entries of verifiers[] to try.
- * @param[in] refresh_margin_seconds treat a qualification that expires
- * within this many seconds as already needing renewal. 0 = the literal
- * "only if actually expired" behaviour, which is what the attestation path
- * wants (it must qualify, but has no reason to renew early). Daemon mode
- * passes a non-zero margin from its idle window instead, so a renewal
- * never lands in the middle of an attestation -- see rp_qualify_margin_s.
- * @returns CHARRA_RC_SUCCESS if already cached as qualified, or if some
- * Verifier's /qualify/submit response reports the RP as qualified (and
- * caches that). Any other outcome (every Verifier unreachable, or a
- * genuine "not qualified" verdict) returns a non-success code -- the
- * caller decides whether that's fatal.
- */
-static CHARRA_RC rp_perform_qualification_handshake_once(
-        int num_verifiers, time_t refresh_margin_seconds);
 
 CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers);
 
@@ -1514,122 +1462,6 @@ static coap_response_t coap_certify_ak_of_attester_deliver_response_handler(
     return COAP_RESPONSE_OK;
 }
 
-/**
- * @brief Send req_buf (may be NULL/0 for an empty body) as a CoAP FETCH
- * request to ip_address:port/uri_path, registering response_handler, and
- * block until libcoap has nothing left pending for the exchange, an I/O
- * error occurs, or verifier_response_timeout is exceeded.
- *
- * Factors out the create-context/create-session/build-and-send-PDU/wait-
- * for-response/tear-down sequence every one-shot RP-as-client exchange in
- * this file repeats (ensure_rp_ak_certificate()'s /certify_ak call,
- * rp_perform_qualification_handshake_once()'s /qualify and /qualify/submit).
- * response_handler is expected to record the exchange's actual content-
- * level result (parsed data, or a parse failure) in its own dedicated
- * global, the same way coap_certify_ak_response_handler() does for
- * certify_ak_rc -- this function only reports whether the CoAP transport
- * itself completed, not whether the response's content was valid.
- *
- * @param[in,out] processing_flag caller's own dedicated "response handler
- * is currently running" flag (e.g. &processing_qualify_response), reset to
- * false here before sending -- same flag every response handler in this
- * file already toggles true/false around its own body.
- */
-static CHARRA_RC rp_coap_fetch(const char* ip_address, unsigned int port,
-        const char* uri_path, const uint8_t* req_buf, uint32_t req_buf_len,
-        coap_response_handler_t response_handler, bool* processing_flag) {
-    CHARRA_RC result = CHARRA_RC_ERROR;
-    coap_context_t* coap_context = NULL;
-    coap_session_t* coap_session = NULL;
-    coap_optlist_t* coap_options = NULL;
-
-    if ((coap_context = charra_coap_new_context(true)) == NULL) {
-        charra_log_error(
-                "[" LOG_NAME "] Cannot create CoAP context for /%s.", uri_path);
-        return CHARRA_RC_COAP_ERROR;
-    }
-    coap_register_response_handler(coap_context, response_handler);
-
-    if ((coap_session = charra_coap_new_client_session(
-                 coap_context, ip_address, port, COAP_PROTO_UDP)) == NULL) {
-        charra_log_error(
-                "[" LOG_NAME "] Cannot create /%s client session.", uri_path);
-        charra_free_if_not_null_ex(coap_context, coap_free_context);
-        return CHARRA_RC_COAP_ERROR;
-    }
-
-    uint8_t coap_mediatype_cbor_buf[4] = {0};
-    unsigned int coap_mediatype_cbor_buf_len = coap_encode_var_safe(
-            coap_mediatype_cbor_buf, sizeof(coap_mediatype_cbor_buf),
-            COAP_MEDIATYPE_APPLICATION_CBOR);
-    coap_insert_optlist(&coap_options,
-            coap_new_optlist(COAP_OPTION_URI_PATH, strlen(uri_path),
-                    (const uint8_t*)uri_path));
-    coap_insert_optlist(&coap_options,
-            coap_new_optlist(COAP_OPTION_CONTENT_TYPE,
-                    coap_mediatype_cbor_buf_len, coap_mediatype_cbor_buf));
-
-    coap_pdu_t* pdu = charra_coap_new_request(coap_session,
-            COAP_MESSAGE_TYPE_CON, COAP_REQUEST_FETCH, &coap_options, req_buf,
-            req_buf_len);
-    if (pdu == NULL) {
-        charra_log_error(
-                "[" LOG_NAME "] Cannot create /%s request PDU.", uri_path);
-        charra_free_if_not_null_ex(coap_options, coap_delete_optlist);
-        charra_free_if_not_null_ex(coap_session, coap_session_release);
-        charra_free_if_not_null_ex(coap_context, coap_free_context);
-        return CHARRA_RC_ERROR;
-    }
-
-    coap_fixed_point_t coap_timeout = {verifier_response_timeout, 0};
-    coap_session_set_ack_timeout(coap_session, coap_timeout);
-
-    if (coap_send_large(coap_session, pdu) == COAP_INVALID_MID) {
-        charra_log_error("[" LOG_NAME "] Cannot send /%s request.", uri_path);
-        charra_free_if_not_null_ex(coap_options, coap_delete_optlist);
-        charra_free_if_not_null_ex(coap_session, coap_session_release);
-        charra_free_if_not_null_ex(coap_context, coap_free_context);
-        return CHARRA_RC_COAP_ERROR;
-    }
-
-    *processing_flag = false;
-    /* Real elapsed time (CLOCK_MONOTONIC), not a sum of coap_io_process()'s
-     * self-reported per-call durations -- that undercounts time spent
-     * scheduled out under concurrent load. Also sidesteps the same
-     * counter-overflow class of bug a uint16_t/uint32_t millisecond
-     * accumulator would otherwise have for large timeouts (see
-     * CHARRA_V2_NOTES.md). */
-    struct timespec wait_start, wait_now;
-    clock_gettime(CLOCK_MONOTONIC, &wait_start);
-    int coap_io_process_time = -1;
-    result = CHARRA_RC_SUCCESS;
-    while (!(*processing_flag) && coap_io_pending(coap_context)) {
-        if ((coap_io_process_time = coap_io_process(
-                     coap_context, COAP_IO_PROCESS_TIME_MS)) == -1) {
-            charra_log_error(
-                    "[" LOG_NAME "] Error during CoAP I/O processing for /%s.",
-                    uri_path);
-            result = CHARRA_RC_COAP_ERROR;
-            break;
-        }
-        clock_gettime(CLOCK_MONOTONIC, &wait_now);
-        double elapsed_ms = (wait_now.tv_sec - wait_start.tv_sec) * 1000.0 +
-                             (wait_now.tv_nsec - wait_start.tv_nsec) / 1e6;
-        if (elapsed_ms >= (verifier_response_timeout * 1000)) {
-            charra_log_error(
-                    "[" LOG_NAME "] Timeout after %.0f ms waiting for /%s "
-                    "response.",
-                    elapsed_ms, uri_path);
-            result = CHARRA_RC_TIMEOUT;
-            break;
-        }
-    }
-
-    charra_free_if_not_null_ex(coap_options, coap_delete_optlist);
-    charra_free_if_not_null_ex(coap_session, coap_session_release);
-    charra_free_if_not_null_ex(coap_context, coap_free_context);
-    return result;
-}
 
 /**
  * @brief One /certify_ak round trip (either leg -- req->kind picks which).
@@ -1678,363 +1510,16 @@ static CHARRA_RC rp_certify_ak_exchange(const char* host, unsigned int port,
     return result;
 }
 
-static coap_response_t coap_qualify_response_handler(
-        coap_session_t* session CHARRA_UNUSED,
-        const coap_pdu_t* sent CHARRA_UNUSED, const coap_pdu_t* received,
-        const coap_mid_t mid CHARRA_UNUSED) {
-    processing_qualify_response = true;
 
-    int coap_r = 0;
-    size_t data_len = 0;
-    const uint8_t* data = NULL;
-    size_t data_offset = 0;
-    size_t data_total_len = 0;
-    if ((coap_r = coap_get_data_large(
-                 received, &data_len, &data, &data_offset, &data_total_len)) ==
-            0) {
-        charra_log_error(
-                "[" LOG_NAME "] /qualify: Could not get CoAP PDU data.");
-        qualify_response_rc = CHARRA_RC_ERROR;
-        goto cleanup;
-    }
-
-    msg_qualify_response_dto resp = {0};
-    if ((qualify_response_rc = charra_unmarshal_qualify_response(
-                 data_len, data, &resp)) != CHARRA_RC_SUCCESS) {
-        charra_log_error(
-                "[" LOG_NAME "] /qualify: Could not parse CBOR response.");
-        goto cleanup;
-    }
-
-    charra_free_if_not_null(qualify_challenge_log);
-    qualify_challenge_log = resp.challenge_log;
-    qualify_challenge_log_len = resp.challenge_log_len;
-    memcpy(qualify_challenge_salt, resp.salt, sizeof(qualify_challenge_salt));
-
-cleanup:
-    processing_qualify_response = false;
-    return COAP_RESPONSE_OK;
-}
-
-static coap_response_t coap_qualify_submit_response_handler(
-        coap_session_t* session CHARRA_UNUSED,
-        const coap_pdu_t* sent CHARRA_UNUSED, const coap_pdu_t* received,
-        const coap_mid_t mid CHARRA_UNUSED) {
-    processing_qualify_submit_response = true;
-
-    /* The Verifier now answers with a CBOR verdict carrying the deadline
-     * it granted, so RP no longer has to assume the validity window from
-     * a shared compile-time constant -- see msg_qualify_submit_response_
-     * dto in charra_dto.h. */
-    size_t data_len = 0;
-    const uint8_t* data = NULL;
-    size_t data_offset = 0;
-    size_t data_total_len = 0;
-    qualify_submit_qualified = false;
-    qualify_submit_expires_at = 0;
-    if (coap_get_data_large(received, &data_len, &data, &data_offset,
-                &data_total_len) != 0) {
-        msg_qualify_submit_response_dto resp = {0};
-        if (charra_unmarshal_qualify_submit_response(
-                    (uint32_t)data_len, data, &resp) == CHARRA_RC_SUCCESS) {
-            qualify_submit_qualified =
-                    coap_pdu_get_code(received) ==
-                            COAP_RESPONSE_CODE_CONTENT &&
-                    resp.qualified != 0;
-            qualify_submit_expires_at = (time_t)resp.expires_at;
-        } else {
-            charra_log_error("[" LOG_NAME "] /qualify/submit: could not "
-                             "parse the Verifier's response.");
-        }
-    }
-
-    processing_qualify_submit_response = false;
-    return COAP_RESPONSE_OK;
-}
 
 /* Single, not per-port, cache file path -- qualification is Verifier-
  * agnostic now (see rp_qualified_until's comment). */
-static const char* rp_qualification_cache_path =
+char* rp_qualification_cache_path =
         "state/relying-party/qualification-cache/rp-qualification-until.txt";
 
-/**
- * @brief Read the cached qualification expiry from disk.
- *
- * @returns the cached expires_at, or 0 if the file doesn't exist or is
- * unparseable (treated the same as "no cache" -- not an error, a fresh
- * deployment or a first run simply hasn't qualified yet).
- */
-static time_t rp_qualification_cache_load(void) {
-    FILE* f = fopen(rp_qualification_cache_path, "r");
-    if (f == NULL) {
-        return 0;
-    }
-    long long expires_at = 0;
-    int scanned = fscanf(f, "%lld", &expires_at);
-    fclose(f);
-    if (scanned != 1 || expires_at <= 0) {
-        return 0;
-    }
-    return (time_t)expires_at;
-}
 
-/**
- * @brief Persist RP's freshly-earned qualification expiry to disk, so a
- * later process invocation can skip the handshake while it's still valid.
- */
-static void rp_qualification_cache_save(time_t expires_at) {
-    FILE* f = fopen(rp_qualification_cache_path, "w");
-    if (f == NULL) {
-        charra_log_error(
-                "[" LOG_NAME "] Could not write qualification cache '%s'.",
-                rp_qualification_cache_path);
-        return;
-    }
-    fprintf(f, "%lld\n", (long long)expires_at);
-    fclose(f);
-}
 
-static void invalidate_cached_rp_qualification(void) {
-    remove(rp_qualification_cache_path);
-    rp_qualified_until = 0;
-}
 
-static CHARRA_RC rp_perform_qualification_handshake_once(
-        int num_verifiers, time_t refresh_margin_seconds) {
-    /* AK certificate readiness is orthogonal to the qualification cache
-     * below: /qualify/submit needs an AK cert issued by whichever Verifier
-     * we end up qualifying against, so it's provisioned per-candidate
-     * inside the loop below, not once up front. */
-
-    /* Cache short-circuit: if we already hold a still-valid qualification
-     * -- either from earlier this process, or loaded just now from a
-     * previous process run's cache file -- skip the /qualify +
-     * /qualify/submit round trip entirely. Re-checked against the wall
-     * clock on every call (not just once), so this stays correct even if a
-     * single process run happens to straddle the expiry moment. This is
-     * what makes CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS actually matter:
-     * without it, RP re-qualified unconditionally on every single
-     * attestation cycle regardless of how much of a previous grant was
-     * left. See CHARRA_V2_NOTES.md. */
-    time_t now = time(NULL);
-    /* Compared against now+margin rather than now: with margin 0 this is
-     * exactly "renew only once expired"; with a margin it renews while the
-     * grant is still valid, which is what lets daemon mode do the renewal
-     * in its idle window instead of inside an attestation. */
-    time_t renew_deadline = now + refresh_margin_seconds;
-    if (rp_qualified_until <= renew_deadline) {
-        rp_qualified_until = rp_qualification_cache_load();
-    }
-    if (rp_qualified_until > renew_deadline) {
-        charra_log_info(
-                "[" LOG_NAME "] Cached qualification still valid for %ld "
-                "more second(s), skipping /qualify.",
-                (long)(rp_qualified_until - now));
-        return CHARRA_RC_SUCCESS;
-    }
-
-    CHARRA_RC result = CHARRA_RC_ERROR;
-
-    /* Held across the whole handshake below, not just individual field
-     * accesses: every one of qualify_challenge_log/_len/_salt,
-     * qualify_response_rc, processing_qualify_response,
-     * qualify_submit_qualified, and processing_qualify_submit_response is
-     * a single shared global -- see rp_qualification_mutex's own comment
-     * for why this still matters even though the handshake itself now
-     * runs once per cycle. */
-    pthread_mutex_lock(&rp_qualification_mutex);
-
-    /* Try each Verifier in order, stopping at the first one reachable at
-     * the network level for /qualify -- a transport failure moves on to
-     * the next candidate, but a received verdict (qualified or not) stops
-     * the search: the qualification ledger is shared, so the verdict would
-     * be the same everywhere. */
-    for (int verifier_index = 0; verifier_index < num_verifiers;
-            ++verifier_index) {
-        CHARRA_RC keypair_and_cert_rc =
-                ensure_rp_ak_certificate(verifier_index);
-        if (keypair_and_cert_rc != CHARRA_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] Verifier n° %d (port %u): RP AK "
-                    "certificate not provisioned, trying next Verifier.",
-                    verifier_index + 1, verifiers[verifier_index].port_number);
-            continue;
-        }
-
-        const verifier_info* verifier = &verifiers[verifier_index];
-        uint8_t* redacted_log = NULL;
-        uint32_t redacted_log_len = 0;
-
-        charra_log_info(
-                "[" LOG_NAME "]  +------------ RP Qualification (Verifier "
-                "n° %d, port %u) --------------+",
-                verifier_index + 1, verifier->port_number);
-
-        /* --- 1. fetch a fresh challenge --- */
-        qualify_response_rc = CHARRA_RC_ERROR;
-        result = rp_coap_fetch(verifier->ip_address, verifier->port_number,
-                "qualify", NULL, 0, coap_qualify_response_handler,
-                &processing_qualify_response);
-        if (result != CHARRA_RC_SUCCESS || qualify_response_rc != CHARRA_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] Verifier n° %d (port %u) unreachable "
-                    "for /qualify, trying next Verifier.",
-                    verifier_index + 1, verifier->port_number);
-            continue;
-        }
-        charra_log_info("[" LOG_NAME "] Received a %u-byte challenge log.",
-                qualify_challenge_log_len);
-
-        /* --- 2. redact it with the exact same pipeline real evidence uses --- */
-        result = charra_sdk_redact_ima_log(qualify_challenge_log,
-                qualify_challenge_log_len, qualify_challenge_salt,
-                &redacted_log, &redacted_log_len);
-        if (result != CHARRA_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME "] Could not redact the "
-                             "qualification challenge log.");
-            goto done;
-        }
-
-        /* --- 3. replay the redacted log into its PCR digest --- */
-        uint8_t submitted_pcr_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
-        result = charra_replay_ima_log(redacted_log, redacted_log_len,
-                CHARRA_IMA_PCR_INDEX, submitted_pcr_digest);
-        if (result != CHARRA_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME "] Could not replay the redacted "
-                             "challenge log.");
-            charra_free_if_not_null(redacted_log);
-            goto done;
-        }
-
-        /* --- 4. sign the PCR digest with RP's TPM-resident AK, same
-         * short-lived-connection pattern charra_rp_build_evidence_message()
-         * uses for Quote_r --- */
-        uint8_t rp_signature[CHARRA_RSA_SIGNATURE_LEN] = {0};
-        pthread_mutex_lock(&rp_tpm_mutex);
-        ESYS_CONTEXT* sign_esys_ctx = NULL;
-        TSS2_TCTI_CONTEXT* sign_tcti_ctx = NULL;
-        ESYS_TR sign_ek_handle = ESYS_TR_NONE;
-        ESYS_TR sign_ak_handle = ESYS_TR_NONE;
-        TPM2B_NAME* sign_ak_name = NULL;
-        result = rp_open_tpm_and_load_ak(&sign_esys_ctx, &sign_tcti_ctx,
-                &sign_ek_handle, &sign_ak_handle, &sign_ak_name);
-        if (result != CHARRA_RC_SUCCESS) {
-            pthread_mutex_unlock(&rp_tpm_mutex);
-            charra_log_error("[" LOG_NAME "] Could not open TPM connection "
-                             "to sign the qualification PCR digest.");
-            charra_free_if_not_null(redacted_log);
-            goto done;
-        }
-        Esys_Free(sign_ak_name);
-
-        result = charra_identity_key_mgr_sign(sign_esys_ctx, sign_ak_handle,
-                submitted_pcr_digest, sizeof(submitted_pcr_digest),
-                rp_signature);
-
-        Esys_FlushContext(sign_esys_ctx, sign_ak_handle);
-        Esys_FlushContext(sign_esys_ctx, sign_ek_handle);
-        Esys_Finalize(&sign_esys_ctx);
-        Tss2_TctiLdr_Finalize(&sign_tcti_ctx);
-        pthread_mutex_unlock(&rp_tpm_mutex);
-
-        if (result != CHARRA_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] Could not sign the qualification PCR "
-                    "digest.");
-            charra_free_if_not_null(redacted_log);
-            goto done;
-        }
-
-        /* --- 5. submit --- */
-        msg_qualify_submit_request_dto submit_req = {
-                .submitted_redacted_log_len = redacted_log_len,
-                .submitted_redacted_log = redacted_log,
-                .rp_signature_len = sizeof(rp_signature),
-                .rp_public_key_len = rp_public_key_der_len,
-                .ak_certificate_rp_len = rp_ak_cert_der_len[verifier_index],
-                .ak_certificate_rp = rp_ak_cert_der[verifier_index],
-        };
-        memcpy(submit_req.submitted_pcr_digest, submitted_pcr_digest,
-                sizeof(submitted_pcr_digest));
-        memcpy(submit_req.rp_signature, rp_signature, sizeof(rp_signature));
-        memcpy(submit_req.rp_public_key, rp_public_key_der,
-                rp_public_key_der_len);
-
-        uint8_t* submit_buf = NULL;
-        uint32_t submit_buf_len = 0;
-        result = charra_marshal_qualify_submit_request(
-                &submit_req, &submit_buf_len, &submit_buf);
-        if (result != CHARRA_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] Could not marshal /qualify/submit "
-                    "request.");
-            charra_free_if_not_null(redacted_log);
-            goto done;
-        }
-
-        result = rp_coap_fetch(verifier->ip_address, verifier->port_number,
-                "qualify_submit", submit_buf, submit_buf_len,
-                coap_qualify_submit_response_handler,
-                &processing_qualify_submit_response);
-        charra_free_if_not_null(submit_buf);
-        if (result != CHARRA_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] Verifier n° %d (port %u) unreachable "
-                    "for /qualify_submit, trying next Verifier.",
-                    verifier_index + 1, verifier->port_number);
-            charra_free_if_not_null(redacted_log);
-            continue;
-        }
-
-        if (qualify_submit_qualified) {
-            charra_log_info(
-                    "[" LOG_NAME "] |  RP QUALIFIED with Verifier n° %d "
-                    "(port %u)  |",
-                    verifier_index + 1, verifier->port_number);
-            /* Exactly what the Verifier said it granted -- no local
-             * guess at the window. */
-            time_t expires_at = qualify_submit_expires_at;
-            rp_qualified_until = expires_at;
-            rp_qualification_cache_save(expires_at);
-            charra_log_info(
-                    "[" LOG_NAME "] Qualification valid until %ld (%ld "
-                    "second(s) from now, as granted by this Verifier); "
-                    "shared with every other Verifier.",
-                    (long)expires_at, (long)(expires_at - time(NULL)));
-            /* The margin only helps if it fits inside the window the
-             * Verifier actually granted -- which RP only learns here, not
-             * at CLI-parse time. */
-            if (rp_qualify_margin_s > 0 &&
-                    (time_t)rp_qualify_margin_s >= expires_at - time(NULL)) {
-                charra_log_warn(
-                        "[" LOG_NAME "] --qualify-margin (%us) is not smaller "
-                        "than the %lds window this Verifier grants; RP will "
-                        "re-qualify on every idle pass.",
-                        rp_qualify_margin_s, (long)(expires_at - time(NULL)));
-            }
-            result = CHARRA_RC_SUCCESS;
-        } else {
-            charra_log_error(
-                    "[" LOG_NAME
-                    "] |  RP NOT QUALIFIED with Verifier n° %d (port %u)  |",
-                    verifier_index + 1, verifier->port_number);
-            result = CHARRA_RC_VERIFICATION_FAILED;
-        }
-        charra_free_if_not_null(redacted_log);
-        goto done;
-    }
-
-    charra_log_error("[" LOG_NAME "] Could not qualify: no Verifier was "
-                     "reachable for /qualify.");
-    result = CHARRA_RC_ERROR;
-
-done:
-    charra_free_if_not_null(qualify_challenge_log);
-    qualify_challenge_log = NULL;
-    qualify_challenge_log_len = 0;
-    pthread_mutex_unlock(&rp_qualification_mutex);
-    return result;
-}
 
 /**
  * @brief Open a fresh TPM connection, recreate RP's EK (deterministic --
@@ -2047,7 +1532,7 @@ done:
  * simulator's one connection slot for longer than that operation itself
  * needs. See rp_tpm_mutex's own comment for why this matters.
  */
-static CHARRA_RC rp_open_tpm_and_load_ak(ESYS_CONTEXT** esys_ctx_out,
+CHARRA_RC rp_open_tpm_and_load_ak(ESYS_CONTEXT** esys_ctx_out,
         TSS2_TCTI_CONTEXT** tcti_ctx_out, ESYS_TR* ek_handle_out,
         ESYS_TR* ak_handle_out, TPM2B_NAME** ak_name_out) {
     TSS2_RC tss_r = 0;
@@ -2962,7 +2447,7 @@ static CHARRA_RC ensure_rp_ak_keypair(void) {
     return CHARRA_RC_SUCCESS;
 }
 
-static CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
+CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
     if (rp_ak_cert_ready[verifier_index]) {
         /* No work happens on this path, so it's "cached" for the summary. */
         rp_ak_cert_was_cached[verifier_index] = true;

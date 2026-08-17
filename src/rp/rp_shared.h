@@ -18,10 +18,22 @@
 #ifndef CHARRA_RP_SHARED_H
 #define CHARRA_RP_SHARED_H
 
+#ifndef CHARRA_UNUSED
+#define CHARRA_UNUSED __attribute__((unused))
+#endif
+
+#include <coap3/coap.h>
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <pthread.h>
+#include <time.h>
+
 #include "../common/charra_log.h"
+#include <tss2/tss2_esys.h>
+
+#include "../core/charra_dto.h"
+#include "../util/crypto_util.h"
 
 /* verifiers config */
 #define MAX_VERIFIERS 10
@@ -62,5 +74,59 @@ extern time_t attester_ak_cert_validity_seconds;
 extern bool quit;
 
 extern charra_log_t charra_log_level;
+
+/* --- CoAP timing ------------------------------------------------------- */
+/* Seconds rp_coap_fetch() waits for a response before giving up. */
+extern uint16_t verifier_response_timeout;
+#define COAP_IO_PROCESS_TIME_MS 2000
+
+typedef struct verifier_info {
+    char ip_address[16];
+    unsigned int port_number;
+} verifier_info;
+
+/* --- Verifier endpoints, resolved once per cycle by get_verifiers() ----- */
+extern verifier_info verifiers[MAX_VERIFIERS];
+
+/* --- RP's own identity, provisioned per Verifier ------------------------ */
+extern bool rp_ak_cert_ready[MAX_VERIFIERS];
+extern uint8_t* rp_ak_cert_der[MAX_VERIFIERS];
+extern uint32_t rp_ak_cert_der_len[MAX_VERIFIERS];
+extern uint8_t rp_public_key_der[CHARRA_RSA_PUB_KEY_DER_MAX];
+extern uint32_t rp_public_key_der_len;
+
+/* --- qualification handshake state ------------------------------------- */
+extern uint8_t* qualify_challenge_log;
+extern uint32_t qualify_challenge_log_len;
+extern uint8_t qualify_challenge_salt[CHARRA_SDK_PATH_SALT_LEN];
+extern CHARRA_RC qualify_response_rc;
+extern bool processing_qualify_response;
+extern bool qualify_submit_qualified;
+extern time_t qualify_submit_expires_at;
+extern bool processing_qualify_submit_response;
+extern time_t rp_qualified_until;
+extern char* rp_qualification_cache_path;
+
+/* --- locks -------------------------------------------------------------
+ * Ordering matters and is easy to lose sight of once the callers live in
+ * different files: take rp_ak_reprovision_mutex (or
+ * rp_qualification_mutex) *before* rp_tpm_mutex, and never hold one across
+ * the other's critical section. rp_tpm_mutex is additionally kept
+ * short-lived on purpose -- the dev TPM simulator serves one client at a
+ * time, and an RP that held it across a CoAP wait once starved the
+ * Verifier's own TPM work outright. */
+extern pthread_mutex_t rp_tpm_mutex;
+extern pthread_mutex_t rp_qualification_mutex;
+
+/** Provisions RP's AK certificate with verifiers[verifier_index]. Defined
+ * in relying_party.c; declared here because the qualification handshake
+ * needs a certificate from whichever Verifier it qualifies against. */
+CHARRA_RC ensure_rp_ak_certificate(int verifier_index);
+
+/** Opens a TPM connection and loads RP's persisted AK. Caller must hold
+ * rp_tpm_mutex, and must close promptly -- see the lock note above. */
+CHARRA_RC rp_open_tpm_and_load_ak(ESYS_CONTEXT** esys_ctx_out,
+        TSS2_TCTI_CONTEXT** tcti_ctx_out, ESYS_TR* ek_handle_out,
+        ESYS_TR* ak_handle_out, TPM2B_NAME** ak_name_out);
 
 #endif /* CHARRA_RP_SHARED_H */
