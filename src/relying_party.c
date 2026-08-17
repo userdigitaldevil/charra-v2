@@ -173,6 +173,15 @@ static const char* attester_ak_cert_not_before_utc = "20240101000000";
 static const char* attester_ak_cert_not_after_utc = "20340101000000";
 static char* attester_ak_state_file_path =
         "state/relying-party/attester-ak-state.txt";
+/* Cache for the RP-issued leg only -- RP genuinely holds the plaintext for
+ * this one (it signed it itself), unlike the Verifier-issued leg, which
+ * only the Attester's own TPM ever decrypts. Its presence gates the whole
+ * function (both legs), same as ensure_rp_ak_certificate()'s own cache
+ * file check, since both legs are written together at the end of a
+ * successful run. */
+static char* attester_ak_cert_rp_cache_path =
+        "state/relying-party/attester-ak-certificates/"
+        "attester-ak-certificate-rp.der";
 static bool attester_identity_certified = false;
 
 static msg_ak_identity_response_dto ak_identity_response = {0};
@@ -531,6 +540,7 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
     mkdir("state/relying-party/identity", 0755);
     mkdir("state/relying-party/ak-certificates", 0755);
     mkdir("state/relying-party/qualification-cache", 0755);
+    mkdir("state/relying-party/attester-ak-certificates", 0755);
 
     double verifier_durations[NUM_RUNS];
     double evidence_durations[NUM_RUNS];
@@ -1695,6 +1705,13 @@ static CHARRA_RC ensure_attester_identity_certified(int relay_verifier_index) {
     if (attester_identity_certified) {
         return CHARRA_RC_SUCCESS;
     }
+    if (charra_io_file_exists(attester_ak_cert_rp_cache_path) ==
+            CHARRA_RC_SUCCESS) {
+        charra_log_info("[" LOG_NAME "] Attester identity already "
+                        "provisioned (cached); skipping re-certification.");
+        attester_identity_certified = true;
+        return CHARRA_RC_SUCCESS;
+    }
 
     charra_log_info("[" LOG_NAME "]  +------------ Attester Identity "
                     "Certification --------------+");
@@ -1974,7 +1991,6 @@ static CHARRA_RC ensure_attester_identity_certified(int relay_verifier_index) {
 
     Esys_Free(rp_credential_blob);
     Esys_Free(rp_wrapped_secret);
-    charra_free_if_not_null(rp_signed_cert_der);
 
     uint8_t* deliver_rp_buf = NULL;
     uint32_t deliver_rp_buf_len = 0;
@@ -1985,6 +2001,7 @@ static CHARRA_RC ensure_attester_identity_certified(int relay_verifier_index) {
         charra_log_error(
                 "[" LOG_NAME "] Could not marshal DELIVER_RP request.");
         charra_free_if_not_null(identity.ek_certificate);
+        charra_free_if_not_null(rp_signed_cert_der);
         return result;
     }
 
@@ -1997,9 +2014,22 @@ static CHARRA_RC ensure_attester_identity_certified(int relay_verifier_index) {
         charra_log_error("[" LOG_NAME "] DELIVER_RP round trip to the "
                          "Attester failed.");
         charra_free_if_not_null(identity.ek_certificate);
+        charra_free_if_not_null(rp_signed_cert_der);
         return result;
     }
     charra_log_info("[" LOG_NAME "] RP-CA leg delivered to the Attester.");
+
+    /* Cache now, mirroring ensure_rp_ak_certificate(): only once we
+     * genuinely trust the bytes (RP signed them itself, and delivery to
+     * the Attester just succeeded). File presence is what gates skipping
+     * this whole function on a future call/process restart. */
+    if (charra_io_write_file(attester_ak_cert_rp_cache_path, rp_signed_cert_der,
+                rp_signed_cert_der_len) != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Could not cache RP-issued Attester AK "
+                "certificate.");
+    }
+    charra_free_if_not_null(rp_signed_cert_der);
 
     /* --- 4. Verifier-CA track: relay to ONE Verifier's existing
      * /certify_ak (they share one CA key -- see CHARRA_V2_NOTES.md -- so a
