@@ -22,6 +22,18 @@
 int parse_rp_command_line(int argc, char** argv);
 
 /**
+ * @brief Logs which mode this run is in and every setting it will use,
+ * marking the ones left at their default.
+ *
+ * Call once, straight after parsing. A run's behaviour is otherwise only
+ * inferable from the command line that started it, which is exactly what a
+ * log file does not have -- and the defaults are not visible anywhere at
+ * all. Also warns about flags that were set but do not apply to the chosen
+ * mode, rather than ignoring them silently.
+ */
+void rp_log_effective_configuration(void);
+
+/**
  * @brief sleep(), but returns within a second of SIGINT/SIGTERM instead of
  * up to a whole interval later.
  */

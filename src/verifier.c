@@ -261,19 +261,72 @@ int main(int argc, char** argv) {
             "durations_verifier-%u.txt", port);
     durations_file_path = durations_file_path_buf;
 
-    /* Self-describing log: everything below is derived from CLI flags/
-     * defaults that never appear again in the log stream once startup is
-     * done, so a reader coming to this log file cold has no other way to
-     * know, e.g., which state files or CA this run was actually using. */
-    charra_log_info("[" LOG_NAME "] Effective configuration: port=%d "
-                    "rp_ak_state_file='%s' attester_ak_state_file='%s' "
-                    "qualification_state_file='%s' "
-                    "manufacturer_root='%s' verifier_ca_cert='%s' "
-                    "durations_file='%s'",
-            port, rp_ak_state_file_path, attester_ak_state_file_path,
-            qualification_state_file_path,
-            manufacturer_root_cert_path, verifier_ca_cert_path,
+    /* Self-describing log: none of this appears again once startup is done,
+     * so a reader coming to the log file cold has no other way to know what
+     * the run was configured with -- and the defaults are not visible
+     * anywhere at all. */
+    charra_log_info("[" LOG_NAME
+                    "] ============================================================");
+    charra_log_info("[" LOG_NAME "] Verifier starting -- passive CoAP server "
+                    "on %s:%u.",
+            LISTEN_ADDRESS, port);
+    charra_log_info("[" LOG_NAME
+                    "] ============================================================");
+    charra_log_info("[" LOG_NAME "] Settings for this run -- \"(default)\" "
+                    "means the flag was not given; pass it to change the "
+                    "value.");
+    charra_log_info("[" LOG_NAME "]   %-26s %u%s", "--port", port,
+            charra_cli_default_tag('b'));
+    charra_log_info("[" LOG_NAME "]   %-26s %lds%s",
+            "--qualification-validity", (long)qualification_validity_seconds,
+            charra_cli_default_tag('5'));
+    charra_log_info("[" LOG_NAME "]   %-26s %lds%s", "--ak-validity",
+            (long)ak_cert_validity_seconds, charra_cli_default_tag('6'));
+    charra_log_info("[" LOG_NAME "]   %-26s %s%s", "--log-level",
+            charra_log_level_to_str(charra_log_level),
+            (charra_cli_flag_was_given('l') || charra_cli_flag_was_given('v'))
+                    ? ""
+                    : " (default)");
+    charra_log_info("[" LOG_NAME "]   %-26s %s%s", "DTLS",
+            use_dtls_psk ? "PSK" : (use_dtls_rpk ? "RPK" : "off (plain UDP)"),
+            (use_dtls_psk || use_dtls_rpk) ? "" : " (default)");
+
+    /* Warn rather than ignore: these four are parsed and validated but no
+     * code reads them, so passing one and seeing nothing happen is exactly
+     * how a flag comes to look like it works. */
+    {
+        const struct {
+            int identifier;
+            const char* name;
+        } unimplemented[] = {{'a', "ip"}, {'f', "pcr-file"},
+                {'s', "pcr-selection"}, {'m', "ima"}};
+        for (size_t i = 0; i < sizeof(unimplemented) / sizeof(*unimplemented);
+                ++i) {
+            if (charra_cli_flag_was_given(unimplemented[i].identifier)) {
+                charra_log_warn("[" LOG_NAME "]   --%s was given but is NOT "
+                                "IMPLEMENTED -- it is parsed and then "
+                                "discarded, and changes nothing.",
+                        unimplemented[i].name);
+            }
+        }
+    }
+
+    charra_log_info("[" LOG_NAME "]   %-26s '%s'", "RP AK ledger",
+            rp_ak_state_file_path);
+    charra_log_info("[" LOG_NAME "]   %-26s '%s'", "Attester AK ledger",
+            attester_ak_state_file_path);
+    charra_log_info("[" LOG_NAME "]   %-26s '%s' (shared)",
+            "qualification ledger", qualification_state_file_path);
+    charra_log_info("[" LOG_NAME "]   %-26s '%s'", "manufacturer root",
+            manufacturer_root_cert_path);
+    charra_log_info("[" LOG_NAME "]   %-26s '%s'", "this Verifier's CA",
+            verifier_ca_cert_path);
+    charra_log_info("[" LOG_NAME "]   %-26s '%s'", "timings",
             durations_file_path);
+    charra_log_info("[" LOG_NAME "] Run with --help for every flag and its "
+                    "accepted range.");
+    charra_log_info("[" LOG_NAME
+                    "] ============================================================");
 
     charra_log_debug("[" LOG_NAME "] Verifier Configuration:");
     charra_log_debug("[" LOG_NAME "]     Used local port: %d", port);

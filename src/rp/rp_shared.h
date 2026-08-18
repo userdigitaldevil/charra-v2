@@ -50,6 +50,15 @@
  * the whole lifetime is satisfiable only by renewing on every cycle. */
 #define RP_DEFAULT_AK_RENEW_MARGIN_S 45
 
+/** Default wait for a Verifier's reply, and for the Attester's. Both feed
+ * libcoap's ack_timeout AND a wall-clock ceiling on the wait loop, so a
+ * stalled exchange cannot outlive them via CoAP's own retransmissions.
+ * Six seconds is generous against measured round trips (~0.4s steady
+ * state); the tightest real case is the Attester's one-time AK
+ * provisioning, ~3.2s in this dev environment. */
+#define RP_DEFAULT_VERIFIER_TIMEOUT_S 6
+#define RP_DEFAULT_ATTESTER_TIMEOUT_S 6
+
 /** Effective margin, settable with --ak-renew-margin. */
 extern time_t rp_ak_renew_margin_s;
 
@@ -84,6 +93,13 @@ static inline time_t charra_cert_expiry_time(const mbedtls_x509_crt* cert) {
 #define RP_DEFAULT_QUALIFY_RENEW_MARGIN_S 30
 #define RP_DEFAULT_NUM_VERIFIERS 5
 #define RP_MAX_SWEEP_VERIFIERS 5
+
+/* Benchmark mode: how many measured cycles each verifier count contributes,
+ * after a discarded warm-up cycle -- see the sweep in relying_party.c's
+ * main() for why a single sample per step measured the wrong thing. Lives
+ * here rather than in relying_party.c so the startup configuration log can
+ * report it. */
+#define NUM_RUNS 5
 
 /* --- daemon/benchmark configuration (set by parse_rp_command_line) ------ */
 extern bool rp_benchmark_mode;

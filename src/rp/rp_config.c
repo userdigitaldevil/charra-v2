@@ -26,6 +26,13 @@ void rp_interruptible_sleep(unsigned int seconds) {
     }
 }
 
+/* Identifiers for options with no short letter. Outside ASCII so they can
+ * never collide with a typeable short flag, but inside rp_flag_given's range
+ * so "(default)" tagging still works. -t/-T were the obvious short forms and
+ * were rejected: two timeouts differing only by letter case is a footgun. */
+#define RP_OPT_VERIFIER_TIMEOUT 128
+#define RP_OPT_ATTESTER_TIMEOUT 129
+
 static const struct option rp_long_options[] = {{"help", no_argument, 0, '0'},
         {"verbose", no_argument, 0, 'v'},
         {"log-level", required_argument, 0, 'l'},
@@ -36,7 +43,21 @@ static const struct option rp_long_options[] = {{"help", no_argument, 0, '0'},
         {"verifiers", required_argument, 0, 'n'},
         {"attester-ak-validity", required_argument, 0, 'A'},
         {"duration", required_argument, 0, 'D'},
-        {"cycles", required_argument, 0, 'C'}, {0}};
+        {"cycles", required_argument, 0, 'C'},
+        {"verifier-timeout", required_argument, 0, RP_OPT_VERIFIER_TIMEOUT},
+        {"attester-timeout", required_argument, 0, RP_OPT_ATTESTER_TIMEOUT},
+        {0}};
+
+/* Which options actually appeared on the command line, indexed by their
+ * getopt identifier. Only used to tell "you chose this" from "this is the
+ * built-in default" when logging the configuration -- parsing itself does
+ * not consult it. */
+static bool rp_flag_given[UCHAR_MAX + 1] = {false};
+
+/** " (default)" for a setting left untouched, "" for one the user chose. */
+static const char* rp_default_tag(int identifier) {
+    return rp_flag_given[(unsigned char)identifier] ? "" : " (default)";
+}
 
 /** Parses a positive integer option argument; returns false (and logs) on
  * anything non-numeric, negative, or out of [min, max]. */
@@ -77,6 +98,13 @@ int parse_rp_command_line(int argc, char** argv) {
                 getopt_long(argc, argv, "vl:BI:Q:R:n:A:D:C:", rp_long_options, &index);
         if (identifier == -1) {
             break;
+        }
+        /* Recorded before the switch so every option is covered by one line
+         * rather than a flag-setting statement in each case. An option that
+         * fails validation below aborts the run anyway, so marking it here
+         * first is harmless. */
+        if (identifier >= 0 && identifier <= UCHAR_MAX) {
+            rp_flag_given[(unsigned char)identifier] = true;
         }
 
         long value = 0;
@@ -125,6 +153,16 @@ int parse_rp_command_line(int argc, char** argv) {
             printf(" -C, --cycles=COUNT:           Daemon mode: stop cleanly "
                    "after COUNT attestation cycles. Default 0 "
                    "(unbounded).\n");
+            printf("     --verifier-timeout=SECONDS: How long to wait for a "
+                   "Verifier's reply before giving up. Also bounds every "
+                   "other RP round trip (Trust Manager, /certify_ak, "
+                   "/qualify). A Verifier that times out counts against the "
+                   "majority exactly like a NO vote. Default %d.\n",
+                    RP_DEFAULT_VERIFIER_TIMEOUT_S);
+            printf("     --attester-timeout=SECONDS: How long to wait for the "
+                   "Attester's evidence before giving up, ending the cycle. "
+                   "Default %d.\n",
+                    RP_DEFAULT_ATTESTER_TIMEOUT_S);
             return 1;
         case 'v':
             charra_log_level = CHARRA_LOG_DEBUG;
@@ -170,6 +208,20 @@ int parse_rp_command_line(int argc, char** argv) {
             }
             rp_num_verifiers = (int)value;
             break;
+        case RP_OPT_VERIFIER_TIMEOUT:
+            if (!rp_parse_uint_arg(
+                        optarg, "verifier-timeout", 1, 3600, &value)) {
+                return -1;
+            }
+            verifier_response_timeout = (uint16_t)value;
+            break;
+        case RP_OPT_ATTESTER_TIMEOUT:
+            if (!rp_parse_uint_arg(
+                        optarg, "attester-timeout", 1, 3600, &value)) {
+                return -1;
+            }
+            attester_response_timeout = (uint16_t)value;
+            break;
         case 'D':
             if (!rp_parse_uint_arg(optarg, "duration", 1, LONG_MAX,
                         &value)) {
@@ -207,3 +259,108 @@ int parse_rp_command_line(int argc, char** argv) {
     return 0;
 }
 
+
+/** Renders an "unlimited when zero" setting, e.g. --duration/--cycles. */
+static const char* rp_limit_str(
+        unsigned long value, char* buf, size_t buf_len, const char* unit) {
+    if (value == 0) {
+        return "unlimited";
+    }
+    snprintf(buf, buf_len, "%lu%s", value, unit);
+    return buf;
+}
+
+/** Warns about a flag that was given but does not apply to this mode --
+ * silently ignoring it is how a flag comes to look like it works. */
+static void rp_warn_if_ignored(int identifier, const char* flag_name) {
+    if (rp_flag_given[(unsigned char)identifier]) {
+        charra_log_warn("[" LOG_NAME "]   --%s was given but has NO EFFECT in "
+                        "benchmark mode.",
+                flag_name);
+    }
+}
+
+void rp_log_effective_configuration(void) {
+    char buf_duration[32] = {0};
+    char buf_cycles[32] = {0};
+
+    charra_log_info("[" LOG_NAME
+                    "] ============================================================");
+    if (rp_benchmark_mode) {
+        charra_log_info("[" LOG_NAME "] MODE: BENCHMARK -- fixed 1..%d "
+                        "Verifier sweep, then exit (--benchmark).",
+                RP_MAX_SWEEP_VERIFIERS);
+    } else {
+        charra_log_info("[" LOG_NAME "] MODE: DAEMON -- continuous attestation "
+                        "until stopped (default; pass --benchmark for the "
+                        "timing sweep).");
+    }
+    charra_log_info("[" LOG_NAME
+                    "] ============================================================");
+    charra_log_info("[" LOG_NAME "] Settings for this run -- \"(default)\" "
+                    "means the flag was not given; pass it to change the "
+                    "value.");
+
+    if (rp_benchmark_mode) {
+        charra_log_info("[" LOG_NAME "]   %-22s 1..%d  (fixed, not settable)",
+                "verifier sweep", RP_MAX_SWEEP_VERIFIERS);
+        charra_log_info("[" LOG_NAME "]   %-22s %d  (fixed, not settable; "
+                        "plus 1 discarded warm-up)",
+                "measured runs/step", NUM_RUNS);
+        /* Named individually rather than in a loop: each is a real flag a
+         * user could reasonably expect to apply here, and saying so beats
+         * ignoring it. */
+        rp_warn_if_ignored('n', "verifiers");
+        rp_warn_if_ignored('I', "interval");
+        rp_warn_if_ignored('D', "duration");
+        rp_warn_if_ignored('C', "cycles");
+    } else {
+        charra_log_info("[" LOG_NAME "]   %-22s %d%s", "--verifiers",
+                rp_num_verifiers, rp_default_tag('n'));
+        charra_log_info("[" LOG_NAME "]   %-22s %us%s", "--interval",
+                rp_attestation_interval_s, rp_default_tag('I'));
+        charra_log_info("[" LOG_NAME "]   %-22s %s%s", "--duration",
+                rp_limit_str(rp_duration_s, buf_duration, sizeof(buf_duration),
+                        "s"),
+                rp_default_tag('D'));
+        charra_log_info("[" LOG_NAME "]   %-22s %s%s", "--cycles",
+                rp_limit_str(rp_max_cycles, buf_cycles, sizeof(buf_cycles), ""),
+                rp_default_tag('C'));
+    }
+
+    /* Renewal margins and log level apply to both modes. */
+    charra_log_info("[" LOG_NAME "]   %-22s %us%s", "--qualify-renew-margin",
+            rp_qualify_renew_margin_s, rp_default_tag('Q'));
+    charra_log_info("[" LOG_NAME "]   %-22s %lds%s", "--ak-renew-margin",
+            (long)rp_ak_renew_margin_s, rp_default_tag('R'));
+    charra_log_info("[" LOG_NAME "]   %-22s %lds%s", "--attester-ak-validity",
+            (long)attester_ak_cert_validity_seconds, rp_default_tag('A'));
+    charra_log_info("[" LOG_NAME "]   %-22s %s%s", "--log-level",
+            charra_log_level_to_str(charra_log_level),
+            (rp_flag_given['l'] || rp_flag_given['v']) ? "" : " (default)");
+
+    charra_log_info("[" LOG_NAME "]   %-22s %us%s", "--verifier-timeout",
+            verifier_response_timeout,
+            rp_default_tag(RP_OPT_VERIFIER_TIMEOUT));
+    charra_log_info("[" LOG_NAME "]   %-22s %us%s", "--attester-timeout",
+            attester_response_timeout,
+            rp_default_tag(RP_OPT_ATTESTER_TIMEOUT));
+
+    /* Compiled-in, no flag -- listed so the log still explains a policy
+     * rejection without the reader having to guess the values. */
+    /* Both halves of the Step 2a item 6 policy. Which one is actually in
+     * force depends on whether the whitelist has entries -- an empty one
+     * falls back to allow-by-default -- so that is reported per check by
+     * charra_verify_log_file_hashes_against_policy(), not here. */
+    charra_log_info("[" LOG_NAME "]   %-22s '%s'  (no flag)", "whitelist",
+            whitelist_hashes_path);
+    charra_log_info("[" LOG_NAME "]   %-22s '%s'  (no flag)", "blacklist",
+            blacklist_hashes_path);
+    charra_log_info("[" LOG_NAME "]   %-22s '%s'  (in use: %s, no flag)",
+            "IMA test log", ima_test_log_path,
+            use_ima_test_log ? "yes" : "no");
+    charra_log_info("[" LOG_NAME "] Run with --help for every flag and its "
+                    "accepted range.");
+    charra_log_info("[" LOG_NAME
+                    "] ============================================================");
+}

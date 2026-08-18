@@ -93,6 +93,15 @@ bin/relying_party [OPTIONS]
 | `-C`, `--cycles=COUNT` | 0 | Stop cleanly after N attestation cycles. 0 = unbounded |
 | `-A`, `--attester-ak-validity=SECONDS` | 300 (5 min) | Lifetime of the Attester AK cert **RP** issues under its own CA |
 | `-B`, `--benchmark` | off | Run the bounded 1→5-Verifier timing sweep and exit instead |
+| `--verifier-timeout=SECONDS` | 6 | Wait for a Verifier's reply before giving up. Also bounds **every other** RP round trip — Trust Manager, `/certify_ak`, `/qualify`. A Verifier that times out counts against the majority exactly like a NO vote |
+| `--attester-timeout=SECONDS` | 6 | Wait for the Attester's evidence before giving up, which ends the cycle |
+
+Every run opens by naming its **mode** (`MODE: DAEMON` or `MODE: BENCHMARK`)
+and listing all of the above, tagging each value it took from the table rather
+than the command line with `(default)`. So a log file records what the run was
+actually configured with, without needing the command that started it. A flag
+that does not apply to the chosen mode — `--interval` under `--benchmark`, say
+— is called out as having no effect rather than being ignored silently.
 
 ### Stopping it
 
@@ -256,8 +265,11 @@ to N Verifiers — the term that actually scales. The **first block is
 inflated** by all the one-time provisioning; for clean numbers, run the sweep
 twice against a warm `state/` and keep the second.
 
-> `stddev` is `0.000000` because `NUM_RUNS` is `1` (a compile-time constant in
-> `src/relying_party.c`). Raise it and rebuild for real deviations.
+> `stddev` is computed over `NUM_RUNS` measured cycles per step (a
+> compile-time constant in `src/rp/rp_shared.h`, currently `5`), each step
+> preceded by a discarded warm-up cycle so one-off onboarding cost is not
+> blended into the steady state. Raise `NUM_RUNS` and rebuild for tighter
+> deviations.
 
 ---
 
@@ -287,10 +299,17 @@ bin/verifier --port 5684 [OPTIONS]
 > file-hash policy) is deliberately the **RP's** Step 2a gate, run against
 > the raw log before cleansing — the Verifier only ever sees the redacted
 > `log_r`. Inherited from upstream CHARRA, where the Verifier did this work.
+>
+> Passing any of them (or `--ip`) now logs a `NOT IMPLEMENTED` warning at
+> startup, so the flag cannot look like it worked.
 
 > The help text says "*Connect to* PORT" — inherited from upstream, where the
 > Verifier was the client. This Verifier is passive: `--port` is the **listen**
 > port. `--ip` is likewise vestigial here.
+
+Like the RP, a Verifier opens by listing every setting above with `(default)`
+against any it took from this table rather than the command line, followed by
+the state files and CA this instance will use.
 
 Each port has its **own CA key** (`keys/verifier-ca-<port>.key`), its own
 issuance ledger and its own nonce, so Verifiers are genuinely independent —

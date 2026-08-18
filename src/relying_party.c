@@ -41,11 +41,6 @@
 #include "rp/rp_shared.h"
 #include "rp/rp_stats.h"
 
-/* measurement config. Every verifier count is measured NUM_RUNS times AFTER
- * a discarded warm-up cycle -- see the sweep in main() for why a single
- * sample per step measured the wrong thing. */
-#define NUM_RUNS 5
-
 bool rp_benchmark_mode = false;
 unsigned int rp_attestation_interval_s =
         RP_DEFAULT_ATTESTATION_INTERVAL_S;
@@ -84,7 +79,7 @@ char rejection_reason[MAX_VERIFIERS][128];
 verifier_info verifiers[MAX_VERIFIERS];
 /* Was 6000 -- 1000x too large: this feeds libcoap's ack_timeout (seconds),
  * so a stray retransmission could take tens of real seconds to resolve. */
-uint16_t verifier_response_timeout = 6;  // timeout when waiting for verifier's answer (attestation results) in seconds
+uint16_t verifier_response_timeout = RP_DEFAULT_VERIFIER_TIMEOUT_S;
 bool processing_appraisal_response[MAX_VERIFIERS] = {false};
 
 /* attester config (the wait between attestations is --interval, see
@@ -97,7 +92,7 @@ uint32_t tpm_pcr_selection_len = 9;
 /* Same 1000x-too-large bug as verifier_response_timeout above, fixed the
  * same way; a real get_evidence round trip in this dev environment takes
  * ~0.2s, so 6s is generous, not tight. */
-uint16_t attester_response_timeout = 6;  // timeout when waiting for the attester's answer (evidence) in seconds
+uint16_t attester_response_timeout = RP_DEFAULT_ATTESTER_TIMEOUT_S;
 bool use_ima_event_log = false;
 char* ima_event_log_path = "/sys/kernel/security/ima/binary_runtime_measurements";
 bool use_ima_test_log = true;
@@ -535,6 +530,10 @@ int main(int argc, char** argv) {
     }
     charra_log_set_level(charra_log_level);
 
+    /* Before any setup output, so the top of a log file always states which
+     * mode this run is in and every value it will use. */
+    rp_log_effective_configuration();
+
     /* RP's own runtime state (TPM identity, per-Verifier AK certificates,
      * shared qualification cache) lives under state/relying-party/ --
      * mkdir() it once, up front, same reasoning verifier.c's main() already
@@ -556,16 +555,6 @@ int main(int argc, char** argv) {
     }
 
     if (rp_benchmark_mode) {
-        charra_log_info("[" LOG_NAME "] Effective configuration: mode=benchmark "
-                        "verifier_sweep=1..%d runs_per_step=%d "
-                        "(plus 1 discarded warm-up cycle per step) "
-                        "verifier_response_timeout=%us "
-                        "attester_response_timeout=%us blacklist='%s' "
-                        "ima_test_log='%s' (use_ima_test_log=%s)",
-                RP_MAX_SWEEP_VERIFIERS, NUM_RUNS, verifier_response_timeout,
-                attester_response_timeout, blacklist_hashes_path,
-                ima_test_log_path, use_ima_test_log ? "true" : "false");
-
         FILE* timing_file = fopen("timings_RP_multi_verifiers.txt", "w");
         if (timing_file == NULL) {
             perror("fopen");
@@ -680,17 +669,6 @@ int main(int argc, char** argv) {
     }
 
     /* --- daemon mode (default) ----------------------------------------- */
-    charra_log_info("[" LOG_NAME "] Effective configuration: mode=daemon "
-                    "verifiers=%d interval=%us qualify_renew_margin=%us "
-                    "ak_renew_margin=%lds "
-                    "verifier_response_timeout=%us "
-                    "attester_response_timeout=%us blacklist='%s' "
-                    "ima_test_log='%s' (use_ima_test_log=%s)",
-            rp_num_verifiers, rp_attestation_interval_s, rp_qualify_renew_margin_s,
-            (long)rp_ak_renew_margin_s,
-            verifier_response_timeout, attester_response_timeout,
-            blacklist_hashes_path, ima_test_log_path,
-            use_ima_test_log ? "true" : "false");
     charra_log_info("[" LOG_NAME "] Entering attestation loop; Ctrl+C (SIGINT) "
                     "to stop.");
 
