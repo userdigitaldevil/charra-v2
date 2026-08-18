@@ -284,6 +284,27 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
         goto cleanup;
     }
 
+    if (coap_pdu_get_code(received) == COAP_RESPONSE_CODE_BAD_REQUEST) {
+        /* The Verifier rejected the request before appraising it at all
+         * (malformed payload, unparseable evidence, or a Verifier-side
+         * error). It answers 4.00 with no body -- the specifics are in its
+         * own log, deliberately not on the wire -- so record that it DID
+         * answer. Without this the empty body would look like no response
+         * and the summary would call a responding Verifier unreachable.
+         * Not retried: a request it could not parse will not parse on a
+         * second identical attempt. */
+        charra_log_error("[" LOG_NAME "] Verifier n\u00b0 %d (port %u) "
+                         "rejected the request before appraisal (4.00); see "
+                         "that Verifier's log for the reason.",
+                *current_thread_index + 1,
+                verifiers[*current_thread_index].port_number);
+        snprintf(rejection_reason[*current_thread_index],
+                sizeof(rejection_reason[*current_thread_index]),
+                "rejected before appraisal (4.00) -- see Verifier log");
+        attestation_results[*current_thread_index] = false;
+        goto cleanup;
+    }
+
     int coap_r = 0;
     size_t data_len = 0;
     const uint8_t* data = NULL;
