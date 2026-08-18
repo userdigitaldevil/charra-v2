@@ -280,9 +280,17 @@ void coap_qualify_submit_handler(struct coap_resource_t* resource,
      * behaving RP's redaction comes out byte-identical to golden_log here;
      * a passing check on a legitimately-behaving RP is the expected,
      * common case, not a known-broken path. */
-    if (charra_rp_qualification_check(&qualification_state,
-                req.submitted_redacted_log, req.submitted_redacted_log_len,
-                req.submitted_pcr_digest, time(NULL)) == CHARRA_RC_SUCCESS) {
+    CHARRA_RC qualification_rc = charra_rp_qualification_check(
+            &qualification_state, req.submitted_redacted_log,
+            req.submitted_redacted_log_len, req.submitted_pcr_digest,
+            time(NULL));
+    /* Single-use: consume the challenge whichever way it went, so a captured
+     * submission cannot be replayed to renew the grant. A retry needs a
+     * fresh /qualify. Mirrors certify_ak_pending_take(). */
+    const time_t granted_expires_at = qualification_state.expires_at;
+    charra_rp_qualification_state_free(&qualification_state);
+
+    if (qualification_rc == CHARRA_RC_SUCCESS) {
         /* Persist the verdict, keyed by this RP's identity -- this is what
          * lets coap_appraise_handler() later confirm THIS SPECIFIC RP
          * qualified, not just "someone did, recently". Deliberately done
@@ -295,7 +303,7 @@ void coap_qualify_submit_handler(struct coap_resource_t* resource,
         memcpy(qual_record.ek_fingerprint, ek_fingerprint,
                 sizeof(qual_record.ek_fingerprint));
         qual_record.qualified_at = time(NULL);
-        qual_record.expires_at = qualification_state.expires_at;
+        qual_record.expires_at = granted_expires_at;
         if (charra_qualification_state_renew(qualification_state_file_path,
                     ek_fingerprint, &qual_record) != CHARRA_RC_SUCCESS) {
             charra_log_error("[" LOG_NAME "] /qualify/submit: could not "
@@ -308,13 +316,12 @@ void coap_qualify_submit_handler(struct coap_resource_t* resource,
         charra_log_info(
                 "[" LOG_NAME "] /qualify/submit: RP %s... qualified (valid "
                 "until %ld, %ld second(s) from now).",
-                ek_fingerprint_hex, (long)qualification_state.expires_at,
-                (long)(qualification_state.expires_at - time(NULL)));
+                ek_fingerprint_hex, (long)granted_expires_at,
+                (long)(granted_expires_at - time(NULL)));
         response_code = COAP_RESPONSE_CODE_CONTENT;
         message = "Qualification successful!\0";
         submit_response.qualified = 1;
-        submit_response.expires_at =
-                (uint64_t)qualification_state.expires_at;
+        submit_response.expires_at = (uint64_t)granted_expires_at;
     } else {
         char ek_fingerprint_hex[17] = {0};
         hex_prefix(ek_fingerprint, sizeof(ek_fingerprint), ek_fingerprint_hex,

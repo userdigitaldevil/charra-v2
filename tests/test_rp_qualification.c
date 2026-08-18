@@ -203,6 +203,36 @@ static void test_state_free_is_idempotent(void) {
     free(challenge_log);
 }
 
+static void test_no_outstanding_challenge_rejects_empty_submission(void) {
+    printf("\nno outstanding challenge rejects an empty submission "
+           "(regression: V-1)\n");
+
+    /* A zeroed state -- a Verifier that never served /qualify, or one whose
+     * challenge was already consumed -- has golden_log_len 0 and an all-zero
+     * golden_pcr. An empty log plus a zero digest matches both by accident,
+     * which would qualify a caller that never ran the SDK. */
+    rp_qualification_state state = {0};
+    uint8_t zero_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
+
+    check("empty log + zero digest against a zeroed state is REJECTED",
+            charra_rp_qualification_check(&state, NULL, 0, zero_digest,
+                    time(NULL)) != CHARRA_RC_SUCCESS);
+    check("state is not left marked qualified", !state.qualified);
+
+    /* Same, for a state consumed after a real challenge. */
+    uint8_t* challenge_log = NULL;
+    uint32_t challenge_log_len = 0;
+    charra_rp_qualification_generate(
+            4, 77, test_salt, &state, &challenge_log, &challenge_log_len);
+    charra_rp_qualification_state_free(&state);
+
+    check("empty log + zero digest against a CONSUMED state is REJECTED",
+            charra_rp_qualification_check(&state, NULL, 0, zero_digest,
+                    time(NULL)) != CHARRA_RC_SUCCESS);
+
+    free(challenge_log);
+}
+
 static void test_bad_arguments(void) {
     printf("\nbad arguments\n");
 
@@ -251,6 +281,7 @@ int main(void) {
     test_correct_log_but_wrong_pcr_rejected();
     test_is_valid_false_before_any_check();
     test_state_free_is_idempotent();
+    test_no_outstanding_challenge_rejects_empty_submission();
     test_bad_arguments();
 
     printf("\n=================================\n");

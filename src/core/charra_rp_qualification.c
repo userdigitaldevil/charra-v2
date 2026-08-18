@@ -76,6 +76,13 @@ CHARRA_RC charra_rp_qualification_check(rp_qualification_state* state,
         return CHARRA_RC_BAD_ARGUMENT;
     }
 
+    /* No challenge outstanding: a zeroed state has golden_log_len == 0 and
+     * an all-zero golden_pcr, which an empty log plus a zero digest would
+     * match -- qualifying a caller that never ran the SDK. */
+    if (state->golden_log == NULL || state->golden_log_len == 0) {
+        return CHARRA_RC_VERIFICATION_FAILED;
+    }
+
     bool log_matches = submitted_log_len == state->golden_log_len &&
             (submitted_log_len == 0 ||
                     memcmp(submitted_log, state->golden_log,

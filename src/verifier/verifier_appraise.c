@@ -462,27 +462,45 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     bool attestation_result_nonce_rp = false;
     {
         charra_log_info("[" LOG_NAME "] Verifying RP nonce ...");
+        /* The len != 0 term is load-bearing, not defensive: with no
+         * challenge outstanding both lengths are 0 and memcmp(_, _, 0)
+         * returns 0, so an empty nonce would match. */
         attestation_result_nonce_rp =
+                verifier_challenge_nonce_len != 0 &&
                 res.verifier_nonce_len == verifier_challenge_nonce_len &&
                 memcmp(res.verifier_nonce, verifier_challenge_nonce,
                         verifier_challenge_nonce_len) == 0;
+        /* Snapshot for the failure diagnostic below -- the challenge is
+         * spent immediately after. */
+        uint8_t expected_nonce[TPM2_SHA256_DIGEST_SIZE] = {0};
+        uint32_t expected_nonce_len = verifier_challenge_nonce_len;
+        memcpy(expected_nonce, verifier_challenge_nonce,
+                sizeof(expected_nonce));
+        /* Single-use: spend the challenge once it has been checked, pass or
+         * fail, so a captured bundle cannot be replayed until the next
+         * /nonce rotates it. A retry needs a fresh /nonce. */
+        memset(verifier_challenge_nonce, 0, sizeof(verifier_challenge_nonce));
+        verifier_challenge_nonce_len = 0;
         if (attestation_result_nonce_rp == true) {
             charra_log_info("[" LOG_NAME "]     => Nonce in Quote_r is "
                             "valid! (matches the one sent)");
         } else {
             char expected_nonce_hex[17] = {0};
             char received_nonce_hex[17] = {0};
-            hex_prefix(verifier_challenge_nonce, verifier_challenge_nonce_len,
-                    expected_nonce_hex, sizeof(expected_nonce_hex));
+            hex_prefix(expected_nonce, expected_nonce_len, expected_nonce_hex,
+                    sizeof(expected_nonce_hex));
             hex_prefix(res.verifier_nonce, res.verifier_nonce_len,
                     received_nonce_hex, sizeof(received_nonce_hex));
             charra_log_error("[" LOG_NAME
-                             "]     => Nonce in Quote_r is NOT valid! (does "
-                             "not match the one sent)");
+                             "]     => Nonce in Quote_r is NOT valid! (%s)",
+                    expected_nonce_len == 0
+                            ? "no challenge outstanding -- /nonce was never "
+                              "called, or this one was already spent"
+                            : "does not match the one sent");
             charra_log_error(
                     "[" LOG_NAME "]     => expected %u byte(s), starting "
                     "%s...; received %u byte(s), starting %s...",
-                    verifier_challenge_nonce_len, expected_nonce_hex,
+                    expected_nonce_len, expected_nonce_hex,
                     res.verifier_nonce_len, received_nonce_hex);
         }
     }

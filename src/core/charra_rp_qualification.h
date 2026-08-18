@@ -130,6 +130,11 @@ CHARRA_RC charra_rp_qualification_generate(uint32_t num_entries,
  * CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS. On mismatch, sets
  * state->qualified = false and state->expires_at = 0.
  *
+ * A state with no challenge outstanding (golden_log NULL/empty) is rejected
+ * outright: its all-zero golden answer would otherwise be matched by an
+ * empty log plus a zero digest. Callers should consume the state after
+ * this returns, so one challenge answers exactly one submission.
+ *
  * @param[in,out] state golden answer to check against; updated in place
  * @param[in] submitted_log the RP's redacted log; may be NULL only if
  * submitted_log_len is 0
