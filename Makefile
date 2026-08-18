@@ -136,7 +136,7 @@ OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/util/, cbor_util charra_util co
 # Relying-Party-only modules (src/rp/). Kept out of $(OBJECTS) on purpose:
 # that list is linked into every binary, and these carry RP-specific state
 # the Attester/Verifier/Trust Manager have no business pulling in.
-RP_OBJECTS = $(addsuffix .o, $(addprefix $(OBJDIR)/rp/, rp_stats rp_config rp_coap rp_qualification rp_evidence rp_attester_identity rp_identity rp_attestation))
+RP_OBJECTS = $(addsuffix .o, $(addprefix $(OBJDIR)/rp/, rp_stats rp_config rp_coap rp_cert_cache rp_qualification rp_evidence rp_attester_identity rp_identity rp_attestation))
 
 # Verifier-only modules (src/verifier/), kept out of $(OBJECTS) for the same
 # reason as RP_OBJECTS above.

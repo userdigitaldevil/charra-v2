@@ -5,6 +5,8 @@
 
 #include "rp_identity.h"
 
+#include "rp_cert_cache.h"
+
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -538,65 +540,17 @@ CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
             "state/relying-party/ak-certificates/rp-ak-certificate-%u.der",
             verifier_port);
 
-    if (charra_io_file_exists(cert_path) == CHARRA_RC_SUCCESS) {
-        char* cert_buf = NULL;
-        size_t cert_buf_len = 0;
-        if ((result = charra_io_read_file(cert_path, &cert_buf,
-                     &cert_buf_len)) != CHARRA_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] Could not read cached AK certificate.");
-            return result;
-        }
-        uint8_t* cert_der = malloc(cert_buf_len);
-        if (cert_der == NULL) {
-            charra_io_free_file_buffer(&cert_buf);
-            return CHARRA_RC_ERROR;
-        }
-        memcpy(cert_der, cert_buf, cert_buf_len);
-        charra_io_free_file_buffer(&cert_buf);
-
-        /* Expiry is acted on, not just printed: this cache is keyed on the
-         * file existing, and the Verifier gives no separate signal for a
-         * stale certificate -- it simply votes NO. Without this check an
-         * expired certificate would be resent every cycle and rejected
-         * every cycle, with nothing ever re-provisioning it. Renew slightly
-         * early so it never lapses mid-cycle. */
-        bool cache_usable = false;
-        mbedtls_x509_crt cached_cert;
-        mbedtls_x509_crt_init(&cached_cert);
-        if (mbedtls_x509_crt_parse(&cached_cert, cert_der, cert_buf_len) ==
-                0) {
-            long days_left =
-                    charra_crypto_x509_days_until_expiry(&cached_cert);
-            if (!charra_cert_needs_renewal(
-                        charra_crypto_x509_expiry_time(&cached_cert))) {
-                cache_usable = true;
-                rp_ak_cert_expires_at[verifier_index] =
-                        charra_crypto_x509_expiry_time(&cached_cert);
-                charra_log_info("[" LOG_NAME "] Reloading previously issued "
-                                "AK certificate for this Verifier (cached, "
-                                "expires in %ld day(s)).",
-                        days_left);
-            } else {
-                charra_log_info("[" LOG_NAME "] Cached AK certificate for "
-                                "this Verifier expires in %ld day(s) -- "
-                                "re-provisioning via /certify_ak.",
-                        days_left);
-            }
-        } else {
-            charra_log_error("[" LOG_NAME "] Cached AK certificate for this "
-                             "Verifier does not parse -- re-provisioning.");
-        }
-        mbedtls_x509_crt_free(&cached_cert);
-
-        if (cache_usable) {
-            rp_ak_cert_der[verifier_index] = cert_der;
-            rp_ak_cert_der_len[verifier_index] = (uint32_t)cert_buf_len;
-            rp_ak_cert_ready[verifier_index] = true;
-            rp_ak_cert_was_cached[verifier_index] = true;
-            return CHARRA_RC_SUCCESS;
-        }
-        charra_free_if_not_null(cert_der);
+    uint8_t* cached_der = NULL;
+    uint32_t cached_der_len = 0;
+    time_t cached_expires_at = 0;
+    if (rp_cert_cache_load(cert_path, "AK certificate for this Verifier",
+                &cached_der, &cached_der_len, &cached_expires_at)) {
+        rp_ak_cert_der[verifier_index] = cached_der;
+        rp_ak_cert_der_len[verifier_index] = cached_der_len;
+        rp_ak_cert_expires_at[verifier_index] = cached_expires_at;
+        rp_ak_cert_ready[verifier_index] = true;
+        rp_ak_cert_was_cached[verifier_index] = true;
+        return CHARRA_RC_SUCCESS;
     }
 
     charra_log_info("[" LOG_NAME "] No cached AK certificate for this "
