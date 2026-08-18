@@ -199,9 +199,15 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
     }
 
     ak_identity_rc = CHARRA_RC_ERROR;
-    result = rp_coap_fetch(attester_host, attester_port,
-            "certify_ak_of_attester", fetch_req_buf, fetch_req_buf_len,
-            coap_ak_identity_response_handler, &processing_ak_identity_response);
+    result = rp_coap_exchange(&(rp_coap_request){
+            .host = attester_host, .port = attester_port,
+            .uri_path = "certify_ak_of_attester",
+            .body = fetch_req_buf, .body_len = fetch_req_buf_len,
+            .on_response = coap_ak_identity_response_handler,
+            .response_pending = &processing_ak_identity_response,
+            .timeout_seconds = attester_response_timeout,
+            .dtls_rpk_peer_public_key_path = dtls_rpk_attester_public_key_path,
+        });
     free(fetch_req_buf);
     if (result != CHARRA_RC_SUCCESS) {
         charra_log_error(
@@ -503,10 +509,15 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
         return result;
     }
 
-    result = rp_coap_fetch(attester_host, attester_port,
-            "certify_ak_of_attester", deliver_rp_buf, deliver_rp_buf_len,
-            coap_certify_ak_of_attester_deliver_response_handler,
-            &processing_certify_ak_of_attester_deliver_response);
+    result = rp_coap_exchange(&(rp_coap_request){
+            .host = attester_host, .port = attester_port,
+            .uri_path = "certify_ak_of_attester",
+            .body = deliver_rp_buf, .body_len = deliver_rp_buf_len,
+            .on_response = coap_certify_ak_of_attester_deliver_response_handler,
+            .response_pending = &processing_certify_ak_of_attester_deliver_response,
+            .timeout_seconds = attester_response_timeout,
+            .dtls_rpk_peer_public_key_path = dtls_rpk_attester_public_key_path,
+        });
     free(deliver_rp_buf);
     if (result != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] DELIVER_RP round trip to the "
@@ -601,10 +612,15 @@ static CHARRA_RC ensure_attester_identity_fetched(void) {
     charra_log_info("[" LOG_NAME "] Attester identity not held by this "
                     "process yet -- FETCHing it before the relay.");
     ak_identity_rc = CHARRA_RC_ERROR;
-    result = rp_coap_fetch(attester_host, attester_port,
-            "certify_ak_of_attester", fetch_req_buf, fetch_req_buf_len,
-            coap_ak_identity_response_handler,
-            &processing_ak_identity_response);
+    result = rp_coap_exchange(&(rp_coap_request){
+            .host = attester_host, .port = attester_port,
+            .uri_path = "certify_ak_of_attester",
+            .body = fetch_req_buf, .body_len = fetch_req_buf_len,
+            .on_response = coap_ak_identity_response_handler,
+            .response_pending = &processing_ak_identity_response,
+            .timeout_seconds = attester_response_timeout,
+            .dtls_rpk_peer_public_key_path = dtls_rpk_attester_public_key_path,
+        });
     free(fetch_req_buf);
     if (result != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] /certify_ak_of_attester FETCH round "
@@ -822,10 +838,15 @@ CHARRA_RC ensure_attester_identity_certified_by_verifier(
     activate_credential_rc = CHARRA_RC_ERROR;
     memset(&activate_credential_response, 0,
             sizeof(activate_credential_response));
-    result = rp_coap_fetch(attester_host, attester_port,
-            "certify_ak_of_attester", activate_buf, activate_buf_len,
-            coap_activate_credential_response_handler,
-            &processing_activate_credential_response);
+    result = rp_coap_exchange(&(rp_coap_request){
+            .host = attester_host, .port = attester_port,
+            .uri_path = "certify_ak_of_attester",
+            .body = activate_buf, .body_len = activate_buf_len,
+            .on_response = coap_activate_credential_response_handler,
+            .response_pending = &processing_activate_credential_response,
+            .timeout_seconds = attester_response_timeout,
+            .dtls_rpk_peer_public_key_path = dtls_rpk_attester_public_key_path,
+        });
     free(activate_buf);
     if (result == CHARRA_RC_SUCCESS && activate_credential_rc !=
             CHARRA_RC_SUCCESS) {
@@ -891,11 +912,15 @@ CHARRA_RC ensure_attester_identity_certified_by_verifier(
             CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not marshal DELIVER_VERIFIER "
                          "request (non-fatal).");
-    } else if (rp_coap_fetch(attester_host, attester_port,
-                       "certify_ak_of_attester", deliver_verifier_buf,
-                       deliver_verifier_buf_len,
-                       coap_certify_ak_of_attester_deliver_response_handler,
-                       &processing_certify_ak_of_attester_deliver_response) !=
+    } else if (rp_coap_exchange(&(rp_coap_request){
+            .host = attester_host, .port = attester_port,
+            .uri_path = "certify_ak_of_attester",
+            .body = deliver_verifier_buf, .body_len = deliver_verifier_buf_len,
+            .on_response = coap_certify_ak_of_attester_deliver_response_handler,
+            .response_pending = &processing_certify_ak_of_attester_deliver_response,
+            .timeout_seconds = attester_response_timeout,
+            .dtls_rpk_peer_public_key_path = dtls_rpk_attester_public_key_path,
+        }) !=
             CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] DELIVER_VERIFIER round trip to the "
                          "Attester failed (non-fatal -- RP already holds "
@@ -982,9 +1007,15 @@ void rp_send_attestation_result(bool accepted, const char* reason) {
         return;
     }
 
-    if (rp_coap_fetch(attester_host, attester_port, "attest_result", buf,
-                buf_len, coap_certify_ak_of_attester_deliver_response_handler,
-                &processing_certify_ak_of_attester_deliver_response) !=
+    if (rp_coap_exchange(&(rp_coap_request){
+            .host = attester_host, .port = attester_port,
+            .uri_path = "attest_result",
+            .body = buf, .body_len = buf_len,
+            .on_response = coap_certify_ak_of_attester_deliver_response_handler,
+            .response_pending = &processing_certify_ak_of_attester_deliver_response,
+            .timeout_seconds = attester_response_timeout,
+            .dtls_rpk_peer_public_key_path = dtls_rpk_attester_public_key_path,
+        }) !=
             CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not deliver /attest_result "
                          "verdict to the Attester (non-fatal).");

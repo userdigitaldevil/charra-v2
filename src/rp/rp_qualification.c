@@ -242,9 +242,15 @@ CHARRA_RC rp_perform_qualification_handshake_once(
 
         /* --- 1. fetch a fresh challenge --- */
         qualify_response_rc = CHARRA_RC_ERROR;
-        result = rp_coap_fetch(verifier->ip_address, verifier->port_number,
-                "qualify", NULL, 0, coap_qualify_response_handler,
-                &processing_qualify_response);
+        result = rp_coap_exchange(&(rp_coap_request){
+            .host = verifier->ip_address, .port = verifier->port_number,
+            .uri_path = "qualify",
+            .body = NULL, .body_len = 0,
+            .on_response = coap_qualify_response_handler,
+            .response_pending = &processing_qualify_response,
+            .timeout_seconds = verifier_response_timeout,
+            .dtls_rpk_peer_public_key_path = dtls_rpk_verifier_public_key_path,
+        });
         if (result != CHARRA_RC_SUCCESS || qualify_response_rc != CHARRA_RC_SUCCESS) {
             charra_log_error(
                     "[" LOG_NAME "] Verifier n° %d (port %u) unreachable "
@@ -342,10 +348,15 @@ CHARRA_RC rp_perform_qualification_handshake_once(
             goto done;
         }
 
-        result = rp_coap_fetch(verifier->ip_address, verifier->port_number,
-                "qualify_submit", submit_buf, submit_buf_len,
-                coap_qualify_submit_response_handler,
-                &processing_qualify_submit_response);
+        result = rp_coap_exchange(&(rp_coap_request){
+            .host = verifier->ip_address, .port = verifier->port_number,
+            .uri_path = "qualify_submit",
+            .body = submit_buf, .body_len = submit_buf_len,
+            .on_response = coap_qualify_submit_response_handler,
+            .response_pending = &processing_qualify_submit_response,
+            .timeout_seconds = verifier_response_timeout,
+            .dtls_rpk_peer_public_key_path = dtls_rpk_verifier_public_key_path,
+        });
         charra_free_if_not_null(submit_buf);
         if (result != CHARRA_RC_SUCCESS) {
             charra_log_error(

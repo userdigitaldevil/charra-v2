@@ -319,7 +319,6 @@ cleanup:
 }
 
 CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers) {
-
     if (num_verifiers > MAX_VERIFIERS) {
         charra_log_error(
                 "[" LOG_NAME "] Requested %d verifier(s), but this process "
@@ -331,380 +330,77 @@ CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers) {
 
     charra_log_info("[" LOG_NAME "]  +------------ Interaction with the Trust Manager --------------+");
 
-    CHARRA_RC result = CHARRA_RC_ERROR;
-
-    coap_context_t* coap_context = NULL;
-    coap_session_t* coap_session = NULL;
-    coap_optlist_t* coap_options = NULL;
-    /* Declared/NULLed here, not at first use further down, so the
-     * request-marshaling failure's own 'goto cleanup' (and every other
-     * early exit) can safely charra_free_if_not_null() it -- same
-     * hoisted-declaration convention this file already uses elsewhere
-     * (e.g. get_attestation_results_thread()'s own comment on this exact
-     * pattern). */
-    uint8_t* req_buf = NULL;
-
-    charra_log_info("[" LOG_NAME "] Initializing CoAP in block-wise mode.");
-    if ((coap_context = charra_coap_new_context(true)) == NULL) {
-        charra_log_error("[" LOG_NAME "] Cannot create CoAP context.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-
-    charra_log_info(
-            "[" LOG_NAME "] Creating CoAP client session using UDP.");
-    if ((coap_session = charra_coap_new_client_session(coap_context,
-                    trust_manager_host, trust_manager_port, COAP_PROTO_UDP)) == NULL) {
-        charra_log_error("[" LOG_NAME
-                            "] Cannot create client session based on UDP.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-
-    charra_log_info("[" LOG_NAME "] Registering CoAP response handler.");
-    coap_register_response_handler(coap_context, coap_trust_manager_handler);
-
-    coap_session_set_app_data(coap_session, (void *)&num_verifiers);
-
-    /* Marshal the request via the shared, tested CBOR marshal/unmarshal
-     * pattern (charra_marshaling.c), replacing the raw int[] this used to
-     * send directly over the wire with no shared format definition tying
-     * it to trust_manager.c's own decoder. num_verifiers is already
-     * bounds-checked against MAX_VERIFIERS (10) above, well under
-     * CHARRA_MAX_REQUESTED_VERIFIERS (32), so the DTO's own fixed array
-     * can't overflow here. */
+    /* Marshal via the shared, tested CBOR pattern (charra_marshaling.c),
+     * replacing the raw int[] this used to put on the wire with no shared
+     * format definition tying it to trust_manager.c's decoder. num_verifiers
+     * is bounds-checked above, well under CHARRA_MAX_REQUESTED_VERIFIERS, so
+     * the DTO's fixed array cannot overflow. */
     msg_get_verifiers_request_dto req = {0};
     req.verifier_ids_len = (uint32_t)num_verifiers;
     for (int i = 0; i < num_verifiers; ++i) {
         req.verifier_ids[i] = verifier_list[i];
     }
+
+    uint8_t* req_buf = NULL;
     uint32_t req_buf_len = 0;
-    if ((result = charra_marshal_get_verifiers_request(
-                 &req, &req_buf_len, &req_buf)) != CHARRA_RC_SUCCESS) {
+    CHARRA_RC result = charra_marshal_get_verifiers_request(
+            &req, &req_buf_len, &req_buf);
+    if (result != CHARRA_RC_SUCCESS) {
         charra_log_error(
-                "[" LOG_NAME "] Could not marshal /get_verifiers request.");
-        goto cleanup;
+                "[" LOG_NAME "] Could not marshal the /get_verifiers request.");
+        return result;
     }
 
-    /* create CoAP option for content type */
-    uint8_t coap_mediatype_cbor_buf_n[4] = {0};
-    unsigned int coap_mediatype_cbor_buf_len_n = 0;
-    if ((coap_mediatype_cbor_buf_len_n = coap_encode_var_safe(
-                 coap_mediatype_cbor_buf_n, sizeof(coap_mediatype_cbor_buf_n),
-                 COAP_MEDIATYPE_APPLICATION_CBOR)) == 0) {
-        charra_log_error(
-                "[" LOG_NAME "] Cannot create option for CONTENT_TYPE.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
+    /* The Trust Manager has no configured DTLS-RPK peer key, so this
+     * exchange is plain UDP even under --rpk. */
+    result = rp_coap_exchange(&(rp_coap_request){
+            .host = trust_manager_host, .port = trust_manager_port,
+            .uri_path = "get_verifiers",
+            .body = req_buf, .body_len = req_buf_len,
+            .on_response = coap_trust_manager_handler,
+            .response_pending = &processing_trust_manager_response,
+            .session_app_data = &num_verifiers,
+            .timeout_seconds = trust_manager_response_timeout,
+            .dtls_rpk_peer_public_key_path = NULL,
+    });
 
-    charra_log_info("[" LOG_NAME "] Adding CoAP option URI_PATH.");
-    if (coap_insert_optlist(
-                &coap_options, coap_new_optlist(COAP_OPTION_URI_PATH, 13,
-                                       (const uint8_t*)"get_verifiers")) != 1) {
-        charra_log_error("[" LOG_NAME "] Cannot add CoAP option URI_PATH.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-
-    charra_log_info("[" LOG_NAME "] Adding CoAP option CONTENT_TYPE.");
-    if (coap_insert_optlist(&coap_options,
-                coap_new_optlist(COAP_OPTION_CONTENT_TYPE,
-                                       coap_mediatype_cbor_buf_len_n,
-                                       coap_mediatype_cbor_buf_n)) != 1) {
-        charra_log_error("[" LOG_NAME "] Cannot add CoAP option CONTENT_TYPE.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }    
-
-    /* new CoAP request PDU */
-    coap_pdu_t* pdu = NULL;
-    charra_log_info("[" LOG_NAME "] Creating request PDU.");
-    if ((pdu = charra_coap_new_request(coap_session, COAP_MESSAGE_TYPE_CON,
-                 COAP_REQUEST_FETCH, &coap_options, req_buf, req_buf_len)) ==
-            NULL) {
-        charra_log_error("[" LOG_NAME "] Cannot create request PDU.");
-        result = CHARRA_RC_ERROR;
-        goto cleanup;
-    }
-
-    /* set timeout length */
-    coap_fixed_point_t coap_timeout = {trust_manager_response_timeout, 0};
-    coap_session_set_ack_timeout(coap_session, coap_timeout);
-
-    /* send CoAP PDU */
-    coap_mid_t mid = COAP_INVALID_MID;
-    charra_log_info("[" LOG_NAME "] Sending CoAP message.");
-    if ((mid = coap_send_large(coap_session, pdu)) == COAP_INVALID_MID) {
-        charra_log_error("[" LOG_NAME "] Cannot send CoAP message.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-
-    int coap_io_process_time = -1;
-    /* processing and waiting for response */
-    charra_log_info("[" LOG_NAME "] Processing and waiting for response ...");
-    /* Real wall-clock elapsed time, not a sum of coap_io_process()'s own
-     * self-reported per-call durations -- that undercounts real time under
-     * concurrent load (see rp_coap_fetch()'s docstring comment for the
-     * full explanation; this replaces the previous "not 100% accurate...
-     * should be good enough" comment that turned out not to be, once
-     * actually exercised under 5-way Verifier contention). */
-    struct timespec wait_start, wait_now;
-    clock_gettime(CLOCK_MONOTONIC, &wait_start);
-    while (!processing_trust_manager_response && coap_io_pending(coap_context)) {
-        /* process CoAP I/O */
-        if ((coap_io_process_time = coap_io_process(
-                     coap_context, COAP_IO_PROCESS_TIME_MS)) == -1) {
-            charra_log_error(
-                    "[" LOG_NAME "] Error during CoAP I/O processing.");
-            result = CHARRA_RC_COAP_ERROR;
-            goto cleanup;
-        }
-        clock_gettime(CLOCK_MONOTONIC, &wait_now);
-        double elapsed_ms = (wait_now.tv_sec - wait_start.tv_sec) * 1000.0 +
-                             (wait_now.tv_nsec - wait_start.tv_nsec) / 1e6;
-        if (elapsed_ms >= (trust_manager_response_timeout * 1000)) {
-            charra_log_error("[" LOG_NAME
-                             "] Timeout after %.0f ms while waiting for or "
-                             "processing attestation response.",
-                    elapsed_ms);
-            result = CHARRA_RC_TIMEOUT;
-            goto cleanup;
-        }
-    }
-
-    result = CHARRA_RC_SUCCESS;
-
-cleanup:
     charra_free_if_not_null(req_buf);
-    /* free CoAP memory */
-    charra_free_if_not_null_ex(coap_options, coap_delete_optlist);
-    charra_free_if_not_null_ex(coap_session, coap_session_release);
-    charra_free_if_not_null_ex(coap_context, coap_free_context);
-
-    /* No coap_cleanup() here: it tears down libcoap's *global* state, so
-     * calling it per cycle (and from each Verifier thread) would pull the
-     * ground out from under contexts still in use and from the next
-     * cycle's. Done exactly once, at process exit in main(). */
-
     return result;
-
 }
 
-CHARRA_RC get_evidence() {
-
+CHARRA_RC get_evidence(void) {
     charra_log_info("[" LOG_NAME "]  +------------ Interaction with the Attester --------------+");
 
-    CHARRA_RC result = CHARRA_RC_ERROR;
-
-    coap_context_t* coap_context = NULL;
-    coap_session_t* coap_session = NULL;
-    coap_optlist_t* coap_options = NULL;
-    uint8_t* req_buf = NULL;  // TODO(any): make dynamic
-
-    if (use_dtls_psk && use_dtls_rpk) {
-        charra_log_error(
-                "[" LOG_NAME "] Configuration enables both DTSL with PSK "
-                "and DTSL with PKI. Aborting!");
-        goto cleanup;
-    }
-
-    if (use_dtls_psk || use_dtls_rpk) {
-        // print TLS version when in debug mode
-        coap_show_tls_version(LOG_DEBUG);
-    }
-
-    if (use_dtls_psk && !coap_dtls_is_supported()) {
-        charra_log_error("[" LOG_NAME "] CoAP does not support DTLS but the "
-                         "configuration enables DTLS. Aborting!");
-        goto cleanup;
-    }
-
-    /* create CoAP context */
-    charra_log_info("[" LOG_NAME "] Initializing CoAP in block-wise mode.");
-    if ((coap_context = charra_coap_new_context(true)) == NULL) {
-        charra_log_error("[" LOG_NAME "] Cannot create CoAP context.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-
-    /* register CoAP response handler */
-    charra_log_info("[" LOG_NAME "] Registering CoAP response handler.");
-    coap_register_response_handler(
-            coap_context, coap_attester_handler);
-
-    if (use_dtls_psk) {
-        charra_log_info("[" LOG_NAME
-                        "] Creating CoAP client session using DTLS with PSK.");
-        if ((coap_session = charra_coap_new_client_session_psk(
-                     coap_context,
-                     attester_host, attester_port, COAP_PROTO_DTLS, dtls_psk_identity,
-                     (uint8_t*)dtls_psk_key, strlen(dtls_psk_key))) == NULL) {
-            charra_log_error(
-                    "[" LOG_NAME
-                    "] Cannot create client session based on DTLS-PSK.");
-            result = CHARRA_RC_ERROR;
-            goto cleanup;
-        }
-    } else if (use_dtls_rpk) {
-        charra_log_info(
-                "[" LOG_NAME "] Creating CoAP client session using DTLS-RPK.");
-        coap_dtls_pki_t dtls_pki = {0};
-
-        result = charra_coap_setup_dtls_pki_for_rpk(&dtls_pki,
-                dtls_rpk_private_key_path, dtls_rpk_public_key_path,
-                dtls_rpk_attester_public_key_path, dtls_rpk_verify_peer_public_key);
-        if (result != CHARRA_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME
-                             "] Error while setting up DTLS-RPK structure.");
-            goto cleanup;
-        }
-
-        if ((coap_session = charra_coap_new_client_session_pki(
-                     coap_context,
-                     attester_host, attester_port, COAP_PROTO_DTLS,
-                     &dtls_pki)) == NULL) {
-            charra_log_error(
-                    "[" LOG_NAME
-                    "] Cannot create client session based on DTLS-RPK.");
-            result = CHARRA_RC_ERROR;
-            goto cleanup;
-        }
-    } else {
-        charra_log_info(
-                "[" LOG_NAME "] Creating CoAP client session using UDP.");
-        if ((coap_session = charra_coap_new_client_session(
-                     coap_context,
-                     attester_host, attester_port, COAP_PROTO_UDP)) == NULL) {
-            charra_log_error("[" LOG_NAME
-                             "] Cannot create client session based on UDP.");
-            result = CHARRA_RC_COAP_ERROR;
-            goto cleanup;
-        }
-    }
-
-    /* define needed variables */
-    msg_attestation_request_dto req = {0};
-    uint32_t req_buf_len = 0;
-    coap_pdu_t* pdu = NULL;
-    coap_mid_t mid = COAP_INVALID_MID;
-    int coap_io_process_time = -1;
-
-    /* create CoAP option for content type */
-    uint8_t coap_mediatype_cbor_buf[4] = {0};
-    unsigned int coap_mediatype_cbor_buf_len = 0;
-    if ((coap_mediatype_cbor_buf_len = coap_encode_var_safe(
-                 coap_mediatype_cbor_buf, sizeof(coap_mediatype_cbor_buf),
-                 COAP_MEDIATYPE_APPLICATION_CBOR)) == 0) {
-        charra_log_error(
-                "[" LOG_NAME "] Cannot create option for CONTENT_TYPE.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-
-    
-    /* create attestation request */
     charra_log_info("[" LOG_NAME "] Creating attestation request.");
-    if ((result = create_attestation_request(&req)) != CHARRA_RC_SUCCESS) {
+    msg_attestation_request_dto req = {0};
+    CHARRA_RC result = create_attestation_request(&req);
+    if (result != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Cannot create attestation request.");
-        goto cleanup;
-    } else {
-        /* store request data */
-        last_request = req;
+        return result;
     }
+    /* Kept for the whole cycle: its nonce is what Quote_a must answer, and
+     * the /nonce exchange below re-sends this exact DTO. */
+    last_request = req;
 
-
-    /* marshal attestation request */
-    charra_log_info(
-            "[" LOG_NAME "] Marshaling attestation request data to CBOR.");
+    uint8_t* req_buf = NULL;
+    uint32_t req_buf_len = 0;
     if ((result = charra_marshal_attestation_request(
                  &req, &req_buf_len, &req_buf)) != CHARRA_RC_SUCCESS) {
         charra_log_error(
                 "[" LOG_NAME "] Marshaling attestation request data failed.");
-        goto cleanup;
+        return result;
     }
 
-    /* CoAP options */
-    charra_log_info("[" LOG_NAME "] Adding CoAP option URI_PATH.");
-    if (coap_insert_optlist(&coap_options,
-                coap_new_optlist(COAP_OPTION_URI_PATH, 6,
-                                       (const uint8_t*)"attest")) != 1) {
-        charra_log_error("[" LOG_NAME "] Cannot add CoAP option URI_PATH.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-    charra_log_info("[" LOG_NAME "] Adding CoAP option CONTENT_TYPE.");
-    if (coap_insert_optlist(&coap_options,
-                coap_new_optlist(COAP_OPTION_CONTENT_TYPE,
-                                       coap_mediatype_cbor_buf_len,
-                                       coap_mediatype_cbor_buf)) != 1) {
-        charra_log_error("[" LOG_NAME "] Cannot add CoAP option CONTENT_TYPE.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-
-    /* new CoAP request PDU */
-    charra_log_info("[" LOG_NAME "] Creating request PDU.");
-    if ((pdu = charra_coap_new_request(coap_session,
-                 COAP_MESSAGE_TYPE_CON, COAP_REQUEST_FETCH,
-                 &coap_options, req_buf, req_buf_len)) ==
-            NULL) {
-        charra_log_error("[" LOG_NAME "] Cannot create request PDU.");
-        result = CHARRA_RC_ERROR;
-        goto cleanup;
-    }
-
-    /* set timeout length */
-    coap_fixed_point_t coap_timeout = {attester_response_timeout, 0};
-    coap_session_set_ack_timeout(coap_session, coap_timeout);
-
-    /* send CoAP PDU */
     charra_log_info("[" LOG_NAME "] Sending attestation request.");
-    if ((mid = coap_send_large(coap_session, pdu)) ==
-            COAP_INVALID_MID) {
-        charra_log_error("[" LOG_NAME "] Cannot send CoAP message.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-
-    /* processing and waiting for response */
-    charra_log_info("[" LOG_NAME "] Processing and waiting for response ...");
-    /* Real wall-clock elapsed time -- see rp_coap_fetch()'s docstring
-     * comment for why this replaced a self-reported-duration sum. */
-    struct timespec wait_start, wait_now;
-    clock_gettime(CLOCK_MONOTONIC, &wait_start);
-    while (!processing_attestation_response && coap_io_pending(coap_context)) {
-        /* process CoAP I/O */
-        if ((coap_io_process_time = coap_io_process(
-                     coap_context, COAP_IO_PROCESS_TIME_MS)) == -1) {
-            charra_log_error(
-                    "[" LOG_NAME "] Error during CoAP I/O processing.");
-            result = CHARRA_RC_COAP_ERROR;
-            goto cleanup;
-        }
-        clock_gettime(CLOCK_MONOTONIC, &wait_now);
-        double elapsed_ms = (wait_now.tv_sec - wait_start.tv_sec) * 1000.0 +
-                             (wait_now.tv_nsec - wait_start.tv_nsec) / 1e6;
-        if (elapsed_ms >= (attester_response_timeout * 1000)) {
-            charra_log_error("[" LOG_NAME
-                             "] Timeout after %.0f ms while waiting for or "
-                             "processing attestation response.",
-                    elapsed_ms);
-            result = CHARRA_RC_TIMEOUT;
-            goto cleanup;
-        }
-    }
-
-    result = CHARRA_RC_SUCCESS;
-
-cleanup:
-    /* free CoAP memory */
-    charra_free_if_not_null_ex(coap_options, coap_delete_optlist);
-    charra_free_if_not_null_ex(coap_session, coap_session_release);
-    charra_free_if_not_null_ex(coap_context, coap_free_context);
-
-    /* free variables */
+    result = rp_coap_exchange(&(rp_coap_request){
+            .host = attester_host, .port = attester_port,
+            .uri_path = "attest",
+            .body = req_buf, .body_len = req_buf_len,
+            .on_response = coap_attester_handler,
+            .response_pending = &processing_attestation_response,
+            .timeout_seconds = attester_response_timeout,
+            .dtls_rpk_peer_public_key_path = dtls_rpk_attester_public_key_path,
+    });
     charra_free_if_not_null(req_buf);
 
     /* Step 2a's verdict back to the Attester -- only meaningful once we
@@ -712,509 +408,121 @@ cleanup:
      * timeout, where there was no verdict to report. Sent here rather than
      * from the response handler; see rp_send_attestation_result(). */
     if (attestation_rc == CHARRA_RC_VERIFICATION_FAILED) {
-        rp_send_attestation_result(
-                false, "Step 2a local verification failed");
+        rp_send_attestation_result(false, "Step 2a local verification failed");
     } else if (result == CHARRA_RC_SUCCESS &&
                attestation_rc == CHARRA_RC_SUCCESS) {
         rp_send_attestation_result(true, "Step 2a local verification passed");
     }
 
-    /* No coap_cleanup() here: it tears down libcoap's *global* state, so
-     * calling it per cycle (and from each Verifier thread) would pull the
-     * ground out from under contexts still in use and from the next
-     * cycle's. Done exactly once, at process exit in main(). */
-
     return result;
 }
 
-void* get_attestation_results_thread(void *arg) {
-    /* Assigned on every failure path purely so the value is visible in a
-     * debugger; the thread's own outcome reaches the caller through
-     * attestation_results[]/verifier_latency_ms[], not through a return
-     * value, since pthread_join() here always discards it. */
-    CHARRA_RC result CHARRA_UNUSED = CHARRA_RC_ERROR;
+void* get_attestation_results_thread(void* arg) {
+    const int verifier_index = *(int*)arg;
+    const verifier_info* verifier = &verifiers[verifier_index];
 
-    int current_thread_index = *(int*)arg;
-    verifier_info verifier_info = verifiers[current_thread_index];
-
-    /* Tags this thread's log lines so 5 concurrent Verifier threads don't
+    /* Tags this thread's log lines so concurrent Verifier threads don't
      * interleave into one indistinguishable stream. */
     char log_prefix[32] = {0};
-    snprintf(log_prefix, sizeof(log_prefix), "[V%d:%u]",
-            current_thread_index + 1, verifier_info.port_number);
+    snprintf(log_prefix, sizeof(log_prefix), "[V%d:%u]", verifier_index + 1,
+            verifier->port_number);
     charra_log_set_thread_prefix(log_prefix);
 
-    /* cleanup/error below never sets attestation_results[] explicitly, so
-     * without this reset an early failure would silently keep a stale PASS
-     * from a previous run and get counted toward the vote. Fail closed. */
-    attestation_results[current_thread_index] = false;
-    verifier_latency_ms[current_thread_index] = -1;
+    /* Fail closed: nothing below sets these on an early exit, so without the
+     * reset a stale PASS from a previous cycle would be counted in the vote. */
+    attestation_results[verifier_index] = false;
+    verifier_latency_ms[verifier_index] = -1;
 
-     /* set varaibles here such that they are valid in case of an 'goto cleanup'
-     */
-    coap_context_t* coap_context = NULL;
-    coap_session_t* coap_session = NULL;
-    coap_optlist_t* coap_options = NULL;
-    /* Declared here, not at first use further down, for the same reason as
-     * the three above: several earlier goto cleanup jumps in this function
-     * would otherwise skip their initializers, leaving cleanup's unconditional
-     * charra_free_if_not_null() calls to free() an indeterminate pointer.
-     * coap_context_verifier_appraisal/_session_/_options_ used to be
-     * declared only right before the appraisal-request section, well after
-     * the "Verifier did not supply a nonce" goto cleanup a few lines below
-     * this one -- a verifier that timed out on /nonce meant this function
-     * jumped straight to cleanup and called coap_free_context()/
-     * coap_session_release()/coap_delete_optlist() on garbage stack
-     * pointers, corrupting the heap (observed live as "double free or
-     * corruption (out)"). Hoisted here for the same reason as the other
-     * five. */
+    /* Qualification is handled once, up front, by get_attestation_results()
+     * before any thread starts -- the ledger is shared, so one Verifier's
+     * answer is every Verifier's. These two are still per-Verifier: this
+     * Verifier's certificate for RP's AK, and its certificate for the
+     * Attester's. Both are best-effort -- send the evidence either way and
+     * let the Verifier judge Step 3a/3b and record its own decision. */
+    if (ensure_rp_ak_certificate(verifier_index) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not provision RP's AK "
+                         "certificate; forwarding evidence anyway.");
+    }
+    if (ensure_attester_identity_certified_by_verifier(verifier_index) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not provision the Attester's "
+                         "AK certificate; forwarding evidence anyway.");
+    }
+
+    /* --- ask this Verifier for its own freshness challenge --------------
+     * The body is the same attestation request RP built for the Attester:
+     * verifier.c's coap_nonce_handler() unmarshals it, keeps req.nonce for
+     * Quote_a's separate freshness check, and answers with a nonce IT chose.
+     * An empty body here made that unmarshal fail, which is why RP once
+     * never received a nonce and Quote_r could not be built. */
     uint8_t* nonce_req_buf = NULL;
     uint32_t nonce_req_buf_len = 0;
-    uint8_t* res_buf = NULL;
-    uint32_t res_buf_len = 0;
-    coap_context_t* coap_context_verifier_appraisal = NULL;
-    coap_session_t* coap_session_verifier_appraisal = NULL;
-    coap_optlist_t* coap_options_verifier_appraisal = NULL;
-
-    /* RP qualification is now handled once, up front, by
-     * get_attestation_results() before any thread starts (see
-     * rp_perform_qualification_handshake_once()) -- the shared
-     * qualification ledger means one Verifier's answer is every Verifier's
-     * answer, so nothing to do here. This thread still needs its OWN
-     * Verifier's AK *certificate* though (orthogonal, still per-Verifier --
-     * charra_rp_build_evidence_message() below only checks rp_ak_cert_
-     * ready[current_thread_index], it doesn't provision it). */
-    if (ensure_rp_ak_certificate(current_thread_index) != CHARRA_RC_SUCCESS) {
-        /* Send anyway, same reasoning as the Attester certificate below:
-         * the Verifier judges Step 3a and logs its own decision, and its
-         * 4.01 is what triggers re-provisioning here. */
+    if (charra_marshal_attestation_request(&last_request, &nonce_req_buf_len,
+                &nonce_req_buf) != CHARRA_RC_SUCCESS) {
         charra_log_error(
-                "[" LOG_NAME "] Verifier n° %d (port %u): could not provision "
-                "RP's AK certificate; forwarding evidence anyway for the "
-                "Verifier to judge.",
-                current_thread_index + 1,
-                verifiers[current_thread_index].port_number);
+                "[" LOG_NAME "] Could not marshal the /nonce request body.");
+        return NULL;
     }
 
-    /* Symmetric with the above: the Attester's AK certificate, issued by
-     * THIS Verifier's own CA, is also per-Verifier now (see
-     * ensure_attester_identity_certified_by_verifier()'s docstring). */
-    if (ensure_attester_identity_certified_by_verifier(current_thread_index) !=
-            CHARRA_RC_SUCCESS) {
-        /* Send anyway, with whatever we hold (possibly nothing): the
-         * Verifier is the one that judges Step 3b, and its own log records
-         * that the certificate came from RP. Letting it answer also gets us
-         * the 4.12 rejection, which drives the re-provision-and-retry below
-         * -- returning here would skip that recovery entirely. */
-        charra_log_error(
-                "[" LOG_NAME "] Verifier n° %d (port %u): could not provision "
-                "the Attester's AK certificate; forwarding evidence anyway "
-                "for the Verifier to judge.",
-                current_thread_index + 1,
-                verifiers[current_thread_index].port_number);
-    }
-
-    if (use_dtls_psk && use_dtls_rpk) {
-        charra_log_error(
-                "[" LOG_NAME "] Configuration enables both DTSL with PSK "
-                "and DTSL with PKI. Aborting!");
-        goto cleanup;
-    }
-
-    if (use_dtls_psk || use_dtls_rpk) {
-        // print TLS version when in debug mode
-        coap_show_tls_version(LOG_DEBUG);
-    }
-
-    if (use_dtls_psk && !coap_dtls_is_supported()) {
-        charra_log_error("[" LOG_NAME "] CoAP does not support DTLS but the "
-                         "configuration enables DTLS. Aborting!");
-        goto cleanup;
-    }
-
-    /* create CoAP context */
-    if ((coap_context = charra_coap_new_context(true)) == NULL) {
-        charra_log_error("[" LOG_NAME "] Cannot create CoAP context.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-
-    if (use_dtls_psk) {
-        charra_log_info("[" LOG_NAME
-                        "] Creating CoAP client session using DTLS with PSK.");
-        if ((coap_session = charra_coap_new_client_session_psk(
-                     coap_context, verifier_info.ip_address, verifier_info.port_number,
-                     COAP_PROTO_DTLS, dtls_psk_identity, (uint8_t*)dtls_psk_key,
-                     strlen(dtls_psk_key))) == NULL) {
-            charra_log_error(
-                    "[" LOG_NAME
-                    "] Cannot create client session based on DTLS-PSK.");
-            result = CHARRA_RC_ERROR;
-            goto cleanup;
-        }
-    } else if (use_dtls_rpk) {
-        charra_log_info(
-                "[" LOG_NAME "] Creating CoAP client session using DTLS-RPK.");
-        coap_dtls_pki_t dtls_pki = {0};
-
-        result = charra_coap_setup_dtls_pki_for_rpk(&dtls_pki,
-                dtls_rpk_private_key_path, dtls_rpk_public_key_path,
-                dtls_rpk_verifier_public_key_path, dtls_rpk_verify_peer_public_key);
-        if (result != CHARRA_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME
-                             "] Error while setting up DTLS-RPK structure.");
-            goto cleanup;
-        }
-
-        if ((coap_session = charra_coap_new_client_session_pki(
-                     coap_context, verifier_info.ip_address, verifier_info.port_number,
-                     COAP_PROTO_DTLS, &dtls_pki)) == NULL) {
-            charra_log_error(
-                    "[" LOG_NAME
-                    "] Cannot create client session based on DTLS-RPK.");
-            result = CHARRA_RC_ERROR;
-            goto cleanup;
-        }
-    } else {
-        if ((coap_session = charra_coap_new_client_session(
-                     coap_context, verifier_info.ip_address, verifier_info.port_number,
-                     COAP_PROTO_UDP)) == NULL) {
-            charra_log_error("[" LOG_NAME
-                             "] Cannot create client session based on UDP.");
-            result = CHARRA_RC_COAP_ERROR;
-            goto cleanup;
-        }
-    }
-
-    /* --- Interaction with the Verifier (sending the nonce) * ---------------------------------------------------------------*/
-    coap_pdu_t* pdu_n = NULL;
-    coap_mid_t mid_n = COAP_INVALID_MID;
-    int coap_io_process_time_n = -1;
-    
-    /* create CoAP option for content type */
-    uint8_t coap_mediatype_cbor_buf_n[4] = {0};
-    unsigned int coap_mediatype_cbor_buf_len_n = 0;
-    if ((coap_mediatype_cbor_buf_len_n = coap_encode_var_safe(
-                 coap_mediatype_cbor_buf_n, sizeof(coap_mediatype_cbor_buf_n),
-                 COAP_MEDIATYPE_APPLICATION_CBOR)) == 0) {
-        charra_log_error(
-                "[" LOG_NAME "] Cannot create option for CONTENT_TYPE.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-
-    /* Ask the Verifier for a nonce: send the same attestation request RP
-     * already built for the Attester (last_request, stable and read-only by
-     * now -- populated once in get_evidence(), which always completes
-     * before get_attestation_results() spawns this thread). verifier.c's
-     * coap_nonce_handler() unmarshals this exact DTO -- keeping req.nonce
-     * for its own separate Quote_a freshness check -- then generates and
-     * returns its own fresh challenge as the response body, a genuinely
-     * Verifier-picked value rather than an echo of what RP just sent (see
-     * verifier_challenge_nonce's comment in verifier/verifier_shared.h for why that
-     * distinction matters). An empty request body here made unmarshaling
-     * fail immediately ("Could not get CoAP PDU data"), which is why RP
-     * never received a nonce and Quote_r could never be built, before this
-     * was fixed. */
-    if ((result = charra_marshal_attestation_request(
-                 &last_request, &nonce_req_buf_len, &nonce_req_buf)) !=
-            CHARRA_RC_SUCCESS) {
-        charra_log_error(
-                "[" LOG_NAME "] Could not marshal /nonce request body.");
-        goto cleanup;
-    }
-
-    coap_session_set_app_data(coap_session, (void*)&current_thread_index);
-    coap_register_response_handler(coap_context, coap_verifier_handler_nonce);
-    verifier_nonce_lens[current_thread_index] = 0;
-    processing_nonce_response[current_thread_index] = true;
+    verifier_nonce_lens[verifier_index] = 0;
     charra_log_info("[" LOG_NAME "] Requesting a nonce from Verifier n\u00b0 %d ...",
-            current_thread_index + 1);
-
-
-    /* CoAP options */
-    if (coap_insert_optlist(
-                &coap_options, coap_new_optlist(COAP_OPTION_URI_PATH, 5,
-                                       (const uint8_t*)"nonce")) != 1) {
-        charra_log_error("[" LOG_NAME "] Cannot add CoAP option URI_PATH.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-    if (coap_insert_optlist(&coap_options,
-                coap_new_optlist(COAP_OPTION_CONTENT_TYPE,
-                                       coap_mediatype_cbor_buf_len_n,
-                                       coap_mediatype_cbor_buf_n)) != 1) {
-        charra_log_error("[" LOG_NAME "] Cannot add CoAP option CONTENT_TYPE.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-
-    if ((pdu_n = charra_coap_new_request(coap_session, COAP_MESSAGE_TYPE_CON, COAP_REQUEST_FETCH,
-                 &coap_options, nonce_req_buf, nonce_req_buf_len)) ==
-            NULL) {
-        charra_log_error("[" LOG_NAME "] Cannot create request PDU.");
-        result = CHARRA_RC_ERROR;
-        goto cleanup;
-    }
-
-    coap_fixed_point_t coap_timeout_n = {verifier_response_timeout, 0};
-    coap_session_set_ack_timeout(coap_session, coap_timeout_n);
-
-    if ((mid_n = coap_send_large(coap_session, pdu_n)) == COAP_INVALID_MID) {
-        charra_log_error("[" LOG_NAME "] Cannot send CoAP message.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-
-
-    /* Real wall-clock elapsed time -- see rp_coap_fetch()'s docstring
-     * comment for why this replaced a self-reported-duration sum. */
-    struct timespec wait_start_n, wait_now_n;
-    clock_gettime(CLOCK_MONOTONIC, &wait_start_n);
-    while (processing_nonce_response[current_thread_index] &&
-            coap_io_pending(coap_context)) {
-        /* process CoAP I/O */
-        if ((coap_io_process_time_n = coap_io_process(
-                     coap_context, COAP_IO_PROCESS_TIME_MS)) == -1) {
-            charra_log_error(
-                    "[" LOG_NAME "] Error during CoAP I/O processing.");
-            result = CHARRA_RC_COAP_ERROR;
-            goto cleanup;
-        }
-        clock_gettime(CLOCK_MONOTONIC, &wait_now_n);
-        double elapsed_ms_n =
-                (wait_now_n.tv_sec - wait_start_n.tv_sec) * 1000.0 +
-                (wait_now_n.tv_nsec - wait_start_n.tv_nsec) / 1e6;
-        if (elapsed_ms_n >= (verifier_response_timeout * 1000)) {
-            charra_log_error("[" LOG_NAME
-                             "] Timeout after %.0f ms while waiting for or "
-                             "processing attestation response.",
-                    elapsed_ms_n);
-            result = CHARRA_RC_TIMEOUT;
-            goto cleanup;
-        }
-    }
-
-    if (verifier_nonce_lens[current_thread_index] == 0) {
+            verifier_index + 1);
+    CHARRA_RC result = rp_coap_exchange(&(rp_coap_request){
+            .host = verifier->ip_address, .port = verifier->port_number,
+            .uri_path = "nonce",
+            .body = nonce_req_buf, .body_len = nonce_req_buf_len,
+            .on_response = coap_verifier_handler_nonce,
+            .response_pending = &processing_nonce_response[verifier_index],
+            .session_app_data = (void*)&verifier_index,
+            .timeout_seconds = verifier_response_timeout,
+            .dtls_rpk_peer_public_key_path = dtls_rpk_verifier_public_key_path,
+    });
+    charra_free_if_not_null(nonce_req_buf);
+    if (result != CHARRA_RC_SUCCESS ||
+            verifier_nonce_lens[verifier_index] == 0) {
         charra_log_error("[" LOG_NAME "] Verifier n\u00b0 %d did not supply a "
                          "nonce; cannot build Quote_r.",
-                current_thread_index + 1);
-        result = CHARRA_RC_ERROR;
-        goto cleanup;
+                verifier_index + 1);
+        return NULL;
     }
 
-    /* --- Interaction with the Verifier (sending Quote_r and log_r) * ---------------------------------------------------------------*/
-    if (use_dtls_psk && use_dtls_rpk) {
-        charra_log_error(
-                "[" LOG_NAME "] Configuration enables both DTSL with PSK "
-                "and DTSL with PKI. Aborting!");
-        goto cleanup;
+    /* --- send Quote_r + log_r for appraisal ---------------------------- */
+    uint8_t* evidence_buf = NULL;
+    uint32_t evidence_buf_len = 0;
+    /* Local, not a shared global: every Verifier thread runs this, so one
+     * thread's failure must not be readable as another's. */
+    if (charra_rp_build_evidence_message(verifier_index, &evidence_buf_len,
+                &evidence_buf) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Error building RP evidence message.");
+        return NULL;
     }
+    charra_log_info(
+            "[" LOG_NAME "] Sending %u bytes of RP evidence to Verifier n\u00b0 %d.",
+            evidence_buf_len, verifier_index + 1);
 
-    if (use_dtls_psk || use_dtls_rpk) {
-        // print TLS version when in debug mode
-        coap_show_tls_version(LOG_DEBUG);
+    struct timespec appraisal_start, appraisal_end;
+    clock_gettime(CLOCK_MONOTONIC, &appraisal_start);
+    /* One attempt: the Verifier's answer is a vote, not an instruction to
+     * retry. */
+    result = rp_coap_exchange(&(rp_coap_request){
+            .host = verifier->ip_address, .port = verifier->port_number,
+            .uri_path = "appraise",
+            .body = evidence_buf, .body_len = evidence_buf_len,
+            .on_response = coap_verifier_handler_appraisal,
+            .response_pending = &processing_appraisal_response[verifier_index],
+            .session_app_data = (void*)&verifier_index,
+            .timeout_seconds = verifier_response_timeout,
+            .dtls_rpk_peer_public_key_path = dtls_rpk_verifier_public_key_path,
+    });
+    clock_gettime(CLOCK_MONOTONIC, &appraisal_end);
+    charra_free_if_not_null(evidence_buf);
+
+    if (result == CHARRA_RC_SUCCESS) {
+        verifier_latency_ms[verifier_index] =
+                (long)((appraisal_end.tv_sec - appraisal_start.tv_sec) * 1000 +
+                        (appraisal_end.tv_nsec - appraisal_start.tv_nsec) /
+                                1000000);
     }
-
-    if (use_dtls_psk && !coap_dtls_is_supported()) {
-        charra_log_error("[" LOG_NAME "] CoAP does not support DTLS but the "
-                         "configuration enables DTLS. Aborting!");
-        goto cleanup;
-    }
-
-    /* create CoAP context */
-
-    //charra_log_info("[" LOG_NAME "] Initializing CoAP in block-wise mode.");
-    if ((coap_context_verifier_appraisal = charra_coap_new_context(true)) == NULL) {
-        charra_log_error("[" LOG_NAME "] Cannot create CoAP context.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-
-    /* register CoAP response handler */
-    //charra_log_info("[" LOG_NAME "] Registering CoAP response handler.");
-    coap_register_response_handler(
-            coap_context_verifier_appraisal, coap_verifier_handler_appraisal);
-
-    if (use_dtls_psk) {
-        charra_log_info("[" LOG_NAME
-                        "] Creating CoAP client session using DTLS with PSK.");
-        if ((coap_session_verifier_appraisal = charra_coap_new_client_session_psk(
-                     coap_context_verifier_appraisal, verifier_info.ip_address, verifier_info.port_number,
-                     COAP_PROTO_DTLS, dtls_psk_identity, (uint8_t*)dtls_psk_key,
-                     strlen(dtls_psk_key))) == NULL) {
-            charra_log_error(
-                    "[" LOG_NAME
-                    "] Cannot create client session based on DTLS-PSK.");
-            result = CHARRA_RC_ERROR;
-            goto cleanup;
-        }
-    } else if (use_dtls_rpk) {
-        charra_log_info(
-                "[" LOG_NAME "] Creating CoAP client session using DTLS-RPK.");
-        coap_dtls_pki_t dtls_pki = {0};
-
-        result = charra_coap_setup_dtls_pki_for_rpk(&dtls_pki,
-                dtls_rpk_private_key_path, dtls_rpk_public_key_path,
-                dtls_rpk_verifier_public_key_path, dtls_rpk_verify_peer_public_key);
-        if (result != CHARRA_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME
-                             "] Error while setting up DTLS-RPK structure.");
-            goto cleanup;
-        }
-
-        if ((coap_session_verifier_appraisal = charra_coap_new_client_session_pki(
-                     coap_context_verifier_appraisal, verifier_info.ip_address, verifier_info.port_number,
-                     COAP_PROTO_DTLS, &dtls_pki)) == NULL) {
-            charra_log_error(
-                    "[" LOG_NAME
-                    "] Cannot create client session based on DTLS-RPK.");
-            result = CHARRA_RC_ERROR;
-            goto cleanup;
-        }
-    } else {
-        //charra_log_info("[" LOG_NAME "] Creating CoAP client session using UDP.");
-        if ((coap_session_verifier_appraisal = charra_coap_new_client_session(
-                     coap_context_verifier_appraisal, verifier_info.ip_address, verifier_info.port_number,
-                     COAP_PROTO_UDP)) == NULL) {
-            charra_log_error("[" LOG_NAME
-                             "] Cannot create client session based on UDP.");
-            result = CHARRA_RC_COAP_ERROR;
-            goto cleanup;
-        }
-    }
-
-    /* create CoAP option for content type */
-    uint8_t coap_mediatype_cbor_buf_v[4] = {0};
-    unsigned int coap_mediatype_cbor_buf_len_v = 0;
-    if ((coap_mediatype_cbor_buf_len_v = coap_encode_var_safe(
-                 coap_mediatype_cbor_buf_v, sizeof(coap_mediatype_cbor_buf_v),
-                 COAP_MEDIATYPE_APPLICATION_CBOR)) == 0) {
-        charra_log_error(
-                "[" LOG_NAME "] Cannot create option for CONTENT_TYPE.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-
-    /* CoAP options -- built once, reused for both the first attempt and any
-     * AK-certificate-rejection retry below: charra_coap_new_request() only
-     * reads from this list, it does not consume or free it. */
-    if (coap_insert_optlist(
-                &coap_options_verifier_appraisal, coap_new_optlist(COAP_OPTION_URI_PATH, 8,
-                                       (const uint8_t*)"appraise")) != 1) {
-        charra_log_error("[" LOG_NAME "] Cannot add CoAP option URI_PATH.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-    if (coap_insert_optlist(&coap_options_verifier_appraisal,
-                coap_new_optlist(COAP_OPTION_CONTENT_TYPE,
-                                       coap_mediatype_cbor_buf_len_v,
-                                       coap_mediatype_cbor_buf_v)) != 1) {
-        charra_log_error("[" LOG_NAME "] Cannot add CoAP option CONTENT_TYPE.");
-        result = CHARRA_RC_COAP_ERROR;
-        goto cleanup;
-    }
-
-    coap_fixed_point_t coap_timeout_v = {verifier_response_timeout, 0};
-    coap_session_set_ack_timeout(coap_session_verifier_appraisal, coap_timeout_v);
-    coap_session_set_app_data(coap_session_verifier_appraisal, &current_thread_index);
-
-    /* One attempt: the Verifier's answer is a vote, not an
-     * instruction to retry. */
-    long total_appraisal_wait_ms = 0;
-    {
-        charra_free_if_not_null(res_buf);
-        res_buf = NULL;
-        res_buf_len = 0;
-
-        /* No cross-thread locking needed here (unlike the /certify_ak CoAP
-         * round trip itself, still guarded by rp_ak_reprovision_mutex,
-         * see ensure_rp_ak_certificate()): this thread is the only one
-         * that ever reads or writes rp_ak_cert_der[current_thread_index],
-         * since each Verifier's certificate is now independently owned by
-         * its own thread's array slot. */
-        /* Local, not the file-scope charra_r this used to assign: every
-         * Verifier thread runs this, so a shared result variable lets one
-         * thread's failure be read as another's. */
-        CHARRA_RC build_rc = charra_rp_build_evidence_message(
-                current_thread_index, &res_buf_len, &res_buf);
-        if (build_rc != CHARRA_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] Error building RP evidence message.");
-            goto cleanup;
-        }
-        charra_log_info("[" LOG_NAME "] Sending %u bytes of RP evidence to "
-                        "Verifier n\u00b0 %d.",
-                res_buf_len, current_thread_index + 1);
-
-        coap_pdu_t* pdu_v = NULL;
-        if ((pdu_v = charra_coap_new_request(coap_session_verifier_appraisal, COAP_MESSAGE_TYPE_CON, COAP_REQUEST_FETCH,
-                     &coap_options_verifier_appraisal, res_buf, res_buf_len)) ==
-                NULL) {
-            charra_log_error("[" LOG_NAME "] Cannot create request PDU.");
-            result = CHARRA_RC_ERROR;
-            goto cleanup;
-        }
-
-        if (coap_send_large(coap_session_verifier_appraisal, pdu_v) == COAP_INVALID_MID) {
-            charra_log_error("[" LOG_NAME "] Cannot send CoAP message.");
-            result = CHARRA_RC_COAP_ERROR;
-            goto cleanup;
-        }
-
-        /* processing and waiting for response */
-        processing_appraisal_response[current_thread_index] = false;
-        /* Real elapsed time, not a self-reported-duration sum -- see
-         * rp_coap_fetch() above. */
-        struct timespec wait_start_v, wait_now_v;
-        clock_gettime(CLOCK_MONOTONIC, &wait_start_v);
-        double elapsed_ms_v = 0;
-        while (!processing_appraisal_response[current_thread_index] &&
-                coap_io_pending(coap_context_verifier_appraisal)) {
-            int coap_io_process_time_v = coap_io_process(
-                    coap_context_verifier_appraisal, COAP_IO_PROCESS_TIME_MS);
-            if (coap_io_process_time_v == -1) {
-                charra_log_error(
-                        "[" LOG_NAME "] Error during CoAP I/O processing.");
-                result = CHARRA_RC_COAP_ERROR;
-                goto cleanup;
-            }
-            clock_gettime(CLOCK_MONOTONIC, &wait_now_v);
-            elapsed_ms_v = (wait_now_v.tv_sec - wait_start_v.tv_sec) * 1000.0 +
-                           (wait_now_v.tv_nsec - wait_start_v.tv_nsec) / 1e6;
-            if (elapsed_ms_v >= (verifier_response_timeout * 1000)) {
-                charra_log_error("[" LOG_NAME
-                                 "] Timeout after %.0f ms while waiting for or "
-                                 "processing attestation response.",
-                        elapsed_ms_v);
-                result = CHARRA_RC_TIMEOUT;
-                goto cleanup;
-            }
-        }
-
-        total_appraisal_wait_ms += (long)elapsed_ms_v;
-        verifier_latency_ms[current_thread_index] = total_appraisal_wait_ms;
-
-    }
-
-cleanup:
-    /* free CoAP memory */
-    charra_free_if_not_null_ex(coap_options, coap_delete_optlist);
-    charra_free_if_not_null_ex(coap_session, coap_session_release);
-    charra_free_if_not_null_ex(coap_context, coap_free_context);
-
-    charra_free_if_not_null_ex(coap_options_verifier_appraisal, coap_delete_optlist);
-    charra_free_if_not_null_ex(coap_session_verifier_appraisal, coap_session_release);
-    charra_free_if_not_null_ex(coap_context_verifier_appraisal, coap_free_context);
-    /* free variables */
-    charra_free_if_not_null(res_buf);
-    charra_free_if_not_null(nonce_req_buf);
-
-    /* No coap_cleanup() here: it tears down libcoap's *global* state, so
-     * calling it per cycle (and from each Verifier thread) would pull the
-     * ground out from under contexts still in use and from the next
-     * cycle's. Done exactly once, at process exit in main(). */
-
     return NULL;
 }
 

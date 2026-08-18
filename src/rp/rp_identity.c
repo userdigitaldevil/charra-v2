@@ -16,6 +16,7 @@
 
 #include "../common/charra_log.h"
 #include "../common/charra_macro.h"
+#include "../core/charra_ak_state.h"
 #include "../core/charra_identity_key_mgr.h"
 #include "../core/charra_marshaling.h"
 #include "../util/crypto_util.h"
@@ -84,8 +85,15 @@ CHARRA_RC rp_certify_ak_exchange(const char* host, unsigned int port,
     certify_ak_rc = CHARRA_RC_ERROR;
     memset(&certify_ak_response, 0, sizeof(certify_ak_response));
 
-    result = rp_coap_fetch(host, port, "certify_ak", req_buf, req_buf_len,
-            coap_certify_ak_response_handler, &processing_certify_ak_response);
+    result = rp_coap_exchange(&(rp_coap_request){
+            .host = host, .port = port,
+            .uri_path = "certify_ak",
+            .body = req_buf, .body_len = req_buf_len,
+            .on_response = coap_certify_ak_response_handler,
+            .response_pending = &processing_certify_ak_response,
+            .timeout_seconds = verifier_response_timeout,
+            .dtls_rpk_peer_public_key_path = dtls_rpk_verifier_public_key_path,
+        });
     free(req_buf);
 
     if (result == CHARRA_RC_SUCCESS && certify_ak_rc != CHARRA_RC_SUCCESS) {
@@ -178,6 +186,155 @@ error:
     return result;
 }
 
+/**
+ * @brief Mint RP's own EK certificate under the synthetic manufacturer CA,
+ * or reload the one cached from a previous run.
+ *
+ * charra_identity_key_mgr_create_ek() reproduces the same EK every time, so
+ * the certificate only ever has to be minted once. A real device would never
+ * hold the manufacturer key itself -- it is burned in at TPM-manufacture
+ * time -- but this synthetic PKI has no manufacturer, the same simplification
+ * /certify_ak's own EK check already documents.
+ */
+static CHARRA_RC rp_ensure_ek_certificate(TPM2B_PUBLIC* ek_public) {
+    if (charra_io_file_exists(rp_ek_cert_cache_path) == CHARRA_RC_SUCCESS) {
+        return CHARRA_RC_SUCCESS; /* already minted by an earlier run */
+    }
+
+    CHARRA_RC result = CHARRA_RC_ERROR;
+    char* manufacturer_root_der = NULL;
+    size_t manufacturer_root_der_len = 0;
+    mbedtls_x509_crt manufacturer_root_cert;
+    bool root_cert_inited = false;
+    uint8_t* ek_cert_der = NULL;
+
+    if ((result = charra_io_read_file(manufacturer_root_cert_path,
+                 &manufacturer_root_der, &manufacturer_root_der_len)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not read the manufacturer root "
+                         "certificate ('%s').",
+                manufacturer_root_cert_path);
+        goto cleanup;
+    }
+
+    mbedtls_x509_crt_init(&manufacturer_root_cert);
+    root_cert_inited = true;
+    if (mbedtls_x509_crt_parse(&manufacturer_root_cert,
+                (uint8_t*)manufacturer_root_der,
+                manufacturer_root_der_len) != 0) {
+        charra_log_error("[" LOG_NAME "] Could not parse the manufacturer "
+                         "root certificate.");
+        result = CHARRA_RC_CRYPTO_ERROR;
+        goto cleanup;
+    }
+
+    char issuer_name[256] = {0};
+    if (mbedtls_x509_dn_gets(issuer_name, sizeof(issuer_name),
+                &manufacturer_root_cert.subject) <= 0) {
+        charra_log_error("[" LOG_NAME "] Could not read the manufacturer root "
+                         "subject name.");
+        result = CHARRA_RC_CRYPTO_ERROR;
+        goto cleanup;
+    }
+
+    uint8_t ek_serial[CHARRA_AK_STATE_SERIAL_LEN] = {0};
+    uint32_t ek_cert_der_len = 0;
+    if ((result = charra_crypto_sign_ak_certificate(ek_public,
+                 "CN=CHARRA RP EK (test only)", issuer_name,
+                 rp_ek_cert_not_before_utc, rp_ek_cert_not_after_utc,
+                 manufacturer_root_key_path, &ek_cert_der, &ek_cert_der_len,
+                 ek_serial)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not mint RP's EK certificate.");
+        goto cleanup;
+    }
+    if ((result = charra_io_write_file(rp_ek_cert_cache_path, ek_cert_der,
+                 ek_cert_der_len)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not cache RP's EK certificate.");
+        goto cleanup;
+    }
+
+cleanup:
+    charra_free_if_not_null(ek_cert_der);
+    if (root_cert_inited) {
+        mbedtls_x509_crt_free(&manufacturer_root_cert);
+    }
+    charra_io_free_file_buffer(&manufacturer_root_der);
+    return result;
+}
+
+/**
+ * @brief Create the TPM-resident EK+AK pair and persist the AK's blobs.
+ *
+ * One exit path, so no error can skip a flush: Esys_Finalize() tears down
+ * client-side state only -- it does not send TPM2_FlushContext -- and every
+ * handle left unflushed sits in the TPM's small transient-object table until
+ * the simulator is restarted.
+ */
+static CHARRA_RC rp_create_and_persist_ak(TPM2B_PUBLIC* ak_public_out) {
+    CHARRA_RC result = CHARRA_RC_ERROR;
+    ESYS_CONTEXT* esys_ctx = NULL;
+    TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
+    ESYS_TR ek_handle = ESYS_TR_NONE;
+    ESYS_TR ak_handle = ESYS_TR_NONE;
+    TPM2B_PUBLIC* ek_public = NULL;
+    TPM2B_PUBLIC* ak_public = NULL;
+    TPM2B_PRIVATE* ak_private = NULL;
+    TPM2B_NAME* ak_name = NULL;
+
+    if (Tss2_TctiLdr_Initialize(getenv("CHARRA_TCTI"), &tcti_ctx) !=
+            TSS2_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Tss2_TctiLdr_Initialize.");
+        return CHARRA_RC_ERROR;
+    }
+    if (Esys_Initialize(&esys_ctx, tcti_ctx, NULL) != TSS2_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Esys_Initialize.");
+        Tss2_TctiLdr_Finalize(&tcti_ctx);
+        return CHARRA_RC_ERROR;
+    }
+
+    if ((result = charra_identity_key_mgr_create_ek(
+                 esys_ctx, &ek_handle, &ek_public)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not create RP's EK.");
+        goto cleanup;
+    }
+    if ((result = rp_ensure_ek_certificate(ek_public)) != CHARRA_RC_SUCCESS) {
+        goto cleanup;
+    }
+    if ((result = charra_identity_key_mgr_create_ak(esys_ctx, ek_handle,
+                 &ak_handle, &ak_public, &ak_private, &ak_name)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not create RP's AK.");
+        goto cleanup;
+    }
+    if ((result = charra_identity_key_mgr_save_public(
+                 rp_ak_public_path, ak_public)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not persist the AK public key.");
+        goto cleanup;
+    }
+    if ((result = charra_identity_key_mgr_save_private(
+                 rp_ak_private_path, ak_private)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not persist the AK private area.");
+        goto cleanup;
+    }
+    *ak_public_out = *ak_public;
+    result = CHARRA_RC_SUCCESS;
+
+cleanup:
+    Esys_Free(ek_public);
+    Esys_Free(ak_public);
+    Esys_Free(ak_private);
+    Esys_Free(ak_name);
+    if (ak_handle != ESYS_TR_NONE) {
+        Esys_FlushContext(esys_ctx, ak_handle);
+    }
+    if (ek_handle != ESYS_TR_NONE) {
+        Esys_FlushContext(esys_ctx, ek_handle);
+    }
+    Esys_Finalize(&esys_ctx);
+    Tss2_TctiLdr_Finalize(&tcti_ctx);
+    return result;
+}
+
 CHARRA_RC ensure_rp_ak_keypair(void) {
     pthread_mutex_lock(&rp_tpm_mutex);
     if (rp_ak_keypair_ready) {
@@ -190,216 +347,29 @@ CHARRA_RC ensure_rp_ak_keypair(void) {
 
     CHARRA_RC result = CHARRA_RC_ERROR;
     TPM2B_PUBLIC ak_public = {0};
-
-    bool cached = charra_io_file_exists(rp_ak_public_path) ==
-                    CHARRA_RC_SUCCESS &&
+    const bool cached =
+            charra_io_file_exists(rp_ak_public_path) == CHARRA_RC_SUCCESS &&
             charra_io_file_exists(rp_ak_private_path) == CHARRA_RC_SUCCESS;
 
     if (cached) {
-        /* No TPM needed at all here: this is a pure file read. The AK
-         * itself is only ever loaded into the TPM when actually signing or
-         * certifying (see rp_open_tpm_and_load_ak()). */
-        charra_log_info(
-                "[" LOG_NAME "] Reloading previously provisioned RP AK "
-                "keypair.");
-        if ((result = charra_identity_key_mgr_load_public(
-                     rp_ak_public_path, &ak_public)) != CHARRA_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME "] Could not load cached AK public "
-                             "key.");
-            pthread_mutex_unlock(&rp_tpm_mutex);
-            return result;
+        /* Pure file read -- no TPM needed. The AK is only loaded into the TPM
+         * when actually signing or certifying (rp_open_tpm_and_load_ak()). */
+        charra_log_info("[" LOG_NAME "] Reloading the previously provisioned "
+                        "RP AK keypair.");
+        result = charra_identity_key_mgr_load_public(
+                rp_ak_public_path, &ak_public);
+        if (result != CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] Could not load the cached AK public key.");
+            goto cleanup;
         }
     } else {
         charra_log_info(
                 "[" LOG_NAME "] No cached RP AK keypair -- creating one.");
-
-        /* --- TPM session (mutex-held): create EK + AK, persist blobs.
-         * Closed before returning -- every other TPM use in this file
-         * (signing, certifying) opens its own short-lived connection; see
-         * rp_tpm_mutex's own comment for why holding one open longer than
-         * one operation needs is a real problem on this dev TPM
-         * simulator, not just tidiness. */
-        ESYS_CONTEXT* esys_ctx = NULL;
-        TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
-        ESYS_TR ek_handle = ESYS_TR_NONE;
-        ESYS_TR ak_handle = ESYS_TR_NONE;
-        TPM2B_NAME* ak_name = NULL;
-        TPM2B_PUBLIC* ek_public = NULL;
-        TPM2B_PRIVATE ak_private = {0};
-        uint8_t* ek_cert_der = NULL;
-        size_t ek_cert_der_len = 0;
-
-        TSS2_RC tss_r = 0;
-        if ((tss_r = Tss2_TctiLdr_Initialize(
-                     getenv("CHARRA_TCTI"), &tcti_ctx)) != TSS2_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME "] Tss2_TctiLdr_Initialize.");
-            pthread_mutex_unlock(&rp_tpm_mutex);
-            return CHARRA_RC_ERROR;
-        }
-        if ((tss_r = Esys_Initialize(&esys_ctx, tcti_ctx, NULL)) !=
-                TSS2_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME "] Esys_Initialize.");
-            Tss2_TctiLdr_Finalize(&tcti_ctx);
-            pthread_mutex_unlock(&rp_tpm_mutex);
-            return CHARRA_RC_ERROR;
-        }
-
-        if ((result = charra_identity_key_mgr_create_ek(
-                     esys_ctx, &ek_handle, &ek_public)) != CHARRA_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME "] Could not create RP's EK.");
-            Esys_Finalize(&esys_ctx);
-            Tss2_TctiLdr_Finalize(&tcti_ctx);
-            pthread_mutex_unlock(&rp_tpm_mutex);
-            return result;
-        }
-
-        /* --- RP's own EK certificate: cached after the first mint, since
-         * charra_identity_key_mgr_create_ek() reproduces the same EK every time
-         * anyway --------------------------------------------------------- */
-        if (charra_io_file_exists(rp_ek_cert_cache_path) == CHARRA_RC_SUCCESS) {
-            char* buf = NULL;
-            size_t buf_len = 0;
-            if ((result = charra_io_read_file(
-                         rp_ek_cert_cache_path, &buf, &buf_len)) !=
-                    CHARRA_RC_SUCCESS) {
-                charra_log_error(
-                        "[" LOG_NAME "] Could not read cached EK certificate.");
-                Esys_Free(ek_public);
-                Esys_FlushContext(esys_ctx, ek_handle);
-                Esys_Finalize(&esys_ctx);
-                Tss2_TctiLdr_Finalize(&tcti_ctx);
-                pthread_mutex_unlock(&rp_tpm_mutex);
-                return result;
-            }
-            ek_cert_der = (uint8_t*)buf;
-            ek_cert_der_len = buf_len;
-        } else {
-            char* manufacturer_root_der = NULL;
-            size_t manufacturer_root_der_len = 0;
-            if ((result = charra_io_read_file(manufacturer_root_cert_path,
-                         &manufacturer_root_der,
-                         &manufacturer_root_der_len)) != CHARRA_RC_SUCCESS) {
-                charra_log_error("[" LOG_NAME "] Could not read manufacturer "
-                                 "root certificate ('%s').",
-                        manufacturer_root_cert_path);
-                Esys_Free(ek_public);
-                Esys_FlushContext(esys_ctx, ek_handle);
-                Esys_Finalize(&esys_ctx);
-                Tss2_TctiLdr_Finalize(&tcti_ctx);
-                pthread_mutex_unlock(&rp_tpm_mutex);
-                return result;
-            }
-            mbedtls_x509_crt manufacturer_root_cert;
-            mbedtls_x509_crt_init(&manufacturer_root_cert);
-            if (mbedtls_x509_crt_parse(&manufacturer_root_cert,
-                        (uint8_t*)manufacturer_root_der,
-                        manufacturer_root_der_len) != 0) {
-                charra_log_error("[" LOG_NAME "] Could not parse "
-                                 "manufacturer root certificate.");
-                charra_io_free_file_buffer(&manufacturer_root_der);
-                Esys_Free(ek_public);
-                Esys_FlushContext(esys_ctx, ek_handle);
-                Esys_Finalize(&esys_ctx);
-                Tss2_TctiLdr_Finalize(&tcti_ctx);
-                pthread_mutex_unlock(&rp_tpm_mutex);
-                return CHARRA_RC_CRYPTO_ERROR;
-            }
-            char issuer_name[256] = {0};
-            if (mbedtls_x509_dn_gets(issuer_name, sizeof(issuer_name),
-                        &manufacturer_root_cert.subject) <= 0) {
-                charra_log_error("[" LOG_NAME "] Could not read manufacturer "
-                                 "root subject name.");
-                mbedtls_x509_crt_free(&manufacturer_root_cert);
-                charra_io_free_file_buffer(&manufacturer_root_der);
-                Esys_Free(ek_public);
-                Esys_FlushContext(esys_ctx, ek_handle);
-                Esys_Finalize(&esys_ctx);
-                Tss2_TctiLdr_Finalize(&tcti_ctx);
-                pthread_mutex_unlock(&rp_tpm_mutex);
-                return CHARRA_RC_CRYPTO_ERROR;
-            }
-            mbedtls_x509_crt_free(&manufacturer_root_cert);
-            charra_io_free_file_buffer(&manufacturer_root_der);
-
-            uint8_t ek_serial[16] = {0};
-            uint32_t ek_cert_der_len_u32 = 0;
-            if ((result = charra_crypto_sign_ak_certificate(ek_public,
-                         "CN=CHARRA RP EK (test only)", issuer_name,
-                         rp_ek_cert_not_before_utc, rp_ek_cert_not_after_utc,
-                         manufacturer_root_key_path, &ek_cert_der,
-                         &ek_cert_der_len_u32, ek_serial)) !=
-                    CHARRA_RC_SUCCESS) {
-                charra_log_error(
-                        "[" LOG_NAME "] Could not mint RP's EK certificate.");
-                Esys_Free(ek_public);
-                Esys_FlushContext(esys_ctx, ek_handle);
-                Esys_Finalize(&esys_ctx);
-                Tss2_TctiLdr_Finalize(&tcti_ctx);
-                pthread_mutex_unlock(&rp_tpm_mutex);
-                return result;
-            }
-            ek_cert_der_len = ek_cert_der_len_u32;
-            if ((result = charra_io_write_file(rp_ek_cert_cache_path,
-                         ek_cert_der, ek_cert_der_len)) != CHARRA_RC_SUCCESS) {
-                charra_log_error(
-                        "[" LOG_NAME "] Could not cache RP's EK certificate.");
-                Esys_Free(ek_public);
-                Esys_FlushContext(esys_ctx, ek_handle);
-                Esys_Finalize(&esys_ctx);
-                Tss2_TctiLdr_Finalize(&tcti_ctx);
-                pthread_mutex_unlock(&rp_tpm_mutex);
-                charra_free_if_not_null(ek_cert_der);
-                return result;
-            }
-        }
-        Esys_Free(ek_public);
-        charra_free_if_not_null(ek_cert_der);
-
-        /* --- create the AK, persist its blobs -------------------------- */
-        TPM2B_PUBLIC* ak_public_p = NULL;
-        TPM2B_PRIVATE* ak_private_p = NULL;
-        if ((result = charra_identity_key_mgr_create_ak(esys_ctx, ek_handle,
-                     &ak_handle, &ak_public_p, &ak_private_p, &ak_name)) !=
+        if ((result = rp_create_and_persist_ak(&ak_public)) !=
                 CHARRA_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME "] Could not create RP's AK.");
-            Esys_FlushContext(esys_ctx, ek_handle);
-            Esys_Finalize(&esys_ctx);
-            Tss2_TctiLdr_Finalize(&tcti_ctx);
-            pthread_mutex_unlock(&rp_tpm_mutex);
-            return result;
+            goto cleanup;
         }
-        ak_public = *ak_public_p;
-        ak_private = *ak_private_p;
-        Esys_Free(ak_public_p);
-        Esys_Free(ak_private_p);
-        Esys_Free(ak_name);
-
-        if ((result = charra_identity_key_mgr_save_public(
-                     rp_ak_public_path, &ak_public)) != CHARRA_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME "] Could not persist AK public key.");
-            Esys_FlushContext(esys_ctx, ak_handle);
-            Esys_FlushContext(esys_ctx, ek_handle);
-            Esys_Finalize(&esys_ctx);
-            Tss2_TctiLdr_Finalize(&tcti_ctx);
-            pthread_mutex_unlock(&rp_tpm_mutex);
-            return result;
-        }
-        if ((result = charra_identity_key_mgr_save_private(
-                     rp_ak_private_path, &ak_private)) != CHARRA_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] Could not persist AK private area.");
-            Esys_FlushContext(esys_ctx, ak_handle);
-            Esys_FlushContext(esys_ctx, ek_handle);
-            Esys_Finalize(&esys_ctx);
-            Tss2_TctiLdr_Finalize(&tcti_ctx);
-            pthread_mutex_unlock(&rp_tpm_mutex);
-            return result;
-        }
-
-        Esys_FlushContext(esys_ctx, ak_handle);
-        Esys_FlushContext(esys_ctx, ek_handle);
-        Esys_Finalize(&esys_ctx);
-        Tss2_TctiLdr_Finalize(&tcti_ctx);
     }
 
     if ((result = charra_identity_key_mgr_public_key_to_der(&ak_public,
@@ -407,13 +377,124 @@ CHARRA_RC ensure_rp_ak_keypair(void) {
                  &rp_public_key_der_len)) != CHARRA_RC_SUCCESS) {
         charra_log_error(
                 "[" LOG_NAME "] Could not DER-encode RP's AK public key.");
+        goto cleanup;
+    }
+    rp_ak_keypair_ready = true;
+
+cleanup:
+    pthread_mutex_unlock(&rp_tpm_mutex);
+    return result;
+}
+
+
+/**
+ * @brief Fill in a /certify_ak CHALLENGE request from the persisted AK.
+ *
+ * Opens its own short-lived TPM connection and closes it before returning,
+ * which is critical rather than tidy: the Verifier's /certify_ak handler
+ * needs its own connection for Esys_MakeCredential, and the dev TPM
+ * simulator serves one client at a time. Holding this open across the CoAP
+ * wait deadlocked the Verifier outright -- observed directly, killing the
+ * stuck RP unblocked a handler that had been sitting mid-MakeCredential.
+ */
+static CHARRA_RC rp_build_certify_ak_challenge_request(
+        const char* ek_cert, size_t ek_cert_len,
+        msg_certify_ak_request_dto* request_out) {
+    CHARRA_RC result = CHARRA_RC_ERROR;
+    ESYS_CONTEXT* esys_ctx = NULL;
+    TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
+    ESYS_TR ek_handle = ESYS_TR_NONE;
+    ESYS_TR ak_handle = ESYS_TR_NONE;
+    TPM2B_NAME* ak_name = NULL;
+    TPM2B_PUBLIC ak_public = {0};
+
+    pthread_mutex_lock(&rp_tpm_mutex);
+    if ((result = rp_open_tpm_and_load_ak(&esys_ctx, &tcti_ctx, &ek_handle,
+                 &ak_handle, &ak_name)) != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Could not open a TPM connection to load RP's AK.");
         pthread_mutex_unlock(&rp_tpm_mutex);
         return result;
     }
 
-    rp_ak_keypair_ready = true;
+    if ((result = charra_identity_key_mgr_load_public(
+                 rp_ak_public_path, &ak_public)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not load the AK public key for "
+                         "the /certify_ak request.");
+        goto cleanup;
+    }
+
+    request_out->kind = CHARRA_CERTIFY_AK_CHALLENGE;
+    request_out->subject = CHARRA_CERTIFY_AK_SUBJECT_RP;
+    request_out->ek_certificate = (uint8_t*)ek_cert;
+    request_out->ek_certificate_len = (uint32_t)ek_cert_len;
+    request_out->ak_public_key_len = sizeof(ak_public);
+    memcpy(request_out->ak_public_key, &ak_public, sizeof(ak_public));
+    /* Copy only the meaningful prefix (size field + size bytes) and zero the
+     * rest: Esys_TR_GetName() leaves the tail of the TPM2B_NAME allocation
+     * uninitialised, and copying the whole struct put those heap bytes
+     * straight onto the wire (caught by valgrind, via libcoap reading them
+     * while building the PDU). The field stays fixed-size, so the wire format
+     * is unchanged -- the tail is deterministic zeros instead of stale heap. */
+    request_out->ak_name_len = sizeof(*ak_name);
+    memset(request_out->ak_name, 0, sizeof(request_out->ak_name));
+    memcpy(request_out->ak_name, ak_name,
+            sizeof(ak_name->size) + ak_name->size);
+    result = CHARRA_RC_SUCCESS;
+
+cleanup:
+    Esys_Free(ak_name);
+    Esys_FlushContext(esys_ctx, ak_handle);
+    Esys_FlushContext(esys_ctx, ek_handle);
+    Esys_Finalize(&esys_ctx);
+    Tss2_TctiLdr_Finalize(&tcti_ctx);
     pthread_mutex_unlock(&rp_tpm_mutex);
-    return CHARRA_RC_SUCCESS;
+    return result;
+}
+
+/**
+ * @brief Recover the CHALLENGE secret with TPM2_ActivateCredential.
+ *
+ * Only the TPM holding the EK this challenge was wrapped to can do this,
+ * which is exactly what the Verifier's CONFIRM leg then checks.
+ * *secret_out is Esys-allocated; the caller frees it with Esys_Free().
+ */
+static CHARRA_RC rp_activate_challenge_credential(
+        const msg_certify_ak_response_dto* challenge,
+        TPM2B_DIGEST** secret_out) {
+    CHARRA_RC result = CHARRA_RC_ERROR;
+    ESYS_CONTEXT* esys_ctx = NULL;
+    TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
+    ESYS_TR ek_handle = ESYS_TR_NONE;
+    ESYS_TR ak_handle = ESYS_TR_NONE;
+    TPM2B_NAME* ak_name = NULL;
+
+    pthread_mutex_lock(&rp_tpm_mutex);
+    if ((result = rp_open_tpm_and_load_ak(&esys_ctx, &tcti_ctx, &ek_handle,
+                 &ak_handle, &ak_name)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not reopen the TPM connection "
+                         "for ActivateCredential.");
+        pthread_mutex_unlock(&rp_tpm_mutex);
+        return result;
+    }
+    Esys_Free(ak_name);
+
+    if ((result = charra_identity_key_mgr_activate_credential(esys_ctx,
+                 ak_handle, ek_handle,
+                 (TPM2B_ID_OBJECT*)challenge->credential_blob,
+                 (TPM2B_ENCRYPTED_SECRET*)challenge->wrapped_secret,
+                 secret_out)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] ActivateCredential failed -- this AK "
+                         "is not genuinely bound to this EK, or the TPM "
+                         "rejected the request.");
+    }
+
+    Esys_FlushContext(esys_ctx, ak_handle);
+    Esys_FlushContext(esys_ctx, ek_handle);
+    Esys_Finalize(&esys_ctx);
+    Tss2_TctiLdr_Finalize(&tcti_ctx);
+    pthread_mutex_unlock(&rp_tpm_mutex);
+    return result;
 }
 
 CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
@@ -530,72 +611,12 @@ CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
         return result;
     }
 
-    /* --- TPM session #1 (mutex-held): load the already-persisted AK to
-     * get ak_public + ak_name, then CLOSE the connection before the
-     * /certify_ak round trip below -- critical, not cosmetic: the
-     * Verifier's own /certify_ak handler needs its own TPM connection to
-     * complete Esys_MakeCredential, and the dev TPM simulator accepts only
-     * one client connection at a time. Holding this connection open across
-     * the CoAP wait deadlocks the Verifier's response indefinitely
-     * (confirmed directly while developing this: killing an RP stuck here
-     * immediately unblocked the Verifier's handler, which had been sitting
-     * mid-MakeCredential the whole time). ------------------------------ */
-    pthread_mutex_lock(&rp_tpm_mutex);
-    ESYS_CONTEXT* esys_ctx = NULL;
-    TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
-    ESYS_TR ek_handle = ESYS_TR_NONE;
-    ESYS_TR ak_handle = ESYS_TR_NONE;
-    TPM2B_NAME* ak_name = NULL;
-    if ((result = rp_open_tpm_and_load_ak(&esys_ctx, &tcti_ctx, &ek_handle,
-                 &ak_handle, &ak_name)) != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not open TPM connection to "
-                         "load RP's AK.");
-        pthread_mutex_unlock(&rp_tpm_mutex);
-        charra_io_free_file_buffer(&ek_cert_buf);
-        return result;
-    }
-
-    TPM2B_PUBLIC ak_public = {0};
-    if ((result = charra_identity_key_mgr_load_public(rp_ak_public_path,
-                 &ak_public)) != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not load AK public key for "
-                         "/certify_ak request.");
-        Esys_Free(ak_name);
-        Esys_FlushContext(esys_ctx, ak_handle);
-        Esys_FlushContext(esys_ctx, ek_handle);
-        Esys_Finalize(&esys_ctx);
-        Tss2_TctiLdr_Finalize(&tcti_ctx);
-        pthread_mutex_unlock(&rp_tpm_mutex);
-        charra_io_free_file_buffer(&ek_cert_buf);
-        return result;
-    }
-
-    /* --- CHALLENGE request, built now while ak_name is still valid, sent
-     * AFTER the TPM connection below is closed -------------------------- */
     msg_certify_ak_request_dto req = {0};
-    req.kind = CHARRA_CERTIFY_AK_CHALLENGE;
-    req.subject = CHARRA_CERTIFY_AK_SUBJECT_RP;
-    req.ek_certificate = (uint8_t*)ek_cert_buf;
-    req.ek_certificate_len = (uint32_t)ek_cert_buf_len;
-    req.ak_public_key_len = sizeof(ak_public);
-    memcpy(req.ak_public_key, &ak_public, sizeof(ak_public));
-    /* Copy only the meaningful prefix (size field + size bytes) and
-     * zero the rest: Esys_TR_GetName() leaves the tail of the
-     * TPM2B_NAME allocation uninitialised, and copying the whole
-     * struct put those heap bytes straight onto the wire (caught by
-     * valgrind via libcoap reading them while building the PDU).
-     * The field stays fixed-size, so the wire format is unchanged --
-     * the tail is now deterministic zeros instead of stale heap. */
-    req.ak_name_len = sizeof(*ak_name);
-    memset(req.ak_name, 0, sizeof(req.ak_name));
-    memcpy(req.ak_name, ak_name, sizeof(ak_name->size) + ak_name->size);
-    Esys_Free(ak_name);
-
-    Esys_FlushContext(esys_ctx, ak_handle);
-    Esys_FlushContext(esys_ctx, ek_handle);
-    Esys_Finalize(&esys_ctx);
-    Tss2_TctiLdr_Finalize(&tcti_ctx);
-    pthread_mutex_unlock(&rp_tpm_mutex);
+    if ((result = rp_build_certify_ak_challenge_request(
+                 ek_cert_buf, ek_cert_buf_len, &req)) != CHARRA_RC_SUCCESS) {
+        charra_io_free_file_buffer(&ek_cert_buf);
+        return result;
+    }
 
     charra_log_info("[" LOG_NAME "] /certify_ak: requesting a CHALLENGE ...");
     msg_certify_ak_response_dto challenge = {0};
@@ -608,57 +629,19 @@ CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
         return result;
     }
 
-    /* --- TPM session #2: recover the challenge secret via
-     * ActivateCredential. Only this TPM can, which is exactly what the
-     * Verifier's CONFIRM leg is about to check. --------------------------- */
-    charra_log_info("[" LOG_NAME "] Waiting on TPM mutex for "
-                    "ActivateCredential (TPM session #2) ...");
-    pthread_mutex_lock(&rp_tpm_mutex);
-    ESYS_TR ek_handle2 = ESYS_TR_NONE;
-    ESYS_TR ak_handle2 = ESYS_TR_NONE;
-    TPM2B_NAME* ak_name2 = NULL;
     struct timespec activate_start, activate_end;
     clock_gettime(CLOCK_MONOTONIC, &activate_start);
-    if ((result = rp_open_tpm_and_load_ak(&esys_ctx, &tcti_ctx, &ek_handle2,
-                 &ak_handle2, &ak_name2)) != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not reopen TPM connection "
-                         "for ActivateCredential.");
-        pthread_mutex_unlock(&rp_tpm_mutex);
-        charra_free_if_not_null(challenge.ak_certificate);
-        charra_io_free_file_buffer(&ek_cert_buf);
-        return result;
-    }
-    Esys_Free(ak_name2);
-
     TPM2B_DIGEST* credential = NULL;
-    if ((result = charra_identity_key_mgr_activate_credential(esys_ctx,
-                 ak_handle2, ek_handle2,
-                 (TPM2B_ID_OBJECT*)challenge.credential_blob,
-                 (TPM2B_ENCRYPTED_SECRET*)challenge.wrapped_secret,
-                 &credential)) != CHARRA_RC_SUCCESS) {
-        charra_log_error(
-                "[" LOG_NAME "] ActivateCredential failed -- this AK is not "
-                "genuinely bound to this EK, or the TPM rejected the "
-                "request.");
-        Esys_FlushContext(esys_ctx, ak_handle2);
-        Esys_FlushContext(esys_ctx, ek_handle2);
-        Esys_Finalize(&esys_ctx);
-        Tss2_TctiLdr_Finalize(&tcti_ctx);
-        pthread_mutex_unlock(&rp_tpm_mutex);
-        charra_free_if_not_null(challenge.ak_certificate);
+    result = rp_activate_challenge_credential(&challenge, &credential);
+    clock_gettime(CLOCK_MONOTONIC, &activate_end);
+    charra_free_if_not_null(challenge.ak_certificate);
+    if (result != CHARRA_RC_SUCCESS) {
         charra_io_free_file_buffer(&ek_cert_buf);
         return result;
     }
-    Esys_FlushContext(esys_ctx, ak_handle2);
-    Esys_FlushContext(esys_ctx, ek_handle2);
-    Esys_Finalize(&esys_ctx);
-    Tss2_TctiLdr_Finalize(&tcti_ctx);
-    pthread_mutex_unlock(&rp_tpm_mutex);
-    clock_gettime(CLOCK_MONOTONIC, &activate_end);
     double activate_duration =
             (activate_end.tv_sec - activate_start.tv_sec) +
             (activate_end.tv_nsec - activate_start.tv_nsec) / 1e9;
-    charra_free_if_not_null(challenge.ak_certificate);
 
     charra_log_info("[" LOG_NAME "] ActivateCredential recovered the %u-byte "
                     "challenge secret in %.3fs.",
