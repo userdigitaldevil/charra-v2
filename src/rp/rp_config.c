@@ -97,10 +97,11 @@ int parse_rp_command_line(int argc, char** argv) {
             printf(" -I, --interval=SECONDS:       Daemon mode: seconds "
                    "between attestation cycles. Default %d.\n",
                     RP_DEFAULT_ATTESTATION_INTERVAL_S);
-            printf("     --qualify-renew-margin=SECONDS: Daemon mode: renew "
+            printf(" -Q, --qualify-renew-margin=SECONDS: Daemon mode: renew "
                    "qualification once it expires within SECONDS, from the "
-                   "idle window rather than inside an attestation. Should "
-                   "exceed --interval. Default %d.\n",
+                   "idle window rather than inside an attestation. Must stay "
+                   "below the Verifier's --qualification-validity. Default "
+                   "%d.\n",
                     RP_DEFAULT_QUALIFY_RENEW_MARGIN_S);
             printf("     --ak-renew-margin=SECONDS: Renew an AK "
                "certificate once it is within this long of "
@@ -110,7 +111,8 @@ int parse_rp_command_line(int argc, char** argv) {
                "\n",
                 RP_DEFAULT_AK_RENEW_MARGIN_S);
         printf(" -n, --verifiers=COUNT:        Daemon mode: attest against "
-                   "COUNT Verifiers per cycle (1..%d). Default %d.\n",
+                   "COUNT Verifiers per attestation cycle (1..%d). "
+                   "Default %d.\n",
                     MAX_VERIFIERS, RP_DEFAULT_NUM_VERIFIERS);
             printf(" -A, --attester-ak-validity=SECONDS:\n");
             printf("                               Lifetime of the Attester AK "
