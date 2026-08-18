@@ -33,11 +33,11 @@
  * Short on purpose: the point of qualification is ongoing assurance that
  * the RP still runs the correct PATH_Clean SDK, and a day-long grant makes
  * that a once-a-day check. It also has to stay larger than
- * relying_party.c's RP_DEFAULT_QUALIFY_MARGIN_S -- a margin at or above
+ * relying_party.c's RP_DEFAULT_QUALIFY_RENEW_MARGIN_S -- a margin at or above
  * this window can never be satisfied, so RP would renew on every idle pass
  * and the cache would stop meaning anything. Both are checked against each
  * other at startup (see parse_rp_command_line()). */
-#define CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS (5 * 60)
+#define CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS (3 * 60)
 
 /**
  * @brief Set/get the qualification validity window actually in force.

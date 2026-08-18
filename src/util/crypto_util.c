@@ -561,7 +561,7 @@ cleanup:
     return charra_r;
 }
 
-long charra_crypto_x509_days_until_expiry(const mbedtls_x509_crt* cert) {
+time_t charra_crypto_x509_expiry_time(const mbedtls_x509_crt* cert) {
     const mbedtls_x509_time* t = &cert->valid_to;
     struct tm tm = {0};
     tm.tm_year = t->year - 1900;
@@ -570,8 +570,14 @@ long charra_crypto_x509_days_until_expiry(const mbedtls_x509_crt* cert) {
     tm.tm_hour = t->hour;
     tm.tm_min = t->min;
     tm.tm_sec = t->sec;
-    time_t expiry = timegm(&tm);
-    double diff_seconds = difftime(expiry, time(NULL));
+    /* timegm(), not mktime(): X.509 notAfter is UTC, and mktime() would
+     * shift it by the host's timezone offset. */
+    return timegm(&tm);
+}
+
+long charra_crypto_x509_days_until_expiry(const mbedtls_x509_crt* cert) {
+    double diff_seconds =
+            difftime(charra_crypto_x509_expiry_time(cert), time(NULL));
     return (long)(diff_seconds / 86400.0);
 }
 

@@ -31,7 +31,8 @@ static const struct option rp_long_options[] = {{"help", no_argument, 0, '0'},
         {"log-level", required_argument, 0, 'l'},
         {"benchmark", no_argument, 0, 'B'},
         {"interval", required_argument, 0, 'I'},
-        {"qualify-margin", required_argument, 0, 'Q'},
+        {"qualify-renew-margin", required_argument, 0, 'Q'},
+        {"ak-renew-margin", required_argument, 0, 'R'},
         {"verifiers", required_argument, 0, 'n'},
         {"attester-ak-validity", required_argument, 0, 'A'},
         {"duration", required_argument, 0, 'D'},
@@ -73,7 +74,7 @@ int parse_rp_command_line(int argc, char** argv) {
     for (;;) {
         int index = -1;
         int identifier =
-                getopt_long(argc, argv, "vl:BI:Q:n:A:D:C:", rp_long_options, &index);
+                getopt_long(argc, argv, "vl:BI:Q:R:n:A:D:C:", rp_long_options, &index);
         if (identifier == -1) {
             break;
         }
@@ -96,12 +97,19 @@ int parse_rp_command_line(int argc, char** argv) {
             printf(" -I, --interval=SECONDS:       Daemon mode: seconds "
                    "between attestation cycles. Default %d.\n",
                     RP_DEFAULT_ATTESTATION_INTERVAL_S);
-            printf("     --qualify-margin=SECONDS: Daemon mode: renew "
+            printf("     --qualify-renew-margin=SECONDS: Daemon mode: renew "
                    "qualification once it expires within SECONDS, from the "
                    "idle window rather than inside an attestation. Should "
                    "exceed --interval. Default %d.\n",
-                    RP_DEFAULT_QUALIFY_MARGIN_S);
-            printf(" -n, --verifiers=COUNT:        Daemon mode: attest against "
+                    RP_DEFAULT_QUALIFY_RENEW_MARGIN_S);
+            printf("     --ak-renew-margin=SECONDS: Renew an AK "
+               "certificate once it is within this long of "
+               "expiring.\n");
+        printf("               Applies to RP's own AK certificate "
+               "and to both of the Attester's. Default: %ds "
+               "\n",
+                RP_DEFAULT_AK_RENEW_MARGIN_S);
+        printf(" -n, --verifiers=COUNT:        Daemon mode: attest against "
                    "COUNT Verifiers per cycle (1..%d). Default %d.\n",
                     MAX_VERIFIERS, RP_DEFAULT_NUM_VERIFIERS);
             printf(" -A, --attester-ak-validity=SECONDS:\n");
@@ -137,11 +145,21 @@ int parse_rp_command_line(int argc, char** argv) {
             rp_attestation_interval_s = (unsigned int)value;
             break;
         case 'Q':
-            if (!rp_parse_uint_arg(optarg, "qualify-margin", 0, 86400,
+            if (!rp_parse_uint_arg(optarg, "qualify-renew-margin", 0, 86400,
                         &value)) {
                 return -1;
             }
-            rp_qualify_margin_s = (unsigned int)value;
+            rp_qualify_renew_margin_s = (unsigned int)value;
+            break;
+        case 'R':
+            /* Upper bound is a year: a margin beyond that exceeds any
+             * plausible certificate lifetime, which would mean renewing on
+             * every cycle forever. */
+            if (!rp_parse_uint_arg(optarg, "ak-renew-margin", 0,
+                        365L * 24 * 60 * 60, &value)) {
+                return -1;
+            }
+            rp_ak_renew_margin_s = (time_t)value;
             break;
         case 'n':
             if (!rp_parse_uint_arg(
@@ -178,18 +196,7 @@ int parse_rp_command_line(int argc, char** argv) {
         }
     }
 
-    /* Not fatal: a margin below the interval still attests correctly, it
-     * just stops buying anything -- the loop can step over the renewal
-     * window and pay for /qualify inside an attestation anyway. Worth
-     * saying out loud rather than silently under-performing. */
-    if (!rp_benchmark_mode && rp_qualify_margin_s > 0 &&
-            rp_qualify_margin_s <= rp_attestation_interval_s) {
-        charra_log_warn("[" LOG_NAME "] --qualify-margin (%us) is not larger "
-                        "than --interval (%us); qualification renewal may "
-                        "still land inside an attestation cycle.",
-                rp_qualify_margin_s, rp_attestation_interval_s);
-    }
-    /* The other bound: a margin covering the whole validity window can
+        /* The other bound: a margin covering the whole validity window can
      * never be satisfied, so every idle pass would re-qualify. */
     /* No margin-vs-validity check here: the window is the Verifier's to
      * choose (--qualification-validity there) and arrives on the wire, so

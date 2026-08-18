@@ -218,6 +218,12 @@ CHARRA_RC charra_crypto_verify_x509_cert_chain(const uint8_t* leaf_cert_der,
  * @param[in] cert a parsed certificate.
  * @returns days until expiry (negative if already expired).
  */
+/** @brief A certificate's notAfter as an absolute time_t (UTC). Use this,
+ * not days-until-expiry, whenever the answer feeds a comparison finer than
+ * one day -- the day figure truncates, so anything with under 24h left
+ * reads as expiring immediately. */
+time_t charra_crypto_x509_expiry_time(const mbedtls_x509_crt* cert);
+
 long charra_crypto_x509_days_until_expiry(const mbedtls_x509_crt* cert);
 
 /**

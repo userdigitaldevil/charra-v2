@@ -444,8 +444,8 @@ actual order `run_one_attestation_cycle()` runs things in, for one cycle
   automatically revokes the requester's previous record; expiry is checked
   for free by `mbedtls_x509_crt_verify()`.
 - **Certificate renewal is expiry-driven, on all three certificates.** Each
-  disk cache is re-provisioned once it is within
-  `CHARRA_CERT_RENEW_MARGIN_DAYS` of expiring, the same "renew while the
+  disk cache is re-provisioned once it is within `--ak-renew-margin`
+  (RP-side, default one day) of expiring, the same "renew while the
   current grant is still good" rule the qualification refresh margin uses:
   RP's own AK certificate per Verifier (`/certify_ak`), and the Attester's
   AK certificate as issued by RP's CA and by each Verifier's CA
@@ -1740,7 +1740,7 @@ outlived one grant. RP now runs a real loop by default:
 while (!quit) {
     run_one_attestation_cycle(--verifiers);
     stop if --cycles reached;
-    renew qualification if it expires within --qualify-margin;  /* idle */
+    renew qualification if it expires within --qualify-renew-margin;  /* idle */
     interruptible_sleep(min(--interval, time left of --duration));
     stop if --duration elapsed;
 }
@@ -1773,7 +1773,7 @@ gain. The renewal is deliberately placed *after* the attestation rather
 than before, so a near-expiry `/qualify` never lands inside one.
 
 **Three coupled durations**, which must satisfy
-`--interval < --qualify-margin < qualification validity` (defaults
+`--interval < --qualify-renew-margin < qualification validity` (defaults
 `60 < 120 < 300`):
 - margin > interval: the renewal check runs once per iteration, so a
   smaller margin lets the loop step over the window and land past expiry.
@@ -1838,7 +1838,7 @@ all zero, 3/3 votes.
 
 **Verified live**: 7 daemon cycles, 7/7 unanimous votes, clean SIGINT
 shutdown; with `bin/verifier --qualification-validity 90 --ak-validity 600`
-and `bin/relying_party --interval 15 --qualify-margin 40
+and `bin/relying_party --interval 15 --qualify-renew-margin 40
 --attester-ak-validity 900`, RP logged `90 second(s) from now, as granted
 by this Verifier` (never the 300s default, confirming the value crosses the
 wire), and `openssl x509 -dates` showed exactly 600s and 900s spans on the

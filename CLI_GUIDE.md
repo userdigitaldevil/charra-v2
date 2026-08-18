@@ -83,11 +83,12 @@ bin/relying_party [OPTIONS]
 | `-v`, `--verbose` | | CHARRA log-level → DEBUG |
 | `-l`, `--log-level=LEVEL` | INFO | `TRACE\|DEBUG\|INFO\|WARN\|ERROR\|FATAL`. Overrides `$LOG_LEVEL_CHARRA` |
 | `-n`, `--verifiers=COUNT` | 5 | Verifiers per cycle (1..10), taken from `verifiers_config.txt` |
-| `-I`, `--interval=SECONDS` | 60 | Sleep **between** cycles |
-| `--qualify-margin=SECONDS` | 120 | Renew qualification when it expires within this, during idle time |
+| `-I`, `--interval=SECONDS` | 15 | Sleep **between** cycles |
+| `--qualify-renew-margin=SECONDS` | 30 | Renew qualification when it expires within this, during idle time |
+| `-R`, `--ak-renew-margin=SECONDS` | 45 | Renew an **AK certificate** once it is within this long of expiring. Covers all three: RP's own (per Verifier), and the Attester's from RP's CA and from each Verifier's CA |
 | `-D`, `--duration=SECONDS` | 0 | Stop cleanly after ~N seconds. 0 = run until signalled |
 | `-C`, `--cycles=COUNT` | 0 | Stop cleanly after N cycles. 0 = unbounded |
-| `-A`, `--attester-ak-validity=SECONDS` | 315360000 (10y) | Lifetime of the Attester AK cert **RP** issues under its own CA |
+| `-A`, `--attester-ak-validity=SECONDS` | 300 (5 min) | Lifetime of the Attester AK cert **RP** issues under its own CA |
 | `-B`, `--benchmark` | off | Run the bounded 1→5-Verifier timing sweep and exit instead |
 
 ### Stopping it
@@ -142,8 +143,8 @@ bin/verifier --port 5684 [OPTIONS]
 | `-l`, `--log-level=LEVEL` | INFO | CHARRA log-level |
 | `-c`, `--coap-log-level=LEVEL` | INFO | libcoap log-level |
 | `--port=PORT` | 31415 | **Port to listen on** |
-| `--qualification-validity=SECONDS` | 300 | How long a passed RP qualification stays valid |
-| `--ak-validity=SECONDS` | 315360000 (10y) | Lifetime of AK certs **this Verifier** issues, from issuance |
+| `--qualification-validity=SECONDS` | 180 (3 min) | How long a passed RP qualification stays valid |
+| `--ak-validity=SECONDS` | 300 (5 min) | Lifetime of AK certs **this Verifier** issues, from issuance |
 | `-f`, `--pcr-file=PATH` | `reference-pcrs.txt` | Reference PCRs. **Vestigial** — see below |
 | `-s`, `--pcr-selection=X1[,X2…]` | 0,1,2,3,4,5,6,7,10 | PCRs to check. **Vestigial** — see below |
 | `--ima[=PATH]` | kernel IMA log | Request an IMA event log. **Vestigial** — see below |
@@ -247,8 +248,8 @@ LOG_LEVEL_CHARRA=DEBUG bin/verifier --port 5684
 Three durations are **coupled** and must satisfy:
 
 ```
---interval  <  --qualify-margin  <  --qualification-validity
-    60      <        120         <           300              (defaults)
+--interval  <  --qualify-renew-margin  <  --qualification-validity
+    15      <         30                 <          180        (defaults)
 ```
 
 - **margin > interval** — the renewal check runs once per cycle; a smaller
@@ -261,15 +262,33 @@ RP warns at startup and again once it learns the window from the Verifier.
 `--qualification-validity` lives on the **Verifier only** — it issues the
 grant, and reports the deadline to RP on the wire.
 
-AK validity is *per issuer* and needs no coordination: `--ak-validity` on the
-Verifier, `--attester-ak-validity` on RP. Each certificate carries its own
-`notAfter`, so consumers read the real value.
+AK validity is *per issuer*: `--ak-validity` on the Verifier,
+`--attester-ak-validity` on RP. Each certificate carries its own `notAfter`,
+so consumers read the real value.
+
+`--ak-renew-margin` (RP) is the certificate counterpart of
+`--qualify-renew-margin`, and the AK certificate durations mirror the
+qualification ones exactly:
+
+```
+--ak-renew-margin  <  --ak-validity / --attester-ak-validity
+       45           <              300                    (defaults)
+```
+
+It must stay **smaller than the shortest AK certificate lifetime in play**,
+or every certificate is always "about to expire" and RP re-provisions on
+every single cycle — a `/certify_ak` round trip per Verifier, forever.
+
+RP cannot check this for you at startup the way it checks
+`--qualify-renew-margin` against `--interval`: the lifetime is chosen by whoever
+issues the certificate, so RP only learns it on parsing one. A margin
+noticeably below the validity is the rule of thumb.
 
 ### Short-lived setup, to watch renewal happen
 
 ```bash
 bin/verifier --port 5684 --qualification-validity 90 --ak-validity 600 &
-bin/relying_party --verifiers 1 --interval 15 --qualify-margin 40 --duration 300
+bin/relying_party --verifiers 1 --interval 15 --qualify-renew-margin 40 --duration 300
 ```
 
 ---
@@ -319,7 +338,7 @@ Inside: `cd ~/charra && make -j`. The TPM simulator starts automatically;
 | Every attestation fails after a TPM reset | Stale `state/` — delete it |
 | `Esys_Create: 0x921`, Attester cannot create its AK | TPM is in dictionary-attack lockout; run `tpm2_dictionarylockout --clear-lockout`. Every later step fails in a confusing cascade from this one cause |
 | `could not read keys/verifier-ca-<port>.crt` | Port not in `verifiers_config.txt` when `gen-ak-pki.sh` ran |
-| RP re-qualifies every cycle | `--qualify-margin` ≥ the Verifier's validity window |
+| RP re-qualifies every cycle | `--qualify-renew-margin` ≥ the Verifier's validity window |
 | `timeout`/`docker stop` kills RP mid-cycle | Fixed — SIGTERM now shuts down cleanly |
 | Verifier rejects with `4.01` | RP's AK cert invalid/expired; RP retries once automatically |
 | Verifier rejects with `4.03` | RP not qualified / expired; RP re-qualifies and retries once |

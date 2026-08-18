@@ -349,13 +349,13 @@ CHARRA_RC rp_perform_qualification_handshake_once(
             /* The margin only helps if it fits inside the window the
              * Verifier actually granted -- which RP only learns here, not
              * at CLI-parse time. */
-            if (rp_qualify_margin_s > 0 &&
-                    (time_t)rp_qualify_margin_s >= expires_at - time(NULL)) {
+            if (rp_qualify_renew_margin_s > 0 &&
+                    (time_t)rp_qualify_renew_margin_s >= expires_at - time(NULL)) {
                 charra_log_warn(
-                        "[" LOG_NAME "] --qualify-margin (%us) is not smaller "
+                        "[" LOG_NAME "] --qualify-renew-margin (%us) is not smaller "
                         "than the %lds window this Verifier grants; RP will "
                         "re-qualify on every idle pass.",
-                        rp_qualify_margin_s, (long)(expires_at - time(NULL)));
+                        rp_qualify_renew_margin_s, (long)(expires_at - time(NULL)));
             }
             result = CHARRA_RC_SUCCESS;
         } else {

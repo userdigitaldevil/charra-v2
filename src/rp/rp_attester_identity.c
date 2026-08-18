@@ -149,7 +149,8 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
                         cached_len) == 0) {
                 long days_left =
                         charra_crypto_x509_days_until_expiry(&cached_cert);
-                if (days_left > CHARRA_CERT_RENEW_MARGIN_DAYS) {
+                if (!charra_cert_needs_renewal(
+                            charra_cert_expiry_time(&cached_cert))) {
                     cache_usable = true;
                     attester_ak_cert_rp_expires_at =
                             charra_cert_expiry_time(&cached_cert);
@@ -722,7 +723,8 @@ CHARRA_RC ensure_attester_identity_certified_by_verifier(
                 0) {
             long days_left =
                     charra_crypto_x509_days_until_expiry(&cached_cert);
-            if (days_left > CHARRA_CERT_RENEW_MARGIN_DAYS) {
+            if (!charra_cert_needs_renewal(
+                        charra_cert_expiry_time(&cached_cert))) {
                 cache_usable = true;
                 attester_ak_cert_by_verifier_expires_at[verifier_index] =
                         charra_cert_expiry_time(&cached_cert);

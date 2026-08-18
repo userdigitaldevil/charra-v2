@@ -38,14 +38,24 @@
 /* verifiers config */
 #define MAX_VERIFIERS 10
 
-/* Re-provision any cached certificate once it is this close to expiring,
- * rather than waiting for it to lapse and be rejected mid-cycle. Applies
- * to all three: RP's own AK certificate (per Verifier), and the Attester's
- * AK certificate as issued by RP's CA and by each Verifier's CA. The same
- * principle as the qualification refresh margin -- renew while the current
- * grant is still good -- expressed in days because certificate lifetimes
- * are set in years, not minutes. */
-#define CHARRA_CERT_RENEW_MARGIN_DAYS 1
+/* Default for --ak-renew-margin: re-provision any cached certificate once
+ * it is this close to expiring, rather than waiting for it to lapse and be
+ * rejected mid-cycle. Applies to all three AK certificates -- RP's own (per
+ * Verifier), and the Attester's as issued by RP's CA and by each Verifier's
+ * CA -- since RP makes all three renewal decisions. Seconds, matching
+ * --qualify-renew-margin and the --ak-validity flags it has to be compared
+ * against. 45s by default, against a 5-minute default certificate
+ * lifetime.
+ *
+ * Note it cannot be validated at parse time the way --qualify-renew-margin is
+ * against --interval: the certificate lifetime is chosen by whoever issues
+ * it (--ak-validity on the Verifier, --attester-ak-validity on RP), so RP
+ * only learns it when it parses an issued certificate. A margin larger than
+ * the whole lifetime is satisfiable only by renewing on every cycle. */
+#define RP_DEFAULT_AK_RENEW_MARGIN_S 45
+
+/** Effective margin, settable with --ak-renew-margin. */
+extern time_t rp_ak_renew_margin_s;
 
 /** @brief Does a certificate expiring at expires_at need renewing now?
  * expires_at == 0 means "unknown", which counts as needing renewal. Kept in
@@ -53,16 +63,13 @@
  * boolean "ready" flag consulted once at startup lets a daemon run past its
  * own certificate's expiry without ever noticing. */
 static inline bool charra_cert_needs_renewal(time_t expires_at) {
-    return expires_at <=
-           time(NULL) + (time_t)CHARRA_CERT_RENEW_MARGIN_DAYS * 24 * 60 * 60;
+    return expires_at <= time(NULL) + rp_ak_renew_margin_s;
 }
 
 /** @brief Absolute expiry of a parsed certificate, derived from its
  * days-until-expiry so the whole codebase agrees on one calculation. */
 static inline time_t charra_cert_expiry_time(const mbedtls_x509_crt* cert) {
-    return time(NULL) +
-           charra_crypto_x509_days_until_expiry((mbedtls_x509_crt*)cert) *
-                   24 * 60 * 60;
+    return charra_crypto_x509_expiry_time(cert);
 }
 
 /* --- daemon-mode config (see parse_rp_command_line()) -------------------
@@ -71,26 +78,21 @@ static inline time_t charra_cert_expiry_time(const mbedtls_x509_crt* cert) {
  * selects the original bounded 1..5-Verifier timing sweep instead, which is
  * what produces timings_RP_multi_verifiers.txt for plot_multi_verifiers.py.
  *
- * Three coupled values, and the defaults must satisfy
- *   interval < margin < CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS
- * (currently 60 < 120 < 300):
- *  - margin > interval, because the renewal check runs once per loop
- *    iteration -- with margin <= interval the loop can step straight over
- *    the renewal window and land past expiry, paying for /qualify inside an
- *    attestation anyway, which is exactly what the margin exists to avoid.
- *  - margin < validity, because a margin at or above the whole validity
- *    window is never satisfiable, so RP would renew on every idle pass and
- *    the qualification cache would stop meaning anything.
- * parse_rp_command_line() warns if an override breaks either bound. */
-#define RP_DEFAULT_ATTESTATION_INTERVAL_S 60
-#define RP_DEFAULT_QUALIFY_MARGIN_S 120
+ * The renewal margins are deadline-driven, not tied to --interval: the
+ * daemon's idle window wakes exactly when a credential falls due, so a
+ * margin shorter than the interval is fine. The one bound that still
+ * matters is margin < validity -- a margin at or above the whole validity
+ * window is never satisfiable, so the credential would be renewed
+ * continuously and its cache would stop meaning anything. */
+#define RP_DEFAULT_ATTESTATION_INTERVAL_S 15
+#define RP_DEFAULT_QUALIFY_RENEW_MARGIN_S 30
 #define RP_DEFAULT_NUM_VERIFIERS 5
 #define RP_MAX_SWEEP_VERIFIERS 5
 
 /* --- daemon/benchmark configuration (set by parse_rp_command_line) ------ */
 extern bool rp_benchmark_mode;
 extern unsigned int rp_attestation_interval_s;
-extern unsigned int rp_qualify_margin_s;
+extern unsigned int rp_qualify_renew_margin_s;
 extern int rp_num_verifiers;
 extern unsigned int rp_duration_s;
 extern unsigned long rp_max_cycles;
