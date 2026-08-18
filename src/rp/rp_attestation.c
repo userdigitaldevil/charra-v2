@@ -194,6 +194,28 @@ cleanup:
     return COAP_RESPONSE_OK;
 }
 
+/** Copy a Verifier's response body into this thread's rejection_reason, so
+ * the RP run summary shows the Verifier's own stated reasons rather than a
+ * guess made on this side. Falls back to `fallback` when the body is empty. */
+static void record_verifier_reason(
+        int index, const coap_pdu_t* received, const char* fallback) {
+    size_t len = 0, off = 0, total = 0;
+    const uint8_t* body = NULL;
+    if (coap_get_data_large(received, &len, &body, &off, &total) != 0 &&
+            len > 0) {
+        int n = (int)len < (int)sizeof(rejection_reason[0]) - 1
+                        ? (int)len
+                        : (int)sizeof(rejection_reason[0]) - 1;
+        snprintf(rejection_reason[index], sizeof(rejection_reason[index]),
+                "%.*s", n, (const char*)body);
+        charra_log_info("[" LOG_NAME "] Verifier n\u00b0 %d said: %.*s",
+                index + 1, n, (const char*)body);
+    } else {
+        snprintf(rejection_reason[index], sizeof(rejection_reason[index]),
+                "%s", fallback);
+    }
+}
+
 static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
         const coap_pdu_t* sent CHARRA_UNUSED,
         const coap_pdu_t* received,
@@ -216,8 +238,7 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
                         "our AK certificate as invalid or expired.",
                 *current_thread_index + 1,
                 verifiers[*current_thread_index].port_number);
-        snprintf(rejection_reason[*current_thread_index],
-                sizeof(rejection_reason[*current_thread_index]),
+        record_verifier_reason(*current_thread_index, received,
                 "AK certificate rejected as invalid or expired");
         rp_ak_cert_rejected[*current_thread_index] = true;
         attestation_results[*current_thread_index] = false;
@@ -276,8 +297,7 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
                         "Attester's AK certificate as invalid or expired.",
                 *current_thread_index + 1,
                 verifiers[*current_thread_index].port_number);
-        snprintf(rejection_reason[*current_thread_index],
-                sizeof(rejection_reason[*current_thread_index]),
+        record_verifier_reason(*current_thread_index, received,
                 "Attester AK certificate rejected as invalid or expired");
         attester_ak_cert_rejected[*current_thread_index] = true;
         attestation_results[*current_thread_index] = false;
@@ -306,8 +326,9 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
             memcmp(data, successful_message, data_len) == 0) {
         attestation_results[*current_thread_index] = true;
     } else {
-        charra_log_info("[" LOG_NAME "] False\n");
         attestation_results[*current_thread_index] = false;
+        record_verifier_reason(*current_thread_index, received,
+                "appraisal failed (no reason given)");
     }
 
 cleanup:
@@ -865,15 +886,15 @@ void* get_attestation_results_thread(void *arg) {
      * charra_rp_build_evidence_message() below only checks rp_ak_cert_
      * ready[current_thread_index], it doesn't provision it). */
     if (ensure_rp_ak_certificate(current_thread_index) != CHARRA_RC_SUCCESS) {
+        /* Send anyway, same reasoning as the Attester certificate below:
+         * the Verifier judges Step 3a and logs its own decision, and its
+         * 4.01 is what triggers re-provisioning here. */
         charra_log_error(
-                "[" LOG_NAME "] Verifier n° %d (port %u): RP AK certificate "
-                "not provisioned; recording a failed vote for this Verifier.",
+                "[" LOG_NAME "] Verifier n° %d (port %u): could not provision "
+                "RP's AK certificate; forwarding evidence anyway for the "
+                "Verifier to judge.",
                 current_thread_index + 1,
                 verifiers[current_thread_index].port_number);
-        snprintf(rejection_reason[current_thread_index],
-                sizeof(rejection_reason[current_thread_index]),
-                "RP AK certificate not provisioned");
-        goto cleanup;
     }
 
     /* Symmetric with the above: the Attester's AK certificate, issued by
@@ -881,21 +902,17 @@ void* get_attestation_results_thread(void *arg) {
      * ensure_attester_identity_certified_by_verifier()'s docstring). */
     if (ensure_attester_identity_certified_by_verifier(current_thread_index) !=
             CHARRA_RC_SUCCESS) {
-        /* A failed vote either way -- but bail rather than send, because
-         * sending would put an EMPTY certificate on the wire and the
-         * Verifier's Step 3b would log it as the ATTESTER failing to
-         * complete DELIVER_VERIFIER, blaming the Attester for RP's own
-         * provisioning failure. Same verdict, honest diagnostics. */
+        /* Send anyway, with whatever we hold (possibly nothing): the
+         * Verifier is the one that judges Step 3b, and its own log records
+         * that the certificate came from RP. Letting it answer also gets us
+         * the 4.12 rejection, which drives the re-provision-and-retry below
+         * -- returning here would skip that recovery entirely. */
         charra_log_error(
-                "[" LOG_NAME "] Verifier n° %d (port %u): Attester AK "
-                "certificate not provisioned; recording a failed vote for "
-                "this Verifier.",
+                "[" LOG_NAME "] Verifier n° %d (port %u): could not provision "
+                "the Attester's AK certificate; forwarding evidence anyway "
+                "for the Verifier to judge.",
                 current_thread_index + 1,
                 verifiers[current_thread_index].port_number);
-        snprintf(rejection_reason[current_thread_index],
-                sizeof(rejection_reason[current_thread_index]),
-                "Attester AK certificate not provisioned");
-        goto cleanup;
     }
 
     if (use_dtls_psk && use_dtls_rpk) {

@@ -284,10 +284,21 @@ void charra_free_attestation_response(
  */
 CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
         uint32_t* marshaled_len, uint8_t** marshaled) {
-    if (!rp_ak_cert_ready[verifier_index]) {
-        charra_log_error("[" LOG_NAME "] No AK certificate for this "
-                         "Verifier; evidence not prepared.");
+    /* Only the signing keypair is mandatory -- without it there is no
+     * Quote_r at all, so there is nothing to send. A missing AK
+     * *certificate* is not a reason to stay silent: send the evidence with
+     * the field empty and let the Verifier apply Step 3a item 1 and record
+     * its own decision. Its 4.01 also drives RP's re-provision-and-retry,
+     * which returning here would skip. */
+    if (!rp_ak_keypair_ready) {
+        charra_log_error("[" LOG_NAME "] No AK keypair; cannot sign Quote_r.");
         return CHARRA_RC_ERROR;
+    }
+    if (!rp_ak_cert_ready[verifier_index]) {
+        charra_log_error("[" LOG_NAME "] No AK certificate for Verifier %d -- "
+                         "sending evidence without one; that Verifier will "
+                         "reject it at Step 3a item 1.",
+                verifier_index + 1);
     }
 
     msg_rp_evidence_dto ev = {0};

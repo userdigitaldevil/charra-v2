@@ -42,6 +42,11 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                                 struct coap_pdu_t* response) {
     int coap_r = 0;
     TSS2_RC tss_r = 0;
+    /* Set by any exit that jumps to cleanup BEFORE a verdict is reached, so
+     * those still tell the RP why rather than closing silently -- an
+     * unexplained NO is exactly as unhelpful as a wrong one. */
+    const char* early_fail_reason = NULL;
+    bool verdict_reached = false;
 
     log_peer_address("/appraise", session);
 
@@ -82,6 +87,8 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                  request, &data_len, &data, &data_offset, &data_total_len)) == 0) {
         charra_log_error("[" LOG_NAME "] Could not get CoAP PDU data.");
         attestation_rc = CHARRA_RC_ERROR;
+        early_fail_reason =
+                "malformed request: no CoAP payload";
         goto cleanup;
     } else {
         charra_log_info(
@@ -107,6 +114,8 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     if ((attestation_rc = charra_unmarshal_rp_evidence(
                  data_len, data, &res)) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not parse CBOR data.");
+        early_fail_reason =
+                "malformed request: evidence is not valid CBOR";
         goto cleanup;
     }
     end_unmarshal = clock();
@@ -147,6 +156,8 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                 "[" LOG_NAME "] RP signature is not exactly the expected "
                 "RSA-2048 signature size.");
         attestation_rc = CHARRA_RC_ERROR;
+        early_fail_reason =
+                "malformed request: RP signature is not the expected RSA-2048 size";
         goto cleanup;
     }
     if (res.rp_public_key_len == 0 ||
@@ -154,6 +165,8 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         charra_log_error("[" LOG_NAME "] RP public key has an unusable "
                          "length.");
         attestation_rc = CHARRA_RC_ERROR;
+        early_fail_reason =
+                "malformed request: RP public key length unusable";
         goto cleanup;
     }
 
@@ -168,12 +181,16 @@ void coap_appraise_handler(struct coap_resource_t* resource,
             TSS2_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Tss2_TctiLdr_Initialize.");
         attestation_rc = CHARRA_RC_ERROR;
+        early_fail_reason =
+                "Verifier-side error: could not initialise the TPM TCTI";
         goto cleanup;
     }
     if ((tss_r = Esys_Initialize(&esys_ctx, tcti_ctx, NULL)) !=
             TSS2_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Esys_Initialize.");
         attestation_rc = CHARRA_RC_ERROR;
+        early_fail_reason =
+                "Verifier-side error: could not initialise ESAPI";
         goto cleanup;
     }
     end_init = clock();
@@ -194,6 +211,8 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         charra_log_error("[" LOG_NAME "] Could not read Verifier CA "
                          "certificate ('%s').",
                 verifier_ca_cert_path);
+        early_fail_reason =
+                "Verifier-side error: could not read this Verifier's CA certificate";
         goto cleanup;
     }
 
@@ -214,12 +233,32 @@ void coap_appraise_handler(struct coap_resource_t* resource,
      * TPM2B_PUBLIC -- see msg_rp_evidence_dto's docstring in charra_dto.h. */
     uint8_t ak_serial_rp[16] = {0};
     bool attestation_result_ekak_rp = false;
-    {
+    /* Why this check failed, for the consolidated reason list at the
+     * verdict. Each branch below sets it; it is only read when the check
+     * actually failed. */
+    const char* ekak_rp_why = "not verified";
+    if (res.ak_certificate_rp_len == 0) {
+        ekak_rp_why = "MISSING -- the RP sent no certificate for itself";
+        /* The RP sends its own AK certificate; an empty field means it
+         * never obtained one from this Verifier (/certify_ak). Logged as
+         * this Verifier's own decision, and attributed to the RP, so the
+         * record shows what was received rather than implying the RP went
+         * silent. Still a NO -- unverified is unverified. */
+        charra_log_error("[" LOG_NAME "]     => the RP sent an EMPTY AK "
+                         "certificate for itself -- nothing to verify "
+                         "(Step 3a item 1). Rejecting.");
+    } else {
         mbedtls_x509_crt ak_cert_rp_leaf;
         CHARRA_RC chain_rc = charra_crypto_verify_x509_cert_chain(
                 res.ak_certificate_rp, res.ak_certificate_rp_len,
                 (uint8_t*)verifier_ca_cert_der, verifier_ca_cert_der_len,
                 &ak_cert_rp_leaf);
+        if (chain_rc != CHARRA_RC_SUCCESS) {
+            ekak_rp_why = "WRONG -- does not chain to this Verifier's CA";
+            charra_log_error("[" LOG_NAME "]     => the AK certificate the RP "
+                             "sent for itself did NOT chain to this "
+                             "Verifier's CA (Step 3a item 1). Rejecting.");
+        }
         if (chain_rc == CHARRA_RC_SUCCESS) {
             if (ak_cert_rp_leaf.serial.len == 16) {
                 memcpy(ak_serial_rp, ak_cert_rp_leaf.serial.p, 16);
@@ -233,6 +272,13 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                         "RP's AK cert", &ak_cert_rp_leaf);
             }
             mbedtls_x509_crt_free(&ak_cert_rp_leaf);
+        }
+        if (chain_rc == CHARRA_RC_SUCCESS && !attestation_result_ekak_rp) {
+            ekak_rp_why = "MISMATCH -- does not match the key that signed "
+                          "Quote_r";
+            charra_log_error("[" LOG_NAME "]     => the AK certificate the RP "
+                             "sent for itself chains correctly but does NOT "
+                             "match the key that signed Quote_r. Rejecting.");
         }
     }
     uint8_t ek_fingerprint_rp[32] = {0};
@@ -257,10 +303,12 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                     "is currently valid (expires at %ld, in %ld second(s)).",
                     ek_fingerprint_rp_hex, (long)ak_cert_expires_at_rp,
                     (long)(ak_cert_expires_at_rp - time(NULL)));
+        } else {
+            ekak_rp_why = "REVOKED or EXPIRED in this Verifier's ledger";
+            charra_log_error("[" LOG_NAME "]     => the AK certificate the RP "
+                             "sent for itself chains correctly but is REVOKED "
+                             "or EXPIRED in this Verifier's issuance ledger!");
         }
-    } else {
-        charra_log_error("[" LOG_NAME "]     => RP's AK certificate did NOT "
-                         "verify (chain or key mismatch)!");
     }
 
     /* Step 3a item 1b: RP qualification -- has THIS specific RP (identified
@@ -279,7 +327,18 @@ void coap_appraise_handler(struct coap_resource_t* resource,
      * below) saves it from having to guess. */
     bool qualification_record_found = false;
     time_t qualification_expires_at = 0;
-    if (attestation_result_ekak_rp) {
+    /* Whether we resolved WHICH RP this is, which is all the qualification
+     * lookup needs -- a revoked certificate still identifies its owner, so
+     * this check runs even when Step 3a item 1 failed on validity. Only a
+     * certificate we could not tie to any identity blocks it. */
+    bool rp_identity_known = false;
+    for (size_t i = 0; i < sizeof(ek_fingerprint_rp); ++i) {
+        if (ek_fingerprint_rp[i] != 0) {
+            rp_identity_known = true;
+            break;
+        }
+    }
+    if (rp_identity_known) {
         charra_qualification_state_record* qual_records = NULL;
         uint32_t qual_count = 0;
         if (charra_qualification_state_load(qualification_state_file_path,
@@ -447,16 +506,30 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                           attestation_result_nonce_rp;
 
     bool attestation_result_ekak = false;
+    /* Why Step 3b item 1 failed, for the reason list at the verdict. */
+    const char* ekak_att_why = "not verified";
     bool attestation_result_signature = false;
     bool attestation_result_signature_mbedtls = false;
     bool attestation_result_nonce = false;
 
-    if (!step_3a_passed) {
-        charra_log_error("[" LOG_NAME "] Step 3a FAILED -- skipping Step 3b "
-                         "(Quote_a is not checked; negative result below).");
-    } else {
-        charra_log_info(
-                "[" LOG_NAME "] Step 3a passed, proceeding to Step 3b ...");
+    /* Step 3b runs whatever Step 3a decided. Its three checks read only
+     * fields of the received evidence (the Attester's certificate, Quote_a,
+     * and the nonce), so nothing here depends on RP's identity having
+     * verified -- the old gate was policy, not a data dependency. Running
+     * it always means one appraisal reports every problem at once instead
+     * of revealing them one round trip at a time.
+     *
+     * The verdict is unchanged and still fail-closed: every result below is
+     * ANDed with Step 3a's. Note this does tell a peer that failed Step 3a
+     * how the Attester's evidence fared, which the gate previously withheld. */
+    {
+        if (!step_3a_passed) {
+            charra_log_error("[" LOG_NAME "] Step 3a FAILED -- evaluating "
+                             "Step 3b anyway, to report every reason.");
+        } else {
+            charra_log_info(
+                    "[" LOG_NAME "] Step 3a passed, proceeding to Step 3b ...");
+        }
 
         /* =================================================================
          * Step 3b -- Original Evidence Verification (Evidence_a' =
@@ -470,10 +543,19 @@ void coap_appraise_handler(struct coap_resource_t* resource,
          * RP) and the key that actually signed Quote_a. */
         uint8_t ak_serial[16] = {0};
         if (res.ak_certificate_attester_by_verifier_len == 0) {
+            /* Attribute it to the sender, not the subject: this field is
+             * filled in by the RP from its own per-Verifier cache, not by
+             * the Attester (see charra_rp_build_evidence_message()). An
+             * empty one means the RP relayed no certificate -- most often
+             * because /certify_ak_of_attester never completed for this
+             * Verifier -- which is not by itself evidence of anything about
+             * the Attester. Still a NO: unverified is unverified. */
+            ekak_att_why = "MISSING -- the RP forwarded no certificate";
             charra_log_error(
-                    "[" LOG_NAME "]     => Attester's AK certificate is "
-                    "EMPTY -- the Attester has not completed "
-                    "/certify_ak_of_attester's DELIVER_VERIFIER leg yet.");
+                    "[" LOG_NAME "]     => the RP forwarded an EMPTY AK "
+                    "certificate for the Attester -- nothing to verify. The "
+                    "RP relays this certificate (/certify_ak_of_attester); "
+                    "an empty one points at the RP, not the Attester.");
             attestation_result_ekak = false;
         } else {
             /* Chain check, then the revocation check below. The ledger
@@ -511,16 +593,29 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                             ak_serial_hex, (long)attester_cert_expires_at,
                             (long)(attester_cert_expires_at - time(NULL)));
                 } else {
+                    ekak_att_why =
+                            "REVOKED or EXPIRED in this Verifier's ledger";
                     charra_log_error(
-                            "[" LOG_NAME "]     => Attester's AK certificate "
-                            "(serial %s...) chains correctly but is REVOKED "
-                            "or EXPIRED in this Verifier's issuance ledger!",
+                            "[" LOG_NAME "]     => the AK certificate the RP "
+                            "forwarded for the Attester (serial %s...) chains "
+                            "correctly but is REVOKED or EXPIRED in this "
+                            "Verifier's issuance ledger!",
                             ak_serial_hex);
                 }
             } else {
+                /* Same attribution point as the empty case above: the RP
+                 * chose which certificate to forward here, so a chain or
+                 * key mismatch can equally mean the RP sent the wrong one
+                 * (e.g. another Verifier's) as that the Attester's identity
+                 * is bad. */
+                ekak_att_why = "WRONG -- not issued by this Verifier's CA, "
+                               "or does not match the key that signed Quote_a";
                 charra_log_error(
-                        "[" LOG_NAME "]     => Attester's AK certificate "
-                        "did NOT verify (chain or key mismatch)!");
+                        "[" LOG_NAME "]     => the AK certificate the RP "
+                        "forwarded for the Attester did NOT verify (chain or "
+                        "key mismatch) -- either it was not issued by this "
+                        "Verifier's CA, or it does not match the key that "
+                        "signed Quote_a.");
             }
         }
 
@@ -610,6 +705,73 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     hex_prefix(ek_fingerprint_rp, sizeof(ek_fingerprint_rp),
             ek_fingerprint_rp_hex_result, sizeof(ek_fingerprint_rp_hex_result));
 
+    /* Every reason this vote is a NO, in one place -- logged here AND sent
+     * back to the RP as the response body, so the same reasons land in the
+     * RP's own run summary instead of only in this Verifier's log. The
+     * per-check lines above are interleaved with timing and hex dumps; this
+     * states the verdict once, explicitly, naming which side each failure
+     * points at. */
+    char reason_buf[512] = {0};
+    size_t reason_used = 0;
+#define APPEND_REASON(...)                                                     \
+    do {                                                                       \
+        char one[192];                                                         \
+        snprintf(one, sizeof(one), __VA_ARGS__);                               \
+        charra_log_error("[" LOG_NAME "]   - %s", one);                        \
+        reason_used += snprintf(reason_buf + reason_used,                      \
+                (reason_used < sizeof(reason_buf))                             \
+                        ? sizeof(reason_buf) - reason_used                     \
+                        : 0,                                                   \
+                "%s%s", (reason_used > 0) ? "; " : "", one);                   \
+        if (reason_used >= sizeof(reason_buf)) {                               \
+            reason_used = sizeof(reason_buf) - 1;                              \
+        }                                                                      \
+    } while (0)
+
+    if (!attestation_result) {
+        charra_log_error("[" LOG_NAME "] Voting NO. Reason(s):");
+        if (!attestation_result_ekak_rp) {
+            APPEND_REASON("RP AK certificate (Step 3a item 1): %s",
+                    ekak_rp_why);
+        }
+        if (!attestation_result_qualified) {
+            /* The lookup is keyed by ek_fingerprint_rp, which only exists
+             * once the AK certificate verified -- so if that failed, this
+             * check never ran and must not be reported as a real failure. */
+            APPEND_REASON("RP qualification (Step 3a item 1b): %s",
+                    !rp_identity_known
+                            ? "NOT EVALUATED -- RP's certificate could not be "
+                              "tied to any known identity"
+                            : qualification_record_found
+                                    ? "EXPIRED -- RP must redo /qualify"
+                                    : "MISSING -- RP has never qualified "
+                                      "with this Verifier");
+        }
+        if (!attestation_result_signature_rp ||
+                !attestation_result_signature_rp_mbedtls) {
+            APPEND_REASON("Quote_r signature (Step 3a item 2): MISMATCH -- "
+                          "not a valid signature by RP's AK over PCR_r");
+        }
+        if (!attestation_result_nonce_rp) {
+            APPEND_REASON("RP nonce (Step 3a item 3): WRONG -- Quote_r is not "
+                          "bound to the challenge this Verifier issued");
+        }
+        if (!attestation_result_ekak) {
+            APPEND_REASON("Attester AK certificate (Step 3b item 1): %s",
+                    ekak_att_why);
+        }
+        if (!attestation_result_signature ||
+                !attestation_result_signature_mbedtls) {
+            APPEND_REASON("Quote_a signature (Step 3b item 2): MISMATCH -- "
+                          "not a valid signature by the Attester's AK");
+        }
+        if (!attestation_result_nonce) {
+            APPEND_REASON("Attester nonce (Step 3b item 3): WRONG -- Quote_a "
+                          "is not bound to the expected nonce");
+        }
+    }
+#undef APPEND_REASON
+
     const char* message;
     coap_pdu_code_t response_code = COAP_RESPONSE_CODE_CONTENT;
     /* print attestation result */
@@ -630,7 +792,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
          * "go redo /certify_ak and retry" apart from "your evidence itself
          * didn't check out," which a blind retry can never fix. */
         attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
-        message = "RP AK certificate invalid or expired!\0";
+        message = reason_buf;
         response_code = COAP_RESPONSE_CODE_UNAUTHORIZED;
         charra_log_info("[" LOG_NAME "] |  RP AK CERTIFICATE REJECTED  |");
     } else if (!attestation_result_qualified) {
@@ -648,10 +810,10 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
         response_code = COAP_RESPONSE_CODE_FORBIDDEN;
         if (qualification_record_found) {
-            message = "RP qualification expired!\0";
+            message = reason_buf;
             charra_log_info("[" LOG_NAME "] |  RP QUALIFICATION EXPIRED  |");
         } else {
-            message = "RP not qualified!\0";
+            message = reason_buf;
             charra_log_info("[" LOG_NAME "] |     RP NOT QUALIFIED       |");
         }
     } else if (!attestation_result_ekak) {
@@ -668,17 +830,18 @@ void coap_appraise_handler(struct coap_resource_t* resource,
          * Every other Step 3b check still ran and is logged above; only
          * the response code is specialised. */
         attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
-        message = "Attester AK certificate invalid or expired!\0";
+        message = reason_buf;
         response_code = COAP_RESPONSE_CODE_PRECONDITION_FAILED;
         charra_log_info(
                 "[" LOG_NAME "] | ATTESTER AK CERT REJECTED  |");
     } else {
         attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
-        message = "Attestation failed!    \0";
+        message = reason_buf;
         charra_log_info("[" LOG_NAME "] |     ATTESTATION FAILED     |");
     }
     charra_log_info("[" LOG_NAME "] +----------------------------+");
 
+    verdict_reached = true;
     coap_pdu_set_code(response, response_code);
     
     end_appraise = clock();
@@ -701,6 +864,19 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         //goto error;
     }
 cleanup:
+    if (!verdict_reached) {
+        const char* why = (early_fail_reason != NULL)
+                                  ? early_fail_reason
+                                  : "evidence rejected before appraisal could "
+                                    "complete";
+        charra_log_error("[" LOG_NAME "] Voting NO (no appraisal). Reason: %s",
+                why);
+        coap_pdu_set_code(response, COAP_RESPONSE_CODE_BAD_REQUEST);
+        coap_add_data_large_response(resource, session, request, response,
+                query, COAP_MEDIATYPE_APPLICATION_OCTET_STREAM, -1, 0,
+                strlen(why), (const uint8_t*)why, NULL, NULL);
+    }
+
     /* close duration log file -- every path through this function reaches
      * here exactly once, so this is the only fclose() needed */
     if (p_file != NULL) {

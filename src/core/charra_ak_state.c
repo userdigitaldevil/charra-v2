@@ -281,14 +281,18 @@ bool charra_ak_state_check_serial_valid(const char* ak_state_file_path,
     uint32_t index = 0;
     if (charra_ak_state_find_by_serial(records, count, serial, &index)) {
         valid = charra_ak_state_is_valid(&records[index], time(NULL));
-        if (valid) {
-            if (ek_fingerprint_out != NULL) {
-                memcpy(ek_fingerprint_out, records[index].ek_fingerprint, 32);
-            }
-            if (expires_at_out != NULL) {
-                *expires_at_out = records[index].expires_at;
-            }
-        } else {
+        /* Report the identity whenever the serial is ON RECORD, valid or
+         * not: a revoked or expired certificate still tells us WHICH RP
+         * this is, and callers need that to keep appraising (e.g. to look
+         * up its qualification) rather than stopping at the first failure.
+         * The return value alone says whether it is currently valid. */
+        if (ek_fingerprint_out != NULL) {
+            memcpy(ek_fingerprint_out, records[index].ek_fingerprint, 32);
+        }
+        if (expires_at_out != NULL) {
+            *expires_at_out = records[index].expires_at;
+        }
+        if (!valid) {
             charra_log_error("[" LOG_NAME "]     => AK certificate's serial "
                              "is on record but revoked or expired!");
         }
