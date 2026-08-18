@@ -747,6 +747,65 @@ already in `crypto_util.c`.
 1890 to 1725 lines. The remaining bulk was the five CoAP resource handlers
 themselves, since split out — see below.
 
+### `attester.c` split into `src/attester/`
+
+Same treatment as `relying_party.c`/`verifier.c` below, and the last entry
+point still holding its handlers: **1785 → 298 lines**, leaving only
+configuration, `main()`, and `handle_sigint()`.
+
+| Module | Holds | Owns (`static`, not in the shared header) |
+|---|---|---|
+| `attester_attest.c` | `/attest` — Quote_a, the IMA log, both AK certificates | `attest_request_counter`, `format_pcr_selection` |
+| `attester_certify_ak.c` | `/certify_ak_of_attester`, all four legs | — |
+| `attester_identity.c` | EK/AK identity: create, persist, load | manufacturer CA paths, EK validity window, AK private path, `attester_ak_keypair_ready` |
+| `attester_ima_log.c` | ASCII→binary conversion, PCR replay | `cached_ima_log`, `cached_ima_log_len`, the hex/template helpers |
+| `attester_result.c` | `/attest_result` | — |
+| `attester_util.c` | `attester_release_data` | — |
+
+`attester_shared.h` ended up genuinely small — five entries — because the
+coupling map was much cleaner than the Verifier's: of 29 file-scope
+variables, **19 are used only by `main()`** (port, DTLS, log levels) and
+stay in `attester.c`, and most of the rest are owned end to end by one
+module. Only four paths plus `ima_test_log_path` are read by a module other
+than the one that defines them, and each is declared by its *producer*:
+`attester_ek_cert_cache_path`/`attester_ak_public_path` in
+`attester_identity.c`, the two delivered-certificate paths in
+`attester_certify_ak.c` (the DELIVER legs write them; `/attest` reads them).
+
+Wired through `$(ATTESTER_OBJECTS)`, not `$(OBJECTS)`, for the same reason
+as the other two: `$(OBJECTS)` links into all five binaries, and the Verifier
+and Trust Manager have no business pulling in Attester state.
+
+**Verification, in the order it actually caught things:**
+
+1. **All 14 moved bodies diffed byte-identical** to the original modulo the
+   dropped `static`. Worth doing mechanically rather than by eye — a
+   refactor that silently changes behaviour is far worse than one that fails
+   to build.
+2. **`nm -g` found no symbol collisions** between `obj/attester/*.o` and the
+   shared `$(OBJECTS)`.
+3. **Include lists pruned per module by machine**, removing each `#include`
+   in turn and keeping the removal only if that translation unit still
+   compiled warning-free: 124 of 148 includes were unnecessary
+   (`attester_util.c` needs 2, `attester_attest.c` 12).
+4. Full suite (271 assertions) and a live 4-cycle run, both clean.
+
+**Two things that only surfaced because of the above, worth remembering:**
+
+*A guessed signature compiled fine.* `attester_load_ak()` really takes
+`ESYS_TR* ek_handle_out`, and the header first declared `ESYS_TR ek_handle`.
+That linked happily from the caller's side and only failed once
+`attester_identity.c` included its own header. The automated prune then
+*removed* those own-header includes, since every module still compiled
+without them — they were put back deliberately: a module including its own
+header is what checks the definition against the declaration, and dropping
+it re-opens exactly the hole that bug came through.
+
+*`release_data` was `static` and became global on the move.* Renamed
+`attester_release_data`, matching `attester_load_ak` in the same folder.
+`verifier_util.c`'s `release_response_data` is the counter-example still
+sitting unprefixed in the global namespace.
+
 ### `relying_party.c` and `verifier.c` split into per-role module folders
 
 Both entry points now hold only their globals, `main()`, and the signal
