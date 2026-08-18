@@ -9,6 +9,7 @@
 
 #include "rp_attester_identity.h"
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +32,10 @@
 #include "rp_shared.h"
 
 #define LOG_NAME "relying party"
+
+/* Re-provision a cached Attester AK certificate once it is this close
+ * to expiry, rather than waiting for it to lapse mid-cycle. */
+#define ATTESTER_AK_CERT_RENEW_MARGIN_DAYS 1
 
 static coap_response_t coap_activate_credential_response_handler(
         coap_session_t* session CHARRA_UNUSED,
@@ -481,6 +486,116 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
     return CHARRA_RC_SUCCESS;
 }
 
+/**
+ * @brief Make attester_identity_cached usable, FETCHing it if needed.
+ *
+ * ensure_attester_identity_provisioned() populates the cache only on its
+ * FETCH path; when the RP-CA certificate is already on disk it returns
+ * early, so in every RP process after the first the struct is all zeros.
+ * Any per-Verifier relay in such a process would then put an EMPTY EK
+ * certificate on the wire -- the Verifier logs a 7-byte /certify_ak and
+ * rejects it, which reads as the Attester having a bad EK rather than RP
+ * never having asked for one. Reachable without any rejection at all: add
+ * a Verifier, or lose one per-Verifier cache file, and restart RP.
+ *
+ * Re-runs RP's own manufacturer-root gate on the fetched EK certificate.
+ * That gate is the reason ensure_attester_identity_provisioned() is
+ * fail-closed, and a cache file on disk is not evidence that this process
+ * ever ran it.
+ */
+static CHARRA_RC ensure_attester_identity_fetched(void) {
+    if (attester_identity_cached.ek_certificate_len > 0) {
+        return CHARRA_RC_SUCCESS;
+    }
+
+    CHARRA_RC result = CHARRA_RC_ERROR;
+    msg_certify_ak_of_attester_request_dto fetch_req = {0};
+    fetch_req.kind = CHARRA_CERTIFY_AK_OF_ATTESTER_FETCH;
+    uint8_t* fetch_req_buf = NULL;
+    uint32_t fetch_req_buf_len = 0;
+    if ((result = charra_marshal_certify_ak_of_attester_request(&fetch_req,
+                 &fetch_req_buf_len, &fetch_req_buf)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not marshal "
+                         "/certify_ak_of_attester FETCH request.");
+        return result;
+    }
+
+    charra_log_info("[" LOG_NAME "] Attester identity not held by this "
+                    "process yet -- FETCHing it before the relay.");
+    ak_identity_rc = CHARRA_RC_ERROR;
+    result = rp_coap_fetch(attester_host, attester_port,
+            "certify_ak_of_attester", fetch_req_buf, fetch_req_buf_len,
+            coap_ak_identity_response_handler,
+            &processing_ak_identity_response);
+    free(fetch_req_buf);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /certify_ak_of_attester FETCH round "
+                         "trip failed.");
+        return result;
+    }
+    if (ak_identity_rc != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] /certify_ak_of_attester FETCH did "
+                         "not complete successfully.");
+        return ak_identity_rc;
+    }
+
+    /* Take ownership of the shared global's heap field, same convention as
+     * the FETCH in ensure_attester_identity_provisioned(). */
+    msg_ak_identity_response_dto identity = ak_identity_response;
+    ak_identity_response.ek_certificate = NULL;
+    ak_identity_response.ek_certificate_len = 0;
+
+    char* manufacturer_root_der = NULL;
+    size_t manufacturer_root_der_len = 0;
+    if ((result = charra_io_read_file(manufacturer_root_cert_path,
+                 &manufacturer_root_der, &manufacturer_root_der_len)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not read manufacturer root "
+                         "certificate ('%s').",
+                manufacturer_root_cert_path);
+        charra_free_if_not_null(identity.ek_certificate);
+        return result;
+    }
+    mbedtls_x509_crt attester_ek_leaf_cert;
+    if ((result = charra_crypto_verify_x509_cert_chain(identity.ek_certificate,
+                 identity.ek_certificate_len, (uint8_t*)manufacturer_root_der,
+                 manufacturer_root_der_len, &attester_ek_leaf_cert)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "]     => Attester's EK certificate "
+                         "does NOT verify against the manufacturer root. "
+                         "Aborting.");
+        charra_io_free_file_buffer(&manufacturer_root_der);
+        charra_free_if_not_null(identity.ek_certificate);
+        return CHARRA_RC_VERIFICATION_FAILED;
+    }
+    mbedtls_x509_crt_free(&attester_ek_leaf_cert);
+    charra_io_free_file_buffer(&manufacturer_root_der);
+
+    attester_identity_cached = identity;
+    charra_log_info("[" LOG_NAME "] Attester identity cached (EK certificate "
+                    "%u byte(s), AK public key %u byte(s)).",
+            attester_identity_cached.ek_certificate_len,
+            attester_identity_cached.ak_public_key_len);
+    return CHARRA_RC_SUCCESS;
+}
+
+/** @brief See rp_attester_identity.h. */
+void invalidate_cached_attester_ak_certificate(int verifier_index) {
+    char cert_path[112] = {0};
+    snprintf(cert_path, sizeof(cert_path),
+            "state/relying-party/attester-ak-certificates/"
+            "attester-ak-certificate-verifier-%u.der",
+            verifiers[verifier_index].port_number);
+    if (remove(cert_path) != 0 && errno != ENOENT) {
+        charra_log_warn("[" LOG_NAME "] Could not remove '%s': %s.", cert_path,
+                strerror(errno));
+    }
+    charra_free_if_not_null(attester_ak_cert_by_verifier_der[verifier_index]);
+    attester_ak_cert_by_verifier_der[verifier_index] = NULL;
+    attester_ak_cert_by_verifier_der_len[verifier_index] = 0;
+    attester_ak_cert_by_verifier_ready[verifier_index] = false;
+}
+
 CHARRA_RC ensure_attester_identity_certified_by_verifier(
         int verifier_index) {
     if (attester_ak_cert_by_verifier_ready[verifier_index]) {
@@ -518,28 +633,52 @@ CHARRA_RC ensure_attester_identity_certified_by_verifier(
         memcpy(cert_der, cert_buf, cert_buf_len);
         charra_io_free_file_buffer(&cert_buf);
 
+        /* Expiry is acted on, not merely logged. The cache is keyed only
+         * on the file existing, and the Verifier gives RP no distinct
+         * signal for "the Attester's certificate is stale" the way a 4.01
+         * does for RP's own -- Step 3b folds it into an ordinary failed
+         * vote. So without this check an expired certificate would be
+         * reloaded and re-sent every cycle, rejected every cycle, and
+         * never re-provisioned: a permanent stuck state only a manual
+         * delete of state/relying-party/attester-ak-certificates/ could
+         * clear. Re-provision slightly early, so renewal never lands in
+         * the middle of the cycle that needs the certificate. */
+        bool cache_usable = false;
         mbedtls_x509_crt cached_cert;
         mbedtls_x509_crt_init(&cached_cert);
         if (mbedtls_x509_crt_parse(&cached_cert, cert_der, cert_buf_len) ==
                 0) {
-            charra_log_info("[" LOG_NAME "] Reloading previously issued "
-                            "Attester AK certificate for Verifier %s:%u "
-                            "(cached, expires in %ld day(s)).",
-                    verifier_host, verifier_port,
-                    charra_crypto_x509_days_until_expiry(&cached_cert));
+            long days_left =
+                    charra_crypto_x509_days_until_expiry(&cached_cert);
+            if (days_left > ATTESTER_AK_CERT_RENEW_MARGIN_DAYS) {
+                cache_usable = true;
+                charra_log_info("[" LOG_NAME "] Reloading previously issued "
+                                "Attester AK certificate for Verifier %s:%u "
+                                "(cached, expires in %ld day(s)).",
+                        verifier_host, verifier_port, days_left);
+            } else {
+                charra_log_info("[" LOG_NAME "] Cached Attester AK "
+                                "certificate for Verifier %s:%u expires in "
+                                "%ld day(s) -- re-provisioning.",
+                        verifier_host, verifier_port, days_left);
+            }
         } else {
-            charra_log_info("[" LOG_NAME "] Reloading previously issued "
-                            "Attester AK certificate for Verifier %s:%u "
-                            "(cached).",
+            charra_log_error("[" LOG_NAME "] Cached Attester AK certificate "
+                             "for Verifier %s:%u does not parse -- "
+                             "re-provisioning.",
                     verifier_host, verifier_port);
         }
         mbedtls_x509_crt_free(&cached_cert);
 
-        attester_ak_cert_by_verifier_der[verifier_index] = cert_der;
-        attester_ak_cert_by_verifier_der_len[verifier_index] =
-                (uint32_t)cert_buf_len;
-        attester_ak_cert_by_verifier_ready[verifier_index] = true;
-        return CHARRA_RC_SUCCESS;
+        if (cache_usable) {
+            attester_ak_cert_by_verifier_der[verifier_index] = cert_der;
+            attester_ak_cert_by_verifier_der_len[verifier_index] =
+                    (uint32_t)cert_buf_len;
+            attester_ak_cert_by_verifier_ready[verifier_index] = true;
+            return CHARRA_RC_SUCCESS;
+        }
+        /* Fall through to the full relay below, which overwrites the file. */
+        charra_free_if_not_null(cert_der);
     }
 
     charra_log_info("[" LOG_NAME "]  +------------ Attester Identity "
@@ -551,6 +690,15 @@ CHARRA_RC ensure_attester_identity_certified_by_verifier(
     msg_certify_ak_request_dto verifier_req = {0};
     verifier_req.kind = CHARRA_CERTIFY_AK_CHALLENGE;
     verifier_req.subject = CHARRA_CERTIFY_AK_SUBJECT_ATTESTER;
+    /* Past the on-disk cache check, so the relay really is going to run:
+     * make sure this process actually holds the Attester's identity before
+     * putting it on the wire. */
+    if ((result = ensure_attester_identity_fetched()) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Cannot relay /certify_ak without the "
+                         "Attester's identity.");
+        return result;
+    }
+
     verifier_req.ek_certificate = attester_identity_cached.ek_certificate;
     verifier_req.ek_certificate_len =
             attester_identity_cached.ek_certificate_len;

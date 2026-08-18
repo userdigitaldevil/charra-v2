@@ -204,6 +204,7 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
 
     rp_ak_cert_rejected[*current_thread_index] = false;
     rp_qualification_rejected[*current_thread_index] = false;
+    attester_ak_cert_rejected[*current_thread_index] = false;
 
     if (coap_pdu_get_code(received) == COAP_RESPONSE_CODE_UNAUTHORIZED) {
         /* Verifier rejected our AK certificate specifically (see
@@ -261,6 +262,24 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
                     "qualification rejected");
         }
         rp_qualification_rejected[*current_thread_index] = true;
+        attestation_results[*current_thread_index] = false;
+        goto cleanup;
+    }
+
+    if (coap_pdu_get_code(received) ==
+            COAP_RESPONSE_CODE_PRECONDITION_FAILED) {
+        /* The ATTESTER's AK certificate, issued by this Verifier, is
+         * invalid or expired (Step 3b item 1) -- not RP's own identity and
+         * not the evidence. Re-run /certify_ak_of_attester for this
+         * Verifier and resubmit once, the same shape as the 4.01 path. */
+        charra_log_info("[" LOG_NAME "] Verifier n° %d (port %u) rejected the "
+                        "Attester's AK certificate as invalid or expired.",
+                *current_thread_index + 1,
+                verifiers[*current_thread_index].port_number);
+        snprintf(rejection_reason[*current_thread_index],
+                sizeof(rejection_reason[*current_thread_index]),
+                "Attester AK certificate rejected as invalid or expired");
+        attester_ak_cert_rejected[*current_thread_index] = true;
         attestation_results[*current_thread_index] = false;
         goto cleanup;
     }
@@ -848,9 +867,13 @@ void* get_attestation_results_thread(void *arg) {
     if (ensure_rp_ak_certificate(current_thread_index) != CHARRA_RC_SUCCESS) {
         charra_log_error(
                 "[" LOG_NAME "] Verifier n° %d (port %u): RP AK certificate "
-                "not provisioned; proceeding to /appraise anyway.",
+                "not provisioned; recording a failed vote for this Verifier.",
                 current_thread_index + 1,
                 verifiers[current_thread_index].port_number);
+        snprintf(rejection_reason[current_thread_index],
+                sizeof(rejection_reason[current_thread_index]),
+                "RP AK certificate not provisioned");
+        goto cleanup;
     }
 
     /* Symmetric with the above: the Attester's AK certificate, issued by
@@ -858,12 +881,21 @@ void* get_attestation_results_thread(void *arg) {
      * ensure_attester_identity_certified_by_verifier()'s docstring). */
     if (ensure_attester_identity_certified_by_verifier(current_thread_index) !=
             CHARRA_RC_SUCCESS) {
+        /* A failed vote either way -- but bail rather than send, because
+         * sending would put an EMPTY certificate on the wire and the
+         * Verifier's Step 3b would log it as the ATTESTER failing to
+         * complete DELIVER_VERIFIER, blaming the Attester for RP's own
+         * provisioning failure. Same verdict, honest diagnostics. */
         charra_log_error(
                 "[" LOG_NAME "] Verifier n° %d (port %u): Attester AK "
-                "certificate not provisioned; proceeding to /appraise "
-                "anyway.",
+                "certificate not provisioned; recording a failed vote for "
+                "this Verifier.",
                 current_thread_index + 1,
                 verifiers[current_thread_index].port_number);
+        snprintf(rejection_reason[current_thread_index],
+                sizeof(rejection_reason[current_thread_index]),
+                "Attester AK certificate not provisioned");
+        goto cleanup;
     }
 
     if (use_dtls_psk && use_dtls_rpk) {
@@ -1262,7 +1294,8 @@ void* get_attestation_results_thread(void *arg) {
         verifier_latency_ms[current_thread_index] = total_appraisal_wait_ms;
 
         bool rejected = rp_ak_cert_rejected[current_thread_index] ||
-                        rp_qualification_rejected[current_thread_index];
+                        rp_qualification_rejected[current_thread_index] ||
+                        attester_ak_cert_rejected[current_thread_index];
         if (!rejected || attempt == 1) {
             break;
         }
@@ -1281,6 +1314,24 @@ void* get_attestation_results_thread(void *arg) {
                 charra_log_error(
                         "[" LOG_NAME "] Could not re-provision RP AK "
                         "certificate; giving up on Verifier n\u00b0 %d.",
+                        current_thread_index + 1);
+                break;
+            }
+        } else if (attester_ak_cert_rejected[current_thread_index]) {
+            charra_log_info("[" LOG_NAME "] Re-provisioning the Attester's AK "
+                            "certificate after rejection by Verifier n\u00b0 "
+                            "%d (reason: %s) ...",
+                    current_thread_index + 1,
+                    rejection_reason[current_thread_index]);
+            invalidate_cached_attester_ak_certificate(current_thread_index);
+            CHARRA_RC recertify_rc =
+                    ensure_attester_identity_certified_by_verifier(
+                            current_thread_index);
+
+            if (recertify_rc != CHARRA_RC_SUCCESS) {
+                charra_log_error(
+                        "[" LOG_NAME "] Could not re-provision the Attester's "
+                        "AK certificate; giving up on Verifier n\u00b0 %d.",
                         current_thread_index + 1);
                 break;
             }
@@ -1414,6 +1465,13 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
         charra_log_info("[" LOG_NAME "] Verifier %d (port %u): %s", i+1, verifiers[i].port_number, attestation_results[i] ? "Attestation successful!" : "Attestation failed!");
     }
 
+    /* Fail-closed majority over every configured Verifier. A Verifier
+     * counts as a pass only if it appraised the evidence and accepted it.
+     * Everything else is a NO: any failed check (Step 3a's RP EK/AK,
+     * Quote_r, RP nonce; Step 3b's Attester EK/AK, Quote_a, Attester
+     * nonce), a rejection we could not recover from, an unreachable
+     * Verifier, or evidence we never managed to send. Not completing the
+     * exchange is never a reason to accept. */
     int num_true = 0;
     for (int i = 0; i < num_verifiers; ++i) {
         if (attestation_results[i]) {
@@ -1442,6 +1500,11 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
             reason = "OK";
         } else if (rejection_reason[i][0] != '\0') {
             reason = rejection_reason[i];
+        } else if (verifier_latency_ms[i] < 0) {
+            /* Never completed an /appraise round trip, so the Verifier
+             * never judged anything -- still a NO, but "appraisal failed"
+             * would point at a per-Verifier log that does not exist. */
+            reason = "no response from Verifier (unreachable or timed out)";
         } else {
             reason = "appraisal failed (see per-Verifier log above)";
         }

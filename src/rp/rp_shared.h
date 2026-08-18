@@ -228,6 +228,7 @@ extern bool processing_nonce_response[MAX_VERIFIERS];
 extern bool processing_trust_manager_response;
 extern char rejection_reason[MAX_VERIFIERS][128];
 extern bool rp_ak_cert_rejected[MAX_VERIFIERS];
+extern bool attester_ak_cert_rejected[MAX_VERIFIERS];
 extern int rp_num_verifiers_this_cycle;
 extern bool rp_qualification_rejected[MAX_VERIFIERS];
 extern char trust_manager_host[16];

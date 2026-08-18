@@ -78,6 +78,11 @@ bool attestation_results[MAX_VERIFIERS];
  * (4.01 Unauthorized), as opposed to any other appraisal failure --
  * distinguishes "go redo /certify_ak and retry" from a plain failed vote. */
 bool rp_ak_cert_rejected[MAX_VERIFIERS];
+/* Set when a Verifier answers /appraise with 4.12 Precondition Failed: the
+ * ATTESTER's AK certificate (the one that Verifier issued) is invalid or
+ * expired. Distinct from rp_ak_cert_rejected above, which is about RP's own
+ * certificate -- the two need opposite fixes. */
+bool attester_ak_cert_rejected[MAX_VERIFIERS];
 /* Summary-report only: was_cached (cert reused vs. freshly /certify_ak'd),
  * appraisal round-trip latency, and rejection reason text. */
 bool rp_ak_cert_was_cached[MAX_VERIFIERS];
@@ -197,11 +202,13 @@ time_t attester_ak_cert_validity_seconds =
         RP_AK_CERT_VALIDITY_SECONDS_DEFAULT;
 char* attester_ak_state_file_path =
         "state/relying-party/ak-provisioning/attester-ak-state.txt";
-/* Cache for the RP-issued leg only -- RP genuinely holds the plaintext for
- * this one (it signed it itself), unlike any Verifier-issued leg, which
- * only the Attester's own TPM ever decrypts. Its presence gates
- * ensure_attester_identity_provisioned() (the FETCH + RP-CA leg only, not
- * any Verifier's leg -- those are gated per-Verifier, below). */
+/* The RP-issued leg's cache. Every Verifier-issued leg is cached too, in
+ * the same directory as attester-ak-certificate-verifier-<port>.der (see
+ * ensure_attester_identity_certified_by_verifier()) -- certificates are
+ * public, so RP holds all of them in the clear. What only the Attester's
+ * TPM can decrypt is the credential-activation *secret*, not any of these.
+ * This file's presence gates ensure_attester_identity_provisioned() (the
+ * FETCH + RP-CA leg only); the Verifier legs gate per-Verifier. */
 char* attester_ak_cert_rp_cache_path =
         "state/relying-party/attester-ak-certificates/"
         "attester-ak-certificate-rp.der";

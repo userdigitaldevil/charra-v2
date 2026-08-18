@@ -654,6 +654,24 @@ void coap_appraise_handler(struct coap_resource_t* resource,
             message = "RP not qualified!\0";
             charra_log_info("[" LOG_NAME "] |     RP NOT QUALIFIED       |");
         }
+    } else if (!attestation_result_ekak) {
+        /* Third distinct signal, and the Step 3b counterpart of the 4.01
+         * above: RP's own identity is fine, but the ATTESTER's AK
+         * certificate -- the one this Verifier issued and RP forwards --
+         * is empty, unverifiable, expired or revoked. Without its own code
+         * this folded into the generic failure below, which RP cannot act
+         * on: it would resend the same dead certificate every cycle
+         * forever, since nothing would ever invalidate its cache. 4.12
+         * Precondition Failed, distinct from 4.01 (redo /certify_ak for
+         * RP) and 4.03 (redo /qualify), tells RP to redo
+         * /certify_ak_of_attester for THIS Verifier and retry once.
+         * Every other Step 3b check still ran and is logged above; only
+         * the response code is specialised. */
+        attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
+        message = "Attester AK certificate invalid or expired!\0";
+        response_code = COAP_RESPONSE_CODE_PRECONDITION_FAILED;
+        charra_log_info(
+                "[" LOG_NAME "] | ATTESTER AK CERT REJECTED  |");
     } else {
         attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
         message = "Attestation failed!    \0";
