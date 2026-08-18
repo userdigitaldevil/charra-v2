@@ -61,7 +61,7 @@ defined only by struct order, no schema self-description on the wire.
 |---|---|---|---|---|
 | Attester | `src/attester.c` | 5683 | `attest`, `certify_ak_of_attester` (both FETCH) | `timings_attester.txt` |
 | Verifier (new, passive) | `src/verifier.c` | 31415 | `nonce`, `appraise`, `certify_ak`, `qualify`, `qualify_submit` | `durations_verifier-<port>.txt` |
-| Verifier (old, active — baseline) | `src/verifier_old.c` | n/a (client) | — (calls Attester's `attest`) | `timings_verifier.txt` |
+| Verifier (old, active — baseline) | `src/verifier_old.c` | n/a (client) | — (calls Attester's `attest`) | `timings_verifier.txt` (no reader since `timing_atomic.py` was removed) |
 | Trust Manager | `src/trust_manager.c` | 6000 | `get_verifiers` | — |
 | Relying Party | `src/relying_party.c` | n/a (client) | — (calls Trust Manager + Attester + each Verifier) | `timings_RP_multi_verifiers.txt` (`--benchmark` only) |
 

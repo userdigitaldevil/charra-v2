@@ -43,15 +43,11 @@ To complete a full round of remote attestation, follow these steps:
 
 # Generating Measurements
 
-To measure the execution time of atomic operations (i.e., generating evidence and appraising evidence), follow these steps:
-
-1. **Install Dependencies:**
-   - Open an integrated terminal and run:
-     pip install numpy matplotlib
-
-2. **Run Timing Script:**
-   - In the same terminal, run:
-     python3 timing_atomic.py
+The old `timing_atomic.py` has been removed. It drove `bin/verifier_old` (the
+v1 active-client baseline) and read `timings_verifier.txt`, a file the current
+passive Verifier never writes, so it could not measure the v2 design at all.
+Per-phase Verifier timings now go to `durations_verifier-<port>.txt`, written
+on every `/appraise` and intended for reading by eye.
 
 To measure the overall process, including getting verifiers, getting evidence, appraising evidence, and total durations, follow these steps:
 
