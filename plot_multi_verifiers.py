@@ -1,46 +1,91 @@
-import matplotlib.pyplot as plt
+"""Plot the RP's multi-verifier sweep from timings_RP_multi_verifiers.txt.
+
+Two panels, because the sweep reports two genuinely different quantities and
+blending them hides both:
+
+  * steady state -- the per-cycle cost once every Verifier is already
+    certified. This is what "cost per additional Verifier" means, and it is
+    averaged over NUM_RUNS samples, so it carries real error bars.
+  * onboarding -- the one-off cost of the warm-up cycle at each step, where
+    the newly added Verifier runs a full two-leg /certify_ak. One sample by
+    construction (it only happens once), so no error bars.
+"""
+
 import re
+import matplotlib.pyplot as plt
 
-# Read the data from the file
-filename = 'timings_RP_multi_verifiers.txt'
-with open(filename, 'r') as file:
-    data = file.read()
+FILENAME = 'timings_RP_multi_verifiers.txt'
+OUTPUT = 'attestation_timing_analysis.png'
 
-# Define patterns to extract the data
-patterns = {
-    'num_verifiers': re.compile(r'Verifiers: (\d+)'),
-    'getting_verifiers': re.compile(r'Average Getting verifiers: ([\d.]+) seconds'),
-    'getting_evidence': re.compile(r'Average Getting evidence: ([\d.]+) seconds'),
-    'appraising_evidence': re.compile(r'Average Appraising evidence: ([\d.]+) seconds'),
-    'total_duration': re.compile(r'Average Total Attestation Duration: ([\d.]+) seconds')
-}
+with open(FILENAME) as handle:
+    data = handle.read()
 
-# Extract data
-num_verifiers = patterns['num_verifiers'].findall(data)
-getting_verifiers = patterns['getting_verifiers'].findall(data)
-getting_evidence = patterns['getting_evidence'].findall(data)
-appraising_evidence = patterns['appraising_evidence'].findall(data)
-total_duration = patterns['total_duration'].findall(data)
+# "Average <phase>: <value> seconds (stddev: <value>)" for steady state, and
+# "Onboarding <phase>: <value> seconds" for the warm-up cycle.
+PHASES = [
+    ('Getting verifiers', 'get_verifiers'),
+    ('Getting evidence', 'get_evidence'),
+    ('Appraising evidence', 'get_attestation_results'),
+    ('Total Attestation Duration', 'total_duration'),
+]
 
-# Convert extracted data to float and integers
-num_verifiers = [int(nv) for nv in num_verifiers]
-getting_verifiers = [float(gv) for gv in getting_verifiers]
-getting_evidence = [float(ge) for ge in getting_evidence]
-appraising_evidence = [float(ae) for ae in appraising_evidence]
-total_duration = [float(td) for td in total_duration]
+num_verifiers = [int(n) for n in re.findall(r'Verifiers: (\d+)', data)]
+if not num_verifiers:
+    raise SystemExit(f'No "Verifiers:" blocks found in {FILENAME}.')
 
-# Plotting
-plt.figure(figsize=(10, 6))
-plt.plot(num_verifiers, getting_verifiers, marker='o', label='get_verifiers')
-plt.plot(num_verifiers, getting_evidence, marker='o', label='get_evidence')
-plt.plot(num_verifiers, appraising_evidence, marker='o', label='get_attestation_results')
-plt.plot(num_verifiers, total_duration, marker='o', label='total_duration')
+steady, stddevs, onboarding = {}, {}, {}
+for phase, label in PHASES:
+    pairs = re.findall(
+        rf'Average {re.escape(phase)}: ([\d.]+) seconds \(stddev: ([\d.]+)\)',
+        data)
+    steady[label] = [float(v) for v, _ in pairs]
+    stddevs[label] = [float(s) for _, s in pairs]
+    onboarding[label] = [
+        float(v) for v in
+        re.findall(rf'Onboarding {re.escape(phase)}: ([\d.]+) seconds', data)
+    ]
 
-plt.xticks(range(1, 6))
-plt.xlabel('Number of Verifiers')
-plt.ylabel('Time (seconds)')
-plt.title('Attestation Timing Analysis')
-plt.legend()
-plt.grid(True)
-output_filename = 'attestation_timing_analysis.png'
-plt.savefig(output_filename)
+missing = [lbl for _, lbl in PHASES if len(steady[lbl]) != len(num_verifiers)]
+if missing:
+    raise SystemExit(
+        f'{FILENAME} has {len(num_verifiers)} Verifier blocks but incomplete '
+        f'steady-state data for: {", ".join(missing)}. Regenerate it with '
+        'bin/relying_party --benchmark.')
+
+have_onboarding = all(
+    len(onboarding[lbl]) == len(num_verifiers) for _, lbl in PHASES)
+
+ncols = 2 if have_onboarding else 1
+fig, axes = plt.subplots(1, ncols, figsize=(7 * ncols, 6), squeeze=False)
+
+ax = axes[0][0]
+for _, label in PHASES:
+    ax.errorbar(num_verifiers, steady[label], yerr=stddevs[label], marker='o',
+                capsize=4, label=label)
+ax.set_title('Steady state (warm Verifiers)')
+ax.set_xlabel('Number of Verifiers')
+ax.set_ylabel('Time (seconds)')
+ax.set_xticks(num_verifiers)
+ax.grid(True)
+ax.legend()
+
+if have_onboarding:
+    ax = axes[0][1]
+    for _, label in PHASES:
+        ax.plot(num_verifiers, onboarding[label], marker='s', linestyle='--',
+                label=label)
+    ax.set_title('Onboarding cycle (newly added Verifier is cold)')
+    ax.set_xlabel('Number of Verifiers')
+    ax.set_ylabel('Time (seconds)')
+    ax.set_xticks(num_verifiers)
+    ax.grid(True)
+    ax.legend()
+else:
+    print(f'{FILENAME} has no "Onboarding" lines -- plotting steady state '
+          'only. Regenerate with a current bin/relying_party --benchmark to '
+          'get the onboarding panel.')
+
+fig.suptitle('RP attestation timing vs Verifier count')
+fig.tight_layout()
+fig.savefig(OUTPUT, dpi=150)
+print(f'Wrote {OUTPUT}')

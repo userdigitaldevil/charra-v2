@@ -41,8 +41,10 @@
 #include "rp/rp_shared.h"
 #include "rp/rp_stats.h"
 
-/* measurement config */
-#define NUM_RUNS 1
+/* measurement config. Every verifier count is measured NUM_RUNS times AFTER
+ * a discarded warm-up cycle -- see the sweep in main() for why a single
+ * sample per step measured the wrong thing. */
+#define NUM_RUNS 5
 
 bool rp_benchmark_mode = false;
 unsigned int rp_attestation_interval_s =
@@ -546,9 +548,17 @@ int main(int argc, char** argv) {
     mkdir("state/relying-party/attester-ak-certificates", 0755);
     mkdir("state/relying-party/ak-provisioning", 0755);
 
+    /* Everything above is shared mutable state keyed by nothing but the path,
+     * so exactly one RP may own it at a time. */
+    if (charra_io_lock_state_dir("state/relying-party/relying-party.lock",
+                "relying_party") != CHARRA_RC_SUCCESS) {
+        return EXIT_FAILURE;
+    }
+
     if (rp_benchmark_mode) {
         charra_log_info("[" LOG_NAME "] Effective configuration: mode=benchmark "
                         "verifier_sweep=1..%d runs_per_step=%d "
+                        "(plus 1 discarded warm-up cycle per step) "
                         "verifier_response_timeout=%us "
                         "attester_response_timeout=%us blacklist='%s' "
                         "ima_test_log='%s' (use_ima_test_log=%s)",
@@ -569,6 +579,31 @@ int main(int argc, char** argv) {
 
         for (int num_verifiers = 1; num_verifiers <= RP_MAX_SWEEP_VERIFIERS;
                 num_verifiers++) {
+            /* One discarded warm-up cycle per step, for a reason specific to
+             * this sweep: verifiers 1..k-1 are already certified by the time
+             * step k runs, but verifier k has never been seen, so its thread
+             * performs a full two-leg /certify_ak (plus the Attester AK relay
+             * and the qualification handshake) INSIDE the window
+             * timing->appraisal measures. Without this, every step's sample
+             * is "k-1 steady-state appraisals + one onboarding", and the
+             * step-to-step delta reads as per-verifier scaling when much of
+             * it is a one-off cost.
+             *
+             * The warm-up is not thrown away -- onboarding is the expensive
+             * TPM path and worth a number of its own, so it is reported
+             * separately below rather than blended into the steady state. */
+            rp_cycle_timing onboarding = {0};
+            {
+                char label[32] = {0};
+                snprintf(label, sizeof(label), "warm-up (onboarding)");
+                result = run_one_attestation_cycle(
+                        num_verifiers, label, &onboarding);
+                if (result != CHARRA_RC_SUCCESS) {
+                    result = EXIT_FAILURE;
+                    break;
+                }
+            }
+
             for (int run = 0; run < NUM_RUNS; run++) {
                 char label[32] = {0};
                 snprintf(label, sizeof(label), "run %d/%d", run + 1, NUM_RUNS);
@@ -609,6 +644,20 @@ int main(int argc, char** argv) {
                     &stddev_total_attestation_duration);
 
             fprintf(timing_file, "Verifiers: %d\n", num_verifiers);
+            /* Steady state below; onboarding first so a reader sees which
+             * number is which before the averages. */
+            fprintf(timing_file,
+                    "Onboarding Getting verifiers: %f seconds\n",
+                    onboarding.verifiers);
+            fprintf(timing_file, "Onboarding Getting evidence: %f seconds\n",
+                    onboarding.evidence);
+            fprintf(timing_file,
+                    "Onboarding Appraising evidence: %f seconds\n",
+                    onboarding.appraisal);
+            fprintf(timing_file,
+                    "Onboarding Total Attestation Duration: %f seconds\n",
+                    onboarding.verifiers + onboarding.evidence +
+                            onboarding.appraisal);
             fprintf(timing_file,
                     "Average Getting verifiers: %f seconds (stddev: %f)\n",
                     avg_verifier_duration, stddev_verifier_duration);

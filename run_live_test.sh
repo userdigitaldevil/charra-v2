@@ -59,7 +59,38 @@ set -e
 
 docker rm -f charra >/dev/null 2>&1 || true
 
-docker run -v "$PWD/:/home/bob/charra" -it --rm --init \
+# Refuse to run while ANOTHER container has this same directory mounted.
+# Removing the "charra" container above only handles our own leftovers; a
+# container under any other name sharing this checkout shares state/ and
+# logs/ too, and its relying_party will revoke ours in the Verifiers'
+# issuance ledgers -- silently, surfacing only as unexplained attestation
+# failures much later. See CHARRA_V2_NOTES.md, "One state directory, many
+# owners". The binaries now refuse to start in that situation, but catching
+# it here names the container instead of just the lock file.
+mine=${PWD%/}
+others=""
+for cid in $(docker ps -q); do
+    cname=$(docker inspect -f "{{.Name}}" "$cid" 2>/dev/null | sed "s#^/##")
+    for src in $(docker inspect -f "{{range .Mounts}}{{.Source}}{{println}}{{end}}" "$cid" 2>/dev/null); do
+        if [ "${src%/}" = "$mine" ]; then
+            others="$others $cname"
+            break
+        fi
+    done
+done
+if [ -n "$others" ]; then
+    echo "ERROR: these running containers already mount $mine:$others" >&2
+    echo "They share state/ and logs/ with this run and will corrupt it." >&2
+    echo "Stop them first:  docker stop$others" >&2
+    exit 1
+fi
+
+# -t only when there is a terminal, so this stays runnable from CI or a
+# non-interactive shell (docker run -t without a TTY fails outright).
+tty_flags=""
+[ -t 0 ] && tty_flags="-it"
+
+docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
   --name charra --group-add tss \
   fraunhofer-sit/charra-dev-env:1.9.0 \
   bash -lc '
@@ -88,6 +119,15 @@ docker run -v "$PWD/:/home/bob/charra" -it --rm --init \
     rm -rf logs
     mkdir -p logs
 
+    # Regenerate verifiers_config.txt for exactly the five ports started
+    # below. start_verifiers.sh writes this file too, so a previous
+    # "./start_verifiers.sh 3" would otherwise leave a three-row config here
+    # and the sweep would fail at 4 and 5 Verifiers with "Verifier ID not
+    # found" rather than anything pointing at the config.
+    for i in 1 2 3 4 5; do
+      echo "$i 127.0.0.1 $((5683 + i))"
+    done > verifiers_config.txt
+
     LOG_LEVEL_CHARRA=DEBUG bin/trust_manager > logs/trust_manager.log 2>&1 &
     LOG_LEVEL_CHARRA=DEBUG bin/attester      > logs/attester.log      2>&1 &
     for p in 5684 5685 5686 5687 5688; do
@@ -97,4 +137,20 @@ docker run -v "$PWD/:/home/bob/charra" -it --rm --init \
 
     LOG_LEVEL_CHARRA=DEBUG bin/relying_party --benchmark 2>&1 \
         | tee logs/relying_party.log
+
+    # A log that is mostly NUL bytes means two processes shared the file:
+    # one truncated it while the other held a descriptor at a large offset.
+    # That is the fingerprint of a second instance running against this
+    # checkout, and it invalidates the whole run -- so say so rather than
+    # letting the timings look trustworthy.
+    for f in logs/*.log; do
+        if [ "$(wc -c < "$f")" -ne "$(tr -d "\0" < "$f" | wc -c)" ]; then
+            echo "WARNING: $f contains NUL padding -- more than one process"
+            echo "         wrote it. Treat this run as contaminated."
+        fi
+    done
+
+    echo "--- timings written to timings_RP_multi_verifiers.txt"
+    echo "--- plot them on the HOST (matplotlib is not in this image):"
+    echo "      python3 plot_multi_verifiers.py"
   '
