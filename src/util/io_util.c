@@ -23,10 +23,15 @@
 #include "../common/charra_macro.h"
 #include "../core/charra_cvector.h"
 
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 void charra_print_hex(const charra_log_t level, const size_t buf_len,
@@ -220,4 +225,162 @@ CHARRA_RC charra_io_read_continuous_binary_file(const char* const filename,
 
 void charra_io_free_continuous_file_buffer(uint8_t** const file_content) {
     charra_free_if_not_null_ex(*file_content, cvector_free);
+}
+
+/* Path of the lock this process owns, so atexit() can remove it. Static
+ * because atexit() handlers take no argument; only ever set once. */
+static char state_lock_owned_path[256] = {0};
+
+static void charra_io_release_state_lock(void) {
+    if (state_lock_owned_path[0] != '\0') {
+        unlink(state_lock_owned_path);
+    }
+}
+
+/* Whether a PID belongs to a process that is still doing something.
+ *
+ * kill(pid, 0) alone is not enough: it succeeds on a ZOMBIE, and a container
+ * whose PID 1 is not a reaping init (a plain shell or `sleep` is common)
+ * accumulates zombies that never go away. A SIGKILLed instance would then hold
+ * its state lock forever, since its PID still answers. Measured exactly that
+ * way -- three killed Verifiers sat in state Z and kept their locks. */
+static bool charra_io_pid_is_live(pid_t pid) {
+    char stat_path[64] = {0};
+    snprintf(stat_path, sizeof(stat_path), "/proc/%ld/stat", (long)pid);
+    FILE* stat_file = fopen(stat_path, "r");
+    if (stat_file != NULL) {
+        char line[512] = {0};
+        char* got = fgets(line, sizeof(line), stat_file);
+        fclose(stat_file);
+        if (got != NULL) {
+            /* "<pid> (<comm>) <state> ..." -- comm is arbitrary and may hold
+             * spaces or parentheses, so anchor on the LAST ')' instead of
+             * tokenizing from the left. */
+            const char* rparen = strrchr(line, ')');
+            if (rparen != NULL && rparen[1] == ' ') {
+                return rparen[2] != 'Z';
+            }
+        }
+        return true; /* unreadable -- never steal a lock on a guess */
+    }
+    /* No /proc entry: either the process is gone or this is not Linux, where
+     * kill() is the only portable answer available. */
+    return !(kill(pid, 0) != 0 && errno == ESRCH);
+}
+
+/* Reads "<pid> <hostname>" back out of an existing lock file and decides
+ * whether its owner is demonstrably gone. Only answers true for a lock this
+ * same host wrote: PIDs are per-namespace, so a PID from another host (or
+ * another container) may well be live here by coincidence, and treating that
+ * as stale would hand out a lock somebody else still holds. */
+static bool charra_io_state_lock_is_stale(
+        int fd, char* holder_out, size_t holder_out_len) {
+    char contents[288] = {0};
+    ssize_t n = pread(fd, contents, sizeof(contents) - 1, 0);
+    if (n <= 0) {
+        /* Created but never filled in -- a previous owner died between
+         * open() and write(). Nobody can be holding it. */
+        snprintf(holder_out, holder_out_len, "unknown");
+        return true;
+    }
+
+    long holder_pid = 0;
+    char holder_host[256] = {0};
+    if (sscanf(contents, "%ld %255s", &holder_pid, holder_host) != 2) {
+        snprintf(holder_out, holder_out_len, "unreadable");
+        return false;
+    }
+    snprintf(holder_out, holder_out_len, "PID %ld on host %s", holder_pid,
+            holder_host);
+
+    char this_host[256] = {0};
+    if (gethostname(this_host, sizeof(this_host) - 1) != 0 ||
+            strcmp(this_host, holder_host) != 0) {
+        return false; /* another host/container -- unverifiable, so assume live */
+    }
+    return !charra_io_pid_is_live((pid_t)holder_pid);
+}
+
+CHARRA_RC charra_io_lock_state_dir(
+        const char* const lock_file_path, const char* const role) {
+    if (lock_file_path == NULL || role == NULL) {
+        return CHARRA_RC_BAD_ARGUMENT;
+    }
+
+    /* O_EXCL, not flock(): flock() is silently a no-op on some shared
+     * filesystems (every caller "acquires" it), and a bind-mounted state
+     * directory shared between containers is exactly the case this guard
+     * exists to catch. An atomic exclusive create works everywhere. */
+    int fd = open(lock_file_path, O_RDWR | O_CREAT | O_EXCL, 0644);
+    if (fd < 0 && errno == EEXIST) {
+        fd = open(lock_file_path, O_RDWR);
+        char holder[320] = {0};
+        if (fd < 0) {
+            charra_log_error("Cannot open state lock file '%s': %s.",
+                    lock_file_path, strerror(errno));
+            return CHARRA_RC_ERROR;
+        }
+        if (!charra_io_state_lock_is_stale(fd, holder, sizeof(holder))) {
+            charra_log_error("Another %s already holds the state directory "
+                             "that '%s' guards (%s).",
+                    role, lock_file_path, holder);
+            charra_log_error("Two instances sharing one state directory "
+                             "revoke each other's certificates and overwrite "
+                             "each other's caches, which surfaces only as "
+                             "unexplained attestation failures. Refusing to "
+                             "start.");
+            charra_log_error("If that instance is genuinely gone, delete "
+                             "'%s' and start again.",
+                    lock_file_path);
+            close(fd);
+            return CHARRA_RC_ERROR;
+        }
+
+
+        /* Re-create rather than reuse the descriptor, so the reclaim is as
+         * atomic as the original acquisition: if two instances start
+         * together after a crash they both see the same stale lock, and
+         * only the one whose O_EXCL create wins may have it. */
+        close(fd);
+        unlink(lock_file_path);
+        fd = open(lock_file_path, O_RDWR | O_CREAT | O_EXCL, 0644);
+        if (fd < 0) {
+            charra_log_error("Another %s reclaimed the state lock '%s' at the "
+                             "same moment. Refusing to start.",
+                    role, lock_file_path);
+            return CHARRA_RC_ERROR;
+        }
+        charra_log_info("Reclaimed state lock '%s' from a %s that exited "
+                        "without releasing it (%s).",
+                lock_file_path, role, holder);
+    } else if (fd < 0) {
+        charra_log_error("Cannot create state lock file '%s': %s.",
+                lock_file_path, strerror(errno));
+        return CHARRA_RC_ERROR;
+    }
+
+    /* Identifies the holder in the message above next time. The file is
+     * always freshly created by this point, so there is nothing to truncate. */
+    char this_host[256] = {0};
+    if (gethostname(this_host, sizeof(this_host) - 1) != 0) {
+        snprintf(this_host, sizeof(this_host), "unknown");
+    }
+    char owner[320] = {0};
+    int owner_len = snprintf(
+            owner, sizeof(owner), "%ld %s\n", (long)getpid(), this_host);
+    if (owner_len > 0) {
+        /* snprintf returns what it WOULD have written; clamp before it
+         * becomes a length passed to pwrite(). */
+        size_t to_write = ((size_t)owner_len < sizeof(owner))
+                                  ? (size_t)owner_len
+                                  : sizeof(owner) - 1;
+        ssize_t written = pwrite(fd, owner, to_write, 0);
+        (void)written; /* diagnostic only -- never worth failing startup over */
+    }
+    close(fd);
+
+    snprintf(state_lock_owned_path, sizeof(state_lock_owned_path), "%s",
+            lock_file_path);
+    atexit(charra_io_release_state_lock);
+    return CHARRA_RC_SUCCESS;
 }

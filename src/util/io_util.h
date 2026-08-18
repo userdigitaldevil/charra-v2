@@ -142,4 +142,31 @@ CHARRA_RC charra_io_read_continuous_binary_file(const char* const filename,
  */
 void charra_io_free_continuous_file_buffer(uint8_t** const file_content);
 
+/**
+ * @brief Take an exclusive lock on a runtime state directory so two
+ * instances can never share one.
+ *
+ * Nothing under state/ is keyed by instance: a second process on the same
+ * directory silently corrupts the first. Its /certify_ak revokes the running
+ * instance's record in the shared issuance ledger, and its cache writes leave
+ * the running instance presenting a certificate that no longer matches the
+ * key it signs quotes with. The result is a permanent stream of failed
+ * attestations whose logs blame revoked certificates and quote-signature
+ * mismatches -- never the second process that actually caused them. Failing
+ * loudly at startup is the only way that cause is ever visible.
+ *
+ * Uses an atomic O_EXCL create rather than flock(), which is silently a no-op
+ * on some shared filesystems -- including a bind-mounted state directory
+ * shared between containers, the very case this guards against. Released on
+ * normal exit; a lock left behind by a killed process is reclaimed
+ * automatically when it names a PID on this host that no longer exists.
+ *
+ * @param[in] lock_file_path file to create; its parent directory must exist.
+ * @param[in] role name used in the error message, e.g. "relying_party".
+ * @return CHARRA_RC_SUCCESS if the lock was taken, CHARRA_RC_ERROR if another
+ * instance holds it or the file could not be created.
+ */
+CHARRA_RC charra_io_lock_state_dir(
+        const char* const lock_file_path, const char* const role);
+
 #endif /* IO_UTIL_H */
