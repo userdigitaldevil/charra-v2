@@ -194,28 +194,6 @@ cleanup:
     return COAP_RESPONSE_OK;
 }
 
-/** Copy a Verifier's response body into this thread's rejection_reason, so
- * the RP run summary shows the Verifier's own stated reasons rather than a
- * guess made on this side. Falls back to `fallback` when the body is empty. */
-static void record_verifier_reason(
-        int index, const coap_pdu_t* received, const char* fallback) {
-    size_t len = 0, off = 0, total = 0;
-    const uint8_t* body = NULL;
-    if (coap_get_data_large(received, &len, &body, &off, &total) != 0 &&
-            len > 0) {
-        int n = (int)len < (int)sizeof(rejection_reason[0]) - 1
-                        ? (int)len
-                        : (int)sizeof(rejection_reason[0]) - 1;
-        snprintf(rejection_reason[index], sizeof(rejection_reason[index]),
-                "%.*s", n, (const char*)body);
-        charra_log_info("[" LOG_NAME "] Verifier n\u00b0 %d said: %.*s",
-                index + 1, n, (const char*)body);
-    } else {
-        snprintf(rejection_reason[index], sizeof(rejection_reason[index]),
-                "%s", fallback);
-    }
-}
-
 static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
         const coap_pdu_t* sent CHARRA_UNUSED,
         const coap_pdu_t* received,
@@ -238,7 +216,8 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
                         "our AK certificate as invalid or expired.",
                 *current_thread_index + 1,
                 verifiers[*current_thread_index].port_number);
-        record_verifier_reason(*current_thread_index, received,
+        snprintf(rejection_reason[*current_thread_index],
+                sizeof(rejection_reason[*current_thread_index]),
                 "AK certificate rejected as invalid or expired");
         rp_ak_cert_rejected[*current_thread_index] = true;
         attestation_results[*current_thread_index] = false;
@@ -297,7 +276,8 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
                         "Attester's AK certificate as invalid or expired.",
                 *current_thread_index + 1,
                 verifiers[*current_thread_index].port_number);
-        record_verifier_reason(*current_thread_index, received,
+        snprintf(rejection_reason[*current_thread_index],
+                sizeof(rejection_reason[*current_thread_index]),
                 "Attester AK certificate rejected as invalid or expired");
         attester_ak_cert_rejected[*current_thread_index] = true;
         attestation_results[*current_thread_index] = false;
@@ -326,9 +306,8 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
             memcmp(data, successful_message, data_len) == 0) {
         attestation_results[*current_thread_index] = true;
     } else {
+        charra_log_info("[" LOG_NAME "] False\n");
         attestation_results[*current_thread_index] = false;
-        record_verifier_reason(*current_thread_index, received,
-                "appraisal failed (no reason given)");
     }
 
 cleanup:

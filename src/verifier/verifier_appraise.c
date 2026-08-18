@@ -73,6 +73,8 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     // If p_file is a null pointer, the file opening failed.
     if (p_file == NULL) {
         printf("File does not exist!");
+        early_fail_reason = "Verifier-side error: could not open its duration "
+                            "log file";
         goto cleanup;
     }
 
@@ -140,12 +142,16 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                 "[" LOG_NAME
                 "] Length of attestation data exceeds maximum allowed size.");
         attestation_rc = CHARRA_RC_ERROR;
+        early_fail_reason = "malformed request: Quote_a attestation data "
+                            "exceeds the maximum allowed size";
         goto cleanup;
     }
     if (res.tpm2_signature_len > sizeof(TPMT_SIGNATURE)) {
         charra_log_error("[" LOG_NAME
                          "] Length of signature exceeds maximum allowed size.");
         attestation_rc = CHARRA_RC_ERROR;
+        early_fail_reason = "malformed request: Quote_a signature exceeds the "
+                            "maximum allowed size";
         goto cleanup;
     }
     /* Quote_r's fields -- re-checked here independently of whatever bounds
@@ -626,6 +632,8 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                      tpm2_public_key, &sig_key_handle)) != CHARRA_RC_SUCCESS) {
             charra_log_error(
                     "[" LOG_NAME "] Loading external public key failed.");
+            early_fail_reason = "the Attester's public key could not be loaded "
+                                "into the TPM (Step 3b item 2)";
             goto cleanup;
         } else {
             charra_log_info("[" LOG_NAME "] External public key loaded.");
@@ -645,6 +653,9 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         if (!charra_crypto_verify_quote_signature_mbedtls(tpm2_public_key,
                     res.attestation_data, res.attestation_data_len,
                     &signature, &attestation_result_signature_mbedtls)) {
+            early_fail_reason = "Quote_a signature (Step 3b item 2): could not "
+                                "be checked -- the Attester's public key is "
+                                "unusable";
             goto cleanup;
         }
 
@@ -656,6 +667,8 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         if (attestation_rc != CHARRA_RC_SUCCESS) {
             charra_log_error(
                     "[" LOG_NAME "] Error while unmarshaling TPM2 Quote.");
+            early_fail_reason = "malformed request: Quote_a attestation data "
+                                "is not a valid TPM2 quote structure";
             goto cleanup;
         }
 
@@ -705,40 +718,28 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     hex_prefix(ek_fingerprint_rp, sizeof(ek_fingerprint_rp),
             ek_fingerprint_rp_hex_result, sizeof(ek_fingerprint_rp_hex_result));
 
-    /* Every reason this vote is a NO, in one place -- logged here AND sent
-     * back to the RP as the response body, so the same reasons land in the
-     * RP's own run summary instead of only in this Verifier's log. The
-     * per-check lines above are interleaved with timing and hex dumps; this
-     * states the verdict once, explicitly, naming which side each failure
-     * points at. */
-    char reason_buf[512] = {0};
-    size_t reason_used = 0;
-#define APPEND_REASON(...)                                                     \
+    /* Every reason this vote is a NO, in one place. Logged HERE ONLY -- the
+     * RP is told the verdict, not the analysis. It cannot act on most of
+     * these (they describe what this Verifier decided about evidence the RP
+     * merely relayed), and shipping them would leak appraisal detail to a
+     * peer that may itself have just failed Step 3a. The per-check lines
+     * above are interleaved with timing and hex output; this states the
+     * verdict once, naming the specific cause of each failure. */
+    if (!attestation_result) {
+        charra_log_error("[" LOG_NAME "] Voting NO. Reason(s):");
+#define LOG_REASON(...)                                                        \
     do {                                                                       \
         char one[192];                                                         \
         snprintf(one, sizeof(one), __VA_ARGS__);                               \
         charra_log_error("[" LOG_NAME "]   - %s", one);                        \
-        reason_used += snprintf(reason_buf + reason_used,                      \
-                (reason_used < sizeof(reason_buf))                             \
-                        ? sizeof(reason_buf) - reason_used                     \
-                        : 0,                                                   \
-                "%s%s", (reason_used > 0) ? "; " : "", one);                   \
-        if (reason_used >= sizeof(reason_buf)) {                               \
-            reason_used = sizeof(reason_buf) - 1;                              \
-        }                                                                      \
     } while (0)
-
-    if (!attestation_result) {
-        charra_log_error("[" LOG_NAME "] Voting NO. Reason(s):");
         if (!attestation_result_ekak_rp) {
-            APPEND_REASON("RP AK certificate (Step 3a item 1): %s",
-                    ekak_rp_why);
+            LOG_REASON("RP AK certificate (Step 3a item 1): %s", ekak_rp_why);
         }
         if (!attestation_result_qualified) {
-            /* The lookup is keyed by ek_fingerprint_rp, which only exists
-             * once the AK certificate verified -- so if that failed, this
-             * check never ran and must not be reported as a real failure. */
-            APPEND_REASON("RP qualification (Step 3a item 1b): %s",
+            /* The lookup is keyed by ek_fingerprint_rp; without an identity
+             * it never ran and must not be reported as a real failure. */
+            LOG_REASON("RP qualification (Step 3a item 1b): %s",
                     !rp_identity_known
                             ? "NOT EVALUATED -- RP's certificate could not be "
                               "tied to any known identity"
@@ -749,28 +750,28 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         }
         if (!attestation_result_signature_rp ||
                 !attestation_result_signature_rp_mbedtls) {
-            APPEND_REASON("Quote_r signature (Step 3a item 2): MISMATCH -- "
-                          "not a valid signature by RP's AK over PCR_r");
+            LOG_REASON("Quote_r signature (Step 3a item 2): MISMATCH -- not a "
+                       "valid signature by RP's AK over PCR_r");
         }
         if (!attestation_result_nonce_rp) {
-            APPEND_REASON("RP nonce (Step 3a item 3): WRONG -- Quote_r is not "
-                          "bound to the challenge this Verifier issued");
+            LOG_REASON("RP nonce (Step 3a item 3): WRONG -- Quote_r is not "
+                       "bound to the challenge this Verifier issued");
         }
         if (!attestation_result_ekak) {
-            APPEND_REASON("Attester AK certificate (Step 3b item 1): %s",
+            LOG_REASON("Attester AK certificate (Step 3b item 1): %s",
                     ekak_att_why);
         }
         if (!attestation_result_signature ||
                 !attestation_result_signature_mbedtls) {
-            APPEND_REASON("Quote_a signature (Step 3b item 2): MISMATCH -- "
-                          "not a valid signature by the Attester's AK");
+            LOG_REASON("Quote_a signature (Step 3b item 2): MISMATCH -- not a "
+                       "valid signature by the Attester's AK");
         }
         if (!attestation_result_nonce) {
-            APPEND_REASON("Attester nonce (Step 3b item 3): WRONG -- Quote_a "
-                          "is not bound to the expected nonce");
+            LOG_REASON("Attester nonce (Step 3b item 3): WRONG -- Quote_a is "
+                       "not bound to the expected nonce");
         }
+#undef LOG_REASON
     }
-#undef APPEND_REASON
 
     const char* message;
     coap_pdu_code_t response_code = COAP_RESPONSE_CODE_CONTENT;
@@ -792,7 +793,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
          * "go redo /certify_ak and retry" apart from "your evidence itself
          * didn't check out," which a blind retry can never fix. */
         attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
-        message = reason_buf;
+        message = "RP AK certificate invalid or expired!\0";
         response_code = COAP_RESPONSE_CODE_UNAUTHORIZED;
         charra_log_info("[" LOG_NAME "] |  RP AK CERTIFICATE REJECTED  |");
     } else if (!attestation_result_qualified) {
@@ -810,10 +811,10 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
         response_code = COAP_RESPONSE_CODE_FORBIDDEN;
         if (qualification_record_found) {
-            message = reason_buf;
+            message = "RP qualification expired!\0";
             charra_log_info("[" LOG_NAME "] |  RP QUALIFICATION EXPIRED  |");
         } else {
-            message = reason_buf;
+            message = "RP not qualified!\0";
             charra_log_info("[" LOG_NAME "] |     RP NOT QUALIFIED       |");
         }
     } else if (!attestation_result_ekak) {
@@ -830,13 +831,13 @@ void coap_appraise_handler(struct coap_resource_t* resource,
          * Every other Step 3b check still ran and is logged above; only
          * the response code is specialised. */
         attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
-        message = reason_buf;
+        message = "Attester AK certificate invalid or expired!\0";
         response_code = COAP_RESPONSE_CODE_PRECONDITION_FAILED;
         charra_log_info(
                 "[" LOG_NAME "] | ATTESTER AK CERT REJECTED  |");
     } else {
         attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
-        message = reason_buf;
+        message = "Attestation failed!    \0";
         charra_log_info("[" LOG_NAME "] |     ATTESTATION FAILED     |");
     }
     charra_log_info("[" LOG_NAME "] +----------------------------+");
@@ -869,12 +870,11 @@ cleanup:
                                   ? early_fail_reason
                                   : "evidence rejected before appraisal could "
                                     "complete";
+        /* Logged here only, like the reason list above; the RP gets the
+         * 4.00 status and nothing more. */
         charra_log_error("[" LOG_NAME "] Voting NO (no appraisal). Reason: %s",
                 why);
         coap_pdu_set_code(response, COAP_RESPONSE_CODE_BAD_REQUEST);
-        coap_add_data_large_response(resource, session, request, response,
-                query, COAP_MEDIATYPE_APPLICATION_OCTET_STREAM, -1, 0,
-                strlen(why), (const uint8_t*)why, NULL, NULL);
     }
 
     /* close duration log file -- every path through this function reaches
