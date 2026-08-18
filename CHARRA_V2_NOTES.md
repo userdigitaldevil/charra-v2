@@ -411,13 +411,12 @@ actual order `run_one_attestation_cycle()` runs things in, for one cycle
         `/appraise` gets called, once per Verifier, near the end of the
         cycle, not the start. Runs **Step 3a** (`Evidence_r`: RP's AK cert
         against Verifier `i`'s own CA + RP's qualification, `Quote_r`
-        signature, nonce) gating **Step 3b** (`Evidence_a'`: Attester's
-        cert against Verifier `i`'s own CA, `Quote_a` signature, nonce) —
-        early-exit on 3a failure, matching the spec's wording exactly.
-     6. Rejected specifically for "AK certificate invalid" or "not
-        qualified" → retry once (invalidate that one cache, re-provision,
-        resend). Any other rejection → recorded as a plain fail, no
-        retry.
+        signature, nonce) **and Step 3b** (`Evidence_a'`: Attester's cert
+        against Verifier `i`'s own CA, `Quote_a` signature, nonce). Both
+        run unconditionally — see "Verifier verdicts" below for why the
+        3a→3b gate was removed.
+     6. Any failed check is a NO vote. No retry, and no out-of-band status
+        telling RP which remedy to attempt.
 5. Threads join; RP tallies pass/fail per Verifier into a majority vote
    and prints the run summary.
 
@@ -1576,10 +1575,11 @@ glue), then reached a genuine `ATTESTATION SUCCESSFUL` for the first time.
   four handles to the top of the function, initialized before any `goto`
   can fire — matching this file's existing convention for the other CoAP
   handles.
-- **AK-certificate-rejection retry, implemented**: on a Verifier's `4.01`
-  response, `relying_party.c` sets `rp_ak_cert_rejected[]`, and
-  `get_attestation_results_thread()`'s build→send→wait sequence becomes a
-  2-attempt loop that re-provisions
+- **AK-certificate-rejection retry** — *since removed outright; see
+  "Verifier verdicts" below. Kept as history.* On a Verifier's `4.01`
+  response, `relying_party.c` set `rp_ak_cert_rejected[]`, and
+  `get_attestation_results_thread()`'s build→send→wait sequence became a
+  2-attempt loop that re-provisioned
   (`invalidate_cached_rp_ak_certificate()` + fresh
   `ensure_rp_ak_certificate()`) before retrying once. *(The single-flight
   thundering-herd guard originally needed here — `rp_ak_generation` +
@@ -1740,8 +1740,11 @@ outlived one grant. RP now runs a real loop by default:
 while (!quit) {
     run_one_attestation_cycle(--verifiers);
     stop if --cycles reached;
-    renew qualification if it expires within --qualify-renew-margin;  /* idle */
-    interruptible_sleep(min(--interval, time left of --duration));
+    idle_until = now + min(--interval, time left of --duration);
+    while (now < idle_until) {                 /* the idle window */
+        renew anything already inside its margin;
+        sleep until min(idle_until, next renewal deadline);
+    }
     stop if --duration elapsed;
 }
 ```
@@ -1766,21 +1769,51 @@ attestations. **SIGTERM shares the SIGINT handler**: `timeout`,
 hard-killed the process straight past the cleanup that releases the last
 cycle's evidence buffers.
 
-**Why no dedicated qualification thread**: qualification only matters *at
-attestation time*, so refreshing it in the idle window after each cycle is
-always sufficient — a timer thread would add locking for no correctness
-gain. The renewal is deliberately placed *after* the attestation rather
-than before, so a near-expiry `/qualify` never lands inside one.
+**Why no dedicated renewal thread**: renewal only matters *at attestation
+time*, so doing it in the idle window between cycles is sufficient, and a
+timer thread would add locking for no correctness gain. It runs *after* the
+attestation rather than before, so a near-expiry renewal never lands inside
+one.
 
-**Three coupled durations**, which must satisfy
-`--interval < --qualify-renew-margin < qualification validity` (defaults
-`60 < 120 < 300`):
-- margin > interval: the renewal check runs once per iteration, so a
-  smaller margin lets the loop step over the window and land past expiry.
-- margin < validity: a margin covering the whole window is never
-  satisfiable, so RP would renew on every idle pass.
-`parse_rp_command_line()` warns on the first; the second is checked where
-the window is actually learned (below), not at parse time.
+**Renewal is deadline-driven, not tied to the loop cadence.** The idle
+window computes when the next credential actually falls due
+(`rp_next_renewal_due()` — the minimum of `rp_qualified_until` and every
+certificate's recorded expiry, each less its margin), sleeps exactly that
+long, renews whatever is due, then sleeps out the remainder against a
+*fixed* `idle_until`, so the interval is preserved rather than extended.
+Nothing is detected while asleep: every deadline is already held in memory,
+so the wake time is arithmetic, not polling. `rp_renew_due_credentials()`
+then sweeps all four credentials, but each `ensure_*` checks its own expiry
+first and returns without I/O when it is not due — cheaper to ask
+everything than to track which one caused the wake, and anything falling
+due in the same second is picked up in one wake.
+
+This replaced a check that ran *once per loop iteration*, which coupled the
+margin to `--interval`: a margin shorter than the interval let the loop step
+straight over the renewal window, and the work landed inside the next
+attestation instead. Measured cost of that: **~+0.38s on a 0.65s appraisal
+phase** (0.65s when the grant was live, 1.03s when it had to re-qualify
+inline) — not a failure, since `get_attestation_results()` re-qualifies at
+margin 0 and proceeds, but exactly the latency the margin exists to remove.
+With the deadline-driven window the `margin > interval` bound is gone, along
+with the startup warning that enforced it. Only `margin < validity` still
+matters: a margin at or above the whole window is never satisfiable, so the
+credential would be renewed continuously and its cache would stop meaning
+anything.
+
+**AK certificates renew in the idle window too**, not only inside a cycle.
+Previously the only thing that ever renewed them was `ensure_*` running
+mid-attestation, so certificate renewal *always* paid its cost inside the
+measured path — the opposite of what the qualification margin was built to
+achieve.
+
+**One attempt per idle window.** If a renewal fails, the credential stays
+due, so the recomputed deadline is in the past, the `due > now` guard fails,
+and RP sleeps out the rest of the window rather than spinning. The retry
+comes sooner than the next window anyway: the next cycle's own `ensure_*`
+calls attempt it inline. If renewal never succeeds the credential genuinely
+expires and the Verifier votes NO with a specific reason — fail-closed, not
+silently accepted.
 
 **The qualification window moved onto the wire.** It is the Verifier's
 parameter — it is what stamps `expires_at` into its own ledger — so

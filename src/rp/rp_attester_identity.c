@@ -772,6 +772,7 @@ CHARRA_RC ensure_attester_identity_certified_by_verifier(
     if ((result = ensure_attester_identity_fetched()) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Cannot relay /certify_ak without the "
                          "Attester's identity.");
+        pthread_mutex_unlock(&attester_identity_relay_mutex);
         return result;
     }
 
