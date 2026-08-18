@@ -443,6 +443,19 @@ actual order `run_one_attestation_cycle()` runs things in, for one cycle
   persisted, on-disk record of every `/certify_ak` issuance. Renewal
   automatically revokes the requester's previous record; expiry is checked
   for free by `mbedtls_x509_crt_verify()`.
+- **Certificate renewal is expiry-driven, on all three certificates.** Each
+  disk cache is re-provisioned once it is within
+  `CHARRA_CERT_RENEW_MARGIN_DAYS` of expiring, the same "renew while the
+  current grant is still good" rule the qualification refresh margin uses:
+  RP's own AK certificate per Verifier (`/certify_ak`), and the Attester's
+  AK certificate as issued by RP's CA and by each Verifier's CA
+  (`/certify_ak_of_attester`). This is not optional tidiness. The caches
+  were keyed purely on the file existing, and a Verifier gives no distinct
+  signal for a stale certificate — it just votes NO — so an expired
+  certificate would be resent and rejected every cycle forever, with
+  nothing to break the loop but deleting `state/` by hand. Masked today by
+  the ten-year defaults; reachable the moment `--ak-validity` or
+  `--attester-ak-validity` is shortened.
 - **Manufacturer root CA trust store — built.** `keys/manufacturer-root.crt`
   + `charra_crypto_verify_x509_cert_chain()` is live in
   `coap_certify_ak_handler()`'s EK check.

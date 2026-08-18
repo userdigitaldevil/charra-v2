@@ -38,6 +38,15 @@
 /* verifiers config */
 #define MAX_VERIFIERS 10
 
+/* Re-provision any cached certificate once it is this close to expiring,
+ * rather than waiting for it to lapse and be rejected mid-cycle. Applies
+ * to all three: RP's own AK certificate (per Verifier), and the Attester's
+ * AK certificate as issued by RP's CA and by each Verifier's CA. The same
+ * principle as the qualification refresh margin -- renew while the current
+ * grant is still good -- expressed in days because certificate lifetimes
+ * are set in years, not minutes. */
+#define CHARRA_CERT_RENEW_MARGIN_DAYS 1
+
 /* --- daemon-mode config (see parse_rp_command_line()) -------------------
  * RP's default mode is a long-running loop: attest, renew qualification if
  * it is close to expiring, sleep, repeat -- until SIGINT. `--benchmark`

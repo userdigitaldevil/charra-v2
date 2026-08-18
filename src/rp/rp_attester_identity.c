@@ -33,9 +33,7 @@
 
 #define LOG_NAME "relying party"
 
-/* Re-provision a cached Attester AK certificate once it is this close
- * to expiry, rather than waiting for it to lapse mid-cycle. */
-#define ATTESTER_AK_CERT_RENEW_MARGIN_DAYS 1
+
 
 static coap_response_t coap_activate_credential_response_handler(
         coap_session_t* session CHARRA_UNUSED,
@@ -116,15 +114,50 @@ static coap_response_t coap_certify_ak_of_attester_deliver_response_handler(
 }
 
 CHARRA_RC ensure_attester_identity_provisioned(void) {
-    if (attester_identity_provisioned) {
-        return CHARRA_RC_SUCCESS;
-    }
+    /* Deliberately NOT short-circuited on a once-per-process flag: a daemon
+     * outlives the certificate it minted at startup, so the cached file's
+     * real expiry is what decides, re-read each cycle (one small read and
+     * parse). Previously this returned success on the file merely existing,
+     * so an expired RP-issued certificate was reused forever and every
+     * Verifier rejected the evidence carrying it. */
     if (charra_io_file_exists(attester_ak_cert_rp_cache_path) ==
             CHARRA_RC_SUCCESS) {
-        charra_log_info("[" LOG_NAME "] Attester identity already "
-                        "provisioned (cached); skipping re-certification.");
-        attester_identity_provisioned = true;
-        return CHARRA_RC_SUCCESS;
+        char* cached_buf = NULL;
+        size_t cached_len = 0;
+        bool cache_usable = false;
+        if (charra_io_read_file(attester_ak_cert_rp_cache_path, &cached_buf,
+                    &cached_len) == CHARRA_RC_SUCCESS) {
+            mbedtls_x509_crt cached_cert;
+            mbedtls_x509_crt_init(&cached_cert);
+            if (mbedtls_x509_crt_parse(&cached_cert, (uint8_t*)cached_buf,
+                        cached_len) == 0) {
+                long days_left =
+                        charra_crypto_x509_days_until_expiry(&cached_cert);
+                if (days_left > CHARRA_CERT_RENEW_MARGIN_DAYS) {
+                    cache_usable = true;
+                    charra_log_info("[" LOG_NAME "] Attester identity already "
+                                    "provisioned (cached, RP-issued "
+                                    "certificate expires in %ld day(s)).",
+                            days_left);
+                } else {
+                    charra_log_info("[" LOG_NAME "] RP-issued Attester AK "
+                                    "certificate expires in %ld day(s) -- "
+                                    "re-certifying.",
+                            days_left);
+                }
+            } else {
+                charra_log_error("[" LOG_NAME "] Cached RP-issued Attester AK "
+                                 "certificate does not parse -- "
+                                 "re-certifying.");
+            }
+            mbedtls_x509_crt_free(&cached_cert);
+            charra_io_free_file_buffer(&cached_buf);
+        }
+        if (cache_usable) {
+            attester_identity_provisioned = true;
+            return CHARRA_RC_SUCCESS;
+        }
+        attester_identity_provisioned = false;
     }
 
     charra_log_info("[" LOG_NAME "]  +------------ Attester Identity "
@@ -633,7 +666,7 @@ CHARRA_RC ensure_attester_identity_certified_by_verifier(
                 0) {
             long days_left =
                     charra_crypto_x509_days_until_expiry(&cached_cert);
-            if (days_left > ATTESTER_AK_CERT_RENEW_MARGIN_DAYS) {
+            if (days_left > CHARRA_CERT_RENEW_MARGIN_DAYS) {
                 cache_usable = true;
                 charra_log_info("[" LOG_NAME "] Reloading previously issued "
                                 "Attester AK certificate for Verifier %s:%u "
