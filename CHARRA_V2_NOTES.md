@@ -726,17 +726,56 @@ pure X.509 logging built entirely on `charra_crypto_x509_days_until_expiry()`,
 already in `crypto_util.c`.
 
 **Net effect of the four relocations above**: `verifier.c` dropped from
-1890 to 1725 lines. The remaining bulk (~70% of the file) is the five CoAP
-resource handlers themselves (`coap_appraise_handler`, `coap_nonce_handler`,
-`coap_certify_ak_handler`, `coap_qualify_handler`,
-`coap_qualify_submit_handler`), which were deliberately **not** further
-split into separate translation units: they're tightly coupled to ~20
-file-scope static globals (`quit`, `last_request`,
-`verifier_challenge_nonce`, `qualification_state`, cert paths, `port`, DTLS
-flags, ...), and splitting them would require either externing all of those
-globals or threading a new shared context struct through every handler and
-callee — judged higher risk than the payoff, given the file's length is a
-navigation problem, not a logic-complexity one.
+1890 to 1725 lines. The remaining bulk was the five CoAP resource handlers
+themselves, since split out — see below.
+
+### `relying_party.c` and `verifier.c` split into per-role module folders
+
+Both entry points now hold only their globals, `main()`, and the signal
+handler; everything else lives in a folder named for that role.
+`relying_party.c` went 4808 → 750 lines across `src/rp/` (attestation,
+attester_identity, identity, evidence, qualification, config, coap, stats),
+and `verifier.c` 2231 → 450 across `src/verifier/`:
+
+| Module | Holds |
+|---|---|
+| `verifier_appraise.c` | `coap_appraise_handler` (Steps 3a + 3b) |
+| `verifier_nonce.c` | `coap_nonce_handler` |
+| `verifier_certify_ak.c` | both `/certify_ak` legs + the pending-challenge table |
+| `verifier_qualify.c` | `/qualify` and `/qualify_submit` |
+| `verifier_util.c` | `hex_prefix`, `log_peer_address`, `release_response_data` |
+
+**On the globals.** An earlier note argued the handlers couldn't be split
+because they're coupled to ~20 file-scope statics. That coupling is real,
+but it doesn't actually block the split: the globals stay *defined* in
+`verifier.c` and are declared in `verifier_shared.h`, which is enough for
+the moved code to compile unchanged. Threading a context struct through
+every handler was never a prerequisite — it's a separate, larger job, and
+the one that would actually lift the "one attestation round in flight per
+Verifier" limit those globals impose. `src/rp/rp_shared.h` does the same.
+Only genuinely shared state is exported; anything one module owns stays
+`static` in it (the `/certify_ak` pending table, `constant_time_equal`).
+
+Both folders are wired through their own `$(RP_OBJECTS)`/
+`$(VERIFIER_OBJECTS)` lists rather than `$(OBJECTS)`, which links into all
+five binaries — the Attester and Trust Manager have no business pulling in
+Verifier state.
+
+**The splits were mechanical, and verified as such**: every moved body was
+diffed against the original and confirmed byte-identical modulo the removed
+`static`, and `nm -g` checked for symbol collisions with the shared
+modules. This matters because a refactor that silently changes behavior is
+much worse than one that fails to build.
+
+**The RP split exposed a real pre-existing race.**
+`processing_nonce_response` and `processing_appraisal_response` were single
+globals shared by every Verifier thread, so one thread's response handler
+could clear the flag another was waiting on; the woken thread then found no
+nonce and reported `Verifier n° N did not supply a nonce` for a Verifier
+that had in fact answered. Both are now `[MAX_VERIFIERS]` arrays indexed by
+thread, matching `verifier_nonces[]` and `attestation_results[]`. The
+pre-split code passed the same test 3/3 — that was luck, not correctness;
+separate translation units changed the interleaving enough to surface it.
 
 ### The real RP→Verifier message shape (`msg_rp_appraisal_dto`)
 

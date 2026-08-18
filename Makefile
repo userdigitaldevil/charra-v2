@@ -133,6 +133,10 @@ OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/util/, cbor_util charra_util co
 # the Attester/Verifier/Trust Manager have no business pulling in.
 RP_OBJECTS = $(addsuffix .o, $(addprefix $(OBJDIR)/rp/, rp_stats rp_config rp_coap rp_qualification rp_evidence rp_attester_identity rp_identity rp_attestation))
 
+# Verifier-only modules (src/verifier/), kept out of $(OBJECTS) for the same
+# reason as RP_OBJECTS above.
+VERIFIER_OBJECTS = $(addsuffix .o, $(addprefix $(OBJDIR)/verifier/, verifier_util verifier_nonce verifier_qualify verifier_certify_ak verifier_appraise))
+
 TARGETS = $(addprefix $(BINDIR)/, attester verifier verifier_old relying_party trust_manager)
 
 .PHONY: all attester verifier verifier_old relying_party trust_manager \
@@ -188,7 +192,7 @@ ifeq ($(enable_stripping),1)
 	strip --strip-unneeded $@
 endif
 
-$(BINDIR)/verifier: $(SRCDIR)/verifier.c $(OBJECTS)
+$(BINDIR)/verifier: $(SRCDIR)/verifier.c $(OBJECTS) $(VERIFIER_OBJECTS)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ -Wl,--gc-sections $(link_mode)
 ifeq ($(enable_stripping),1)
 	strip --strip-unneeded $@
@@ -265,6 +269,10 @@ $(OBJDIR)/common/%.o: $(SRCDIR)/common/%.c
 	$(CC) $< $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) $(CFLAGS) -g -o $@ -c $(link_mode)
 
 $(OBJDIR)/core/%.o: $(SRCDIR)/core/%.c
+	@mkdir -p $(@D)
+	$(CC) $< $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) $(CFLAGS) -g -o $@ -c $(link_mode)
+
+$(OBJDIR)/verifier/%.o: $(SRCDIR)/verifier/%.c
 	@mkdir -p $(@D)
 	$(CC) $< $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) $(CFLAGS) -g -o $@ -c $(link_mode)
 
