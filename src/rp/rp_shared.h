@@ -47,6 +47,24 @@
  * are set in years, not minutes. */
 #define CHARRA_CERT_RENEW_MARGIN_DAYS 1
 
+/** @brief Does a certificate expiring at expires_at need renewing now?
+ * expires_at == 0 means "unknown", which counts as needing renewal. Kept in
+ * memory and re-checked on EVERY call, exactly like rp_qualified_until: a
+ * boolean "ready" flag consulted once at startup lets a daemon run past its
+ * own certificate's expiry without ever noticing. */
+static inline bool charra_cert_needs_renewal(time_t expires_at) {
+    return expires_at <=
+           time(NULL) + (time_t)CHARRA_CERT_RENEW_MARGIN_DAYS * 24 * 60 * 60;
+}
+
+/** @brief Absolute expiry of a parsed certificate, derived from its
+ * days-until-expiry so the whole codebase agrees on one calculation. */
+static inline time_t charra_cert_expiry_time(const mbedtls_x509_crt* cert) {
+    return time(NULL) +
+           charra_crypto_x509_days_until_expiry((mbedtls_x509_crt*)cert) *
+                   24 * 60 * 60;
+}
+
 /* --- daemon-mode config (see parse_rp_command_line()) -------------------
  * RP's default mode is a long-running loop: attest, renew qualification if
  * it is close to expiring, sleep, repeat -- until SIGINT. `--benchmark`
@@ -99,6 +117,7 @@ extern verifier_info verifiers[MAX_VERIFIERS];
 
 /* --- RP's own identity, provisioned per Verifier ------------------------ */
 extern bool rp_ak_cert_ready[MAX_VERIFIERS];
+extern time_t rp_ak_cert_expires_at[MAX_VERIFIERS];
 extern uint8_t* rp_ak_cert_der[MAX_VERIFIERS];
 extern uint32_t rp_ak_cert_der_len[MAX_VERIFIERS];
 extern uint8_t rp_public_key_der[CHARRA_RSA_PUB_KEY_DER_MAX];
@@ -147,6 +166,7 @@ extern uint32_t verifier_nonce_lens[MAX_VERIFIERS];
 
 /** The Attester's AK certificate as issued by each Verifier's own CA. */
 extern bool attester_ak_cert_by_verifier_ready[MAX_VERIFIERS];
+extern time_t attester_ak_cert_by_verifier_expires_at[MAX_VERIFIERS];
 extern uint8_t* attester_ak_cert_by_verifier_der[MAX_VERIFIERS];
 extern uint32_t attester_ak_cert_by_verifier_der_len[MAX_VERIFIERS];
 
@@ -171,6 +191,8 @@ extern unsigned int attester_port;
  * regardless and there is no concurrency to preserve. */
 extern pthread_mutex_t attester_identity_relay_mutex;
 extern bool attester_identity_provisioned;
+extern time_t attester_ak_cert_rp_expires_at;
+extern pthread_mutex_t attester_identity_provision_mutex;
 /** The Attester's EK cert + AK public key + AK name, FETCHed once and
  * reused for every Verifier rather than re-fetched per Verifier. */
 extern msg_ak_identity_response_dto attester_identity_cached;

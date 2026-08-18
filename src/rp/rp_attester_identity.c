@@ -114,12 +114,28 @@ static coap_response_t coap_certify_ak_of_attester_deliver_response_handler(
 }
 
 CHARRA_RC ensure_attester_identity_provisioned(void) {
-    /* Deliberately NOT short-circuited on a once-per-process flag: a daemon
-     * outlives the certificate it minted at startup, so the cached file's
-     * real expiry is what decides, re-read each cycle (one small read and
-     * parse). Previously this returned success on the file merely existing,
-     * so an expired RP-issued certificate was reused forever and every
-     * Verifier rejected the evidence carrying it. */
+    /* Fast path, no lock and no file I/O: an in-memory expiry, re-checked
+     * every call so a daemon notices its own certificate ageing out. */
+    if (attester_identity_provisioned &&
+            !charra_cert_needs_renewal(attester_ak_cert_rp_expires_at)) {
+        return CHARRA_RC_SUCCESS;
+    }
+
+    /* Everything below touches ak_identity_response, attester_identity_cached
+     * and the FETCH processing flag, none of which have locks of their own:
+     * they were written when this function provably ran once, before any
+     * Verifier thread existed. Expiry-driven renewal breaks that assumption
+     * -- a thread reaches here through
+     * ensure_attester_identity_certified_by_verifier() -- so serialise here
+     * and re-check after acquiring, since another thread may have just
+     * finished the work we were about to repeat. */
+    pthread_mutex_lock(&attester_identity_provision_mutex);
+    if (attester_identity_provisioned &&
+            !charra_cert_needs_renewal(attester_ak_cert_rp_expires_at)) {
+        pthread_mutex_unlock(&attester_identity_provision_mutex);
+        return CHARRA_RC_SUCCESS;
+    }
+
     if (charra_io_file_exists(attester_ak_cert_rp_cache_path) ==
             CHARRA_RC_SUCCESS) {
         char* cached_buf = NULL;
@@ -135,6 +151,8 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
                         charra_crypto_x509_days_until_expiry(&cached_cert);
                 if (days_left > CHARRA_CERT_RENEW_MARGIN_DAYS) {
                     cache_usable = true;
+                    attester_ak_cert_rp_expires_at =
+                            charra_cert_expiry_time(&cached_cert);
                     charra_log_info("[" LOG_NAME "] Attester identity already "
                                     "provisioned (cached, RP-issued "
                                     "certificate expires in %ld day(s)).",
@@ -155,6 +173,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
         }
         if (cache_usable) {
             attester_identity_provisioned = true;
+            pthread_mutex_unlock(&attester_identity_provision_mutex);
             return CHARRA_RC_SUCCESS;
         }
         attester_identity_provisioned = false;
@@ -174,6 +193,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
                  &fetch_req_buf_len, &fetch_req_buf)) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not marshal "
                          "/certify_ak_of_attester FETCH request.");
+        pthread_mutex_unlock(&attester_identity_provision_mutex);
         return result;
     }
 
@@ -186,11 +206,13 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
         charra_log_error(
                 "[" LOG_NAME "] /certify_ak_of_attester FETCH round trip "
                 "failed.");
+        pthread_mutex_unlock(&attester_identity_provision_mutex);
         return result;
     }
     if (ak_identity_rc != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] /certify_ak_of_attester FETCH did "
                          "not complete successfully.");
+        pthread_mutex_unlock(&attester_identity_provision_mutex);
         return ak_identity_rc;
     }
 
@@ -220,6 +242,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
                          "certificate ('%s').",
                 manufacturer_root_cert_path);
         charra_free_if_not_null(identity.ek_certificate);
+        pthread_mutex_unlock(&attester_identity_provision_mutex);
         return result;
     }
 
@@ -234,6 +257,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
                 "against the manufacturer root. Aborting.");
         charra_io_free_file_buffer(&manufacturer_root_der);
         charra_free_if_not_null(identity.ek_certificate);
+        pthread_mutex_unlock(&attester_identity_provision_mutex);
         return CHARRA_RC_VERIFICATION_FAILED;
     }
     charra_crypto_log_cert_summary(
@@ -251,6 +275,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
         mbedtls_x509_crt_free(&attester_ek_leaf_cert);
         charra_io_free_file_buffer(&manufacturer_root_der);
         charra_free_if_not_null(identity.ek_certificate);
+        pthread_mutex_unlock(&attester_identity_provision_mutex);
         return result;
     }
     mbedtls_x509_crt_free(&attester_ek_leaf_cert);
@@ -282,6 +307,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
                              "certificate ('%s').",
                     rp_ca_cert_path);
             charra_free_if_not_null(identity.ek_certificate);
+            pthread_mutex_unlock(&attester_identity_provision_mutex);
             return result;
         }
         if (mbedtls_x509_crt_parse(&rp_ca_cert, (uint8_t*)rp_ca_cert_der_buf,
@@ -290,6 +316,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
                              "certificate.");
             charra_io_free_file_buffer(&rp_ca_cert_der_buf);
             charra_free_if_not_null(identity.ek_certificate);
+            pthread_mutex_unlock(&attester_identity_provision_mutex);
             return CHARRA_RC_CRYPTO_ERROR;
         }
         char rp_ca_subject_name[256] = {0};
@@ -300,6 +327,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
             mbedtls_x509_crt_free(&rp_ca_cert);
             charra_io_free_file_buffer(&rp_ca_cert_der_buf);
             charra_free_if_not_null(identity.ek_certificate);
+            pthread_mutex_unlock(&attester_identity_provision_mutex);
             return CHARRA_RC_CRYPTO_ERROR;
         }
         mbedtls_x509_crt_free(&rp_ca_cert);
@@ -312,6 +340,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
             charra_log_error("[" LOG_NAME "] Could not format Attester AK "
                              "certificate validity window.");
             charra_free_if_not_null(identity.ek_certificate);
+            pthread_mutex_unlock(&attester_identity_provision_mutex);
             return CHARRA_RC_ERROR;
         }
         if ((result = charra_crypto_sign_ak_certificate(attester_ak_public_key,
@@ -323,6 +352,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
             charra_log_error("[" LOG_NAME "] Could not sign Attester's AK "
                              "certificate with RP's own CA.");
             charra_free_if_not_null(identity.ek_certificate);
+            pthread_mutex_unlock(&attester_identity_provision_mutex);
             return result;
         }
     }
@@ -340,6 +370,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
             charra_log_error("[" LOG_NAME "] Could not seed RNG.");
             charra_free_if_not_null(rp_signed_cert_der);
             charra_free_if_not_null(identity.ek_certificate);
+            pthread_mutex_unlock(&attester_identity_provision_mutex);
             return result;
         }
         int mbedtls_r = mbedtls_ctr_drbg_random(
@@ -350,6 +381,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
                     "[" LOG_NAME "] Could not generate AES key.");
             charra_free_if_not_null(rp_signed_cert_der);
             charra_free_if_not_null(identity.ek_certificate);
+            pthread_mutex_unlock(&attester_identity_provision_mutex);
             return CHARRA_RC_CRYPTO_ERROR;
         }
     }
@@ -364,6 +396,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
                          "certificate.");
         charra_free_if_not_null(rp_signed_cert_der);
         charra_free_if_not_null(identity.ek_certificate);
+        pthread_mutex_unlock(&attester_identity_provision_mutex);
         return result;
     }
 
@@ -378,6 +411,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
         charra_free_if_not_null(rp_cert_ciphertext);
         charra_free_if_not_null(rp_signed_cert_der);
         charra_free_if_not_null(identity.ek_certificate);
+        pthread_mutex_unlock(&attester_identity_provision_mutex);
         return CHARRA_RC_ERROR;
     }
     if ((tss_r = Esys_Initialize(&esys_ctx, tcti_ctx, NULL)) !=
@@ -388,6 +422,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
         charra_free_if_not_null(rp_cert_ciphertext);
         charra_free_if_not_null(rp_signed_cert_der);
         charra_free_if_not_null(identity.ek_certificate);
+        pthread_mutex_unlock(&attester_identity_provision_mutex);
         return CHARRA_RC_ERROR;
     }
 
@@ -409,6 +444,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
         charra_free_if_not_null(rp_cert_ciphertext);
         charra_free_if_not_null(rp_signed_cert_der);
         charra_free_if_not_null(identity.ek_certificate);
+        pthread_mutex_unlock(&attester_identity_provision_mutex);
         return result;
     }
 
@@ -462,6 +498,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
                 "[" LOG_NAME "] Could not marshal DELIVER_RP request.");
         charra_free_if_not_null(identity.ek_certificate);
         charra_free_if_not_null(rp_signed_cert_der);
+        pthread_mutex_unlock(&attester_identity_provision_mutex);
         return result;
     }
 
@@ -475,6 +512,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
                          "Attester failed.");
         charra_free_if_not_null(identity.ek_certificate);
         charra_free_if_not_null(rp_signed_cert_der);
+        pthread_mutex_unlock(&attester_identity_provision_mutex);
         return result;
     }
     charra_log_info("[" LOG_NAME "] RP-CA leg delivered to the Attester.");
@@ -504,6 +542,7 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
             charra_log_error("[" LOG_NAME "] Could not cache Attester "
                              "identity for per-Verifier certification.");
             charra_free_if_not_null(identity.ek_certificate);
+            pthread_mutex_unlock(&attester_identity_provision_mutex);
             return CHARRA_RC_ERROR;
         }
         memcpy(attester_identity_cached.ek_certificate, identity.ek_certificate,
@@ -515,7 +554,12 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
     charra_log_info(
             "[" LOG_NAME "] Attester identity provisioned (RP's own CA); "
             "ready for per-Verifier certification.");
+    /* The window RP just signed into the certificate, so the renewal check
+     * has a real deadline rather than 0 ("unknown"), which would re-certify
+     * on the very next call. */
+    attester_ak_cert_rp_expires_at = rp_cert_expires_at;
     attester_identity_provisioned = true;
+    pthread_mutex_unlock(&attester_identity_provision_mutex);
     return CHARRA_RC_SUCCESS;
 }
 
@@ -614,8 +658,20 @@ static CHARRA_RC ensure_attester_identity_fetched(void) {
 
 CHARRA_RC ensure_attester_identity_certified_by_verifier(
         int verifier_index) {
-    if (attester_ak_cert_by_verifier_ready[verifier_index]) {
+    if (attester_ak_cert_by_verifier_ready[verifier_index] &&
+            !charra_cert_needs_renewal(
+                    attester_ak_cert_by_verifier_expires_at[verifier_index])) {
         return CHARRA_RC_SUCCESS;
+    }
+    if (attester_ak_cert_by_verifier_ready[verifier_index]) {
+        charra_log_info("[" LOG_NAME "] In-memory Attester AK certificate for "
+                        "Verifier %d is near expiry -- re-provisioning.",
+                verifier_index + 1);
+        charra_free_if_not_null(
+                attester_ak_cert_by_verifier_der[verifier_index]);
+        attester_ak_cert_by_verifier_der[verifier_index] = NULL;
+        attester_ak_cert_by_verifier_der_len[verifier_index] = 0;
+        attester_ak_cert_by_verifier_ready[verifier_index] = false;
     }
 
     CHARRA_RC result = ensure_attester_identity_provisioned();
@@ -668,6 +724,8 @@ CHARRA_RC ensure_attester_identity_certified_by_verifier(
                     charra_crypto_x509_days_until_expiry(&cached_cert);
             if (days_left > CHARRA_CERT_RENEW_MARGIN_DAYS) {
                 cache_usable = true;
+                attester_ak_cert_by_verifier_expires_at[verifier_index] =
+                        charra_cert_expiry_time(&cached_cert);
                 charra_log_info("[" LOG_NAME "] Reloading previously issued "
                                 "Attester AK certificate for Verifier %s:%u "
                                 "(cached, expires in %ld day(s)).",
@@ -690,7 +748,7 @@ CHARRA_RC ensure_attester_identity_certified_by_verifier(
             attester_ak_cert_by_verifier_der[verifier_index] = cert_der;
             attester_ak_cert_by_verifier_der_len[verifier_index] =
                     (uint32_t)cert_buf_len;
-            attester_ak_cert_by_verifier_ready[verifier_index] = true;
+    attester_ak_cert_by_verifier_ready[verifier_index] = true;
             return CHARRA_RC_SUCCESS;
         }
         /* Fall through to the full relay below, which overwrites the file. */
@@ -858,6 +916,20 @@ CHARRA_RC ensure_attester_identity_certified_by_verifier(
             verifier_cert_response.ak_certificate;
     attester_ak_cert_by_verifier_der_len[verifier_index] =
             verifier_cert_response.ak_certificate_len;
+    /* Expiry of the freshly issued certificate -- see the same note in
+     * ensure_rp_ak_certificate(). */
+    {
+        mbedtls_x509_crt issued;
+        mbedtls_x509_crt_init(&issued);
+        attester_ak_cert_by_verifier_expires_at[verifier_index] = 0;
+        if (mbedtls_x509_crt_parse(&issued,
+                    verifier_cert_response.ak_certificate,
+                    verifier_cert_response.ak_certificate_len) == 0) {
+            attester_ak_cert_by_verifier_expires_at[verifier_index] =
+                    charra_cert_expiry_time(&issued);
+        }
+        mbedtls_x509_crt_free(&issued);
+    }
     attester_ak_cert_by_verifier_ready[verifier_index] = true;
 
     charra_log_info(

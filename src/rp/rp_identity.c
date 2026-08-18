@@ -423,10 +423,22 @@ CHARRA_RC ensure_rp_ak_keypair(void) {
 }
 
 CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
-    if (rp_ak_cert_ready[verifier_index]) {
+    if (rp_ak_cert_ready[verifier_index] &&
+            !charra_cert_needs_renewal(rp_ak_cert_expires_at[verifier_index])) {
         /* No work happens on this path, so it's "cached" for the summary. */
         rp_ak_cert_was_cached[verifier_index] = true;
         return CHARRA_RC_SUCCESS;
+    }
+    if (rp_ak_cert_ready[verifier_index]) {
+        /* Held in memory but expiring: a long-running daemon has to notice
+         * this, so the check is on every call rather than at startup. */
+        charra_log_info("[" LOG_NAME "] In-memory AK certificate for Verifier "
+                        "%d is near expiry -- re-provisioning.",
+                verifier_index + 1);
+        charra_free_if_not_null(rp_ak_cert_der[verifier_index]);
+        rp_ak_cert_der[verifier_index] = NULL;
+        rp_ak_cert_der_len[verifier_index] = 0;
+        rp_ak_cert_ready[verifier_index] = false;
     }
 
     CHARRA_RC result = ensure_rp_ak_keypair();
@@ -478,6 +490,8 @@ CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
                     charra_crypto_x509_days_until_expiry(&cached_cert);
             if (days_left > CHARRA_CERT_RENEW_MARGIN_DAYS) {
                 cache_usable = true;
+                rp_ak_cert_expires_at[verifier_index] =
+                        charra_cert_expiry_time(&cached_cert);
                 charra_log_info("[" LOG_NAME "] Reloading previously issued "
                                 "AK certificate for this Verifier (cached, "
                                 "expires in %ld day(s)).",
@@ -700,6 +714,20 @@ CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
 
     rp_ak_cert_der[verifier_index] = cert_der;
     rp_ak_cert_der_len[verifier_index] = cert_der_len;
+    /* Record the freshly issued certificate's expiry too, not just the
+     * cached one's: leaving it at 0 would mark this certificate as needing
+     * renewal on the very next call, costing one pointless /certify_ak per
+     * Verifier per process. */
+    {
+        mbedtls_x509_crt issued;
+        mbedtls_x509_crt_init(&issued);
+        rp_ak_cert_expires_at[verifier_index] = 0;
+        if (mbedtls_x509_crt_parse(&issued, cert_der, cert_der_len) == 0) {
+            rp_ak_cert_expires_at[verifier_index] =
+                    charra_cert_expiry_time(&issued);
+        }
+        mbedtls_x509_crt_free(&issued);
+    }
     rp_ak_cert_ready[verifier_index] = true;
 
     mbedtls_x509_crt new_cert;

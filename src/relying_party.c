@@ -160,6 +160,8 @@ bool rp_ak_keypair_ready = false;
  * has to be too, not a single certificate obtained from verifiers[0] and
  * assumed good everywhere (see CHARRA_V2_NOTES.md). */
 bool rp_ak_cert_ready[MAX_VERIFIERS] = {false};
+/* When each cached certificate expires, re-checked every call. */
+time_t rp_ak_cert_expires_at[MAX_VERIFIERS] = {0};
 uint8_t* rp_ak_cert_der[MAX_VERIFIERS] = {NULL};
 uint32_t rp_ak_cert_der_len[MAX_VERIFIERS] = {0};
 bool processing_certify_ak_response = false;
@@ -203,6 +205,15 @@ char* attester_ak_cert_rp_cache_path =
         "state/relying-party/attester-ak-certificates/"
         "attester-ak-certificate-rp.der";
 bool attester_identity_provisioned = false;
+time_t attester_ak_cert_rp_expires_at = 0;
+/* ensure_attester_identity_provisioned() used to run exactly once,
+ * before any Verifier thread existed, which is why its FETCH globals
+ * need no lock of their own. Expiry-driven renewal means a thread can
+ * now reach it mid-cycle, so the work is serialised here. Taken before
+ * attester_identity_relay_mutex and released before the relay starts,
+ * so the two never nest. */
+pthread_mutex_t attester_identity_provision_mutex =
+        PTHREAD_MUTEX_INITIALIZER;
 
 msg_ak_identity_response_dto ak_identity_response = {0};
 CHARRA_RC ak_identity_rc = CHARRA_RC_ERROR;
@@ -233,6 +244,7 @@ bool processing_activate_credential_response = false;
  * which certificate belongs to which Verifier. Not a trust shortcut: a
  * certificate's validity rests on its CA signature, not on who carried it. */
 bool attester_ak_cert_by_verifier_ready[MAX_VERIFIERS] = {false};
+time_t attester_ak_cert_by_verifier_expires_at[MAX_VERIFIERS] = {0};
 uint8_t* attester_ak_cert_by_verifier_der[MAX_VERIFIERS] = {NULL};
 uint32_t attester_ak_cert_by_verifier_der_len[MAX_VERIFIERS] = {0};
 /* Guards the Attester-relay round trips in ensure_attester_identity_
