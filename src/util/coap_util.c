@@ -26,10 +26,10 @@
 #include <string.h>
 
 #include "../common/charra_log.h"
+#include "../common/charra_macro.h"
 #include "../util/io_util.h"
 
 #define LOG_NAME "coap-util"
-#define CHARRA_UNUSED __attribute__((unused))
 
 static const char* const coap_level_names[10] = {
         [LOG_EMERG] = "EMERG",
@@ -368,4 +368,17 @@ static int verify_rpk_peer_callback(const char* cn,
             "[" LOG_NAME
             "] DTLS-RPK: Unexpected error while verifying peers' public key");
     return 0;
+}
+
+void charra_coap_log_peer_address(const char* log_name,
+        const char* endpoint_name, struct coap_session_t* session) {
+    const coap_address_t* remote = coap_session_get_addr_remote(session);
+    if (remote == NULL) {
+        return;
+    }
+    unsigned char addr_buf[64] = {0};
+    size_t addr_len = coap_print_addr(remote, addr_buf, sizeof(addr_buf) - 1);
+    addr_buf[addr_len] = '\0';
+    charra_log_info(
+            "[%s] %s: request from %s.", log_name, endpoint_name, addr_buf);
 }

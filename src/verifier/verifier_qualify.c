@@ -3,52 +3,42 @@
  * @brief See verifier_qualify.h.
  *
  * Both legs live together because the second is meaningless without the
- * first: /qualify stores the expected answer in qualification_state, and
- * /qualify_submit is the only thing that ever reads it.
+ * first: /qualify stores the expected answer, and /qualify_submit is the
+ * only thing that ever reads it.
  */
 
 #include "verifier_qualify.h"
 
 #include <stdbool.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
-#include <tss2/tss2_mu.h>
-#include <tss2/tss2_tctildr.h>
-#include <tss2/tss2_tpm2_types.h>
 
 #include "../common/charra_log.h"
 #include "../common/charra_macro.h"
 #include "../core/charra_ak_state.h"
 #include "../core/charra_dto.h"
-#include "../core/charra_helper.h"
-#include "../core/charra_key_mgr.h"
 #include "../core/charra_marshaling.h"
 #include "../core/charra_qualification_state.h"
 #include "../core/charra_rp_qualification.h"
-#include "../util/cbor_util.h"
 #include "../util/charra_util.h"
 #include "../util/coap_util.h"
 #include "../util/crypto_util.h"
 #include "../util/io_util.h"
-#include "../util/tpm2_util.h"
 #include "verifier_shared.h"
 #include "verifier_util.h"
 
 #define LOG_NAME "verifier"
 
-/**
- * @brief /qualify: fabricate a fresh RP-qualification challenge and hand
- * back its raw (unredacted) log for the RP to redact and prove against via
- * /qualify/submit -- see charra_rp_qualification.h for the full handshake
- * this is the first half of.
- *
- * Ignores the request body: nothing about *which* challenge to generate is
- * caller-supplied, only Verifier policy (CHARRA_RP_QUALIFICATION_NUM_
- * ENTRIES) and a fresh random seed picked here.
- */
+/* How many synthetic log entries /qualify challenges the RP with. */
+#define CHARRA_RP_QUALIFICATION_NUM_ENTRIES 5
+
+/* The one outstanding challenge's golden answer. Single slot, matching the
+ * one-round-in-flight assumption the rest of this Verifier makes. The
+ * durable verdict ("is EK X qualified, until when") lives on disk instead --
+ * see qualification_state_file_path. */
+static rp_qualification_state qualification_state = {0};
+
 void coap_qualify_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
                                 const struct coap_pdu_t* request,
@@ -58,16 +48,15 @@ void coap_qualify_handler(struct coap_resource_t* resource,
     CHARRA_RC charra_r = CHARRA_RC_ERROR;
     coap_pdu_code_t response_code = COAP_RESPONSE_CODE_INTERNAL_ERROR;
 
-    log_peer_address("/qualify", session);
+    charra_coap_log_peer_address(LOG_NAME, "/qualify", session);
 
     uint8_t* challenge_log = NULL;
     uint32_t challenge_log_len = 0;
     uint8_t* marshaled_response = NULL;
     uint32_t marshaled_response_len = 0;
 
-    /* discard the previous round's golden answer -- a fresh /qualify call
-     * always starts a new round; any /qualify/submit still in flight for
-     * the old one is now moot */
+    /* A fresh /qualify starts a new round; any submit still in flight for
+     * the old one is now moot. */
     charra_rp_qualification_state_free(&qualification_state);
 
     uint32_t seed = 0;
@@ -78,10 +67,10 @@ void coap_qualify_handler(struct coap_resource_t* resource,
         goto cleanup;
     }
 
-    /* Shared with the RP in the response below, so its redaction of
-     * challenge_log comes out byte-identical to golden_log here -- the one
-     * deliberate exception to "salt is never transmitted", safe only
-     * because this log is synthetic. See charra_sdk.h. */
+    /* Shared with the RP below so its redaction of challenge_log comes out
+     * byte-identical to golden_log -- the one deliberate exception to "salt
+     * is never transmitted", safe only because this log is synthetic. See
+     * charra_sdk.h. */
     uint8_t salt[CHARRA_SDK_PATH_SALT_LEN] = {0};
     if ((charra_r = charra_random_bytes(sizeof(salt), salt)) !=
             CHARRA_RC_SUCCESS) {
@@ -138,17 +127,16 @@ cleanup:
 }
 
 /**
- * @brief /qualify/submit: check the RP's redaction result against the
- * outstanding /qualify challenge, gating whether coap_appraise_handler()
- * will accept real evidence from this RP -- see charra_rp_qualification.h.
+ * @brief /qualify/submit: check the RP's redaction against the outstanding
+ * challenge, gating whether coap_appraise_handler() will accept real
+ * evidence from this RP -- see charra_rp_qualification.h.
  *
- * Two things must hold before charra_rp_qualification_check() is even
- * consulted: the submitter's AK certificate must chain to this Verifier's
- * CA (the same check Step 3a item 1 in coap_appraise_handler() runs), and
- * its signature over submitted_pcr_digest must verify under that certified
- * key. Without both, an unauthenticated party could submit an arbitrary
- * log and PCR digest with no proof it ever ran a real RP's redaction
- * pipeline.
+ * Two things must hold before charra_rp_qualification_check() is consulted:
+ * the submitter's AK certificate must chain to this Verifier's CA (the same
+ * check Step 3a item 1 runs), and its signature over submitted_pcr_digest
+ * must verify under that certified key. Without both, an unauthenticated
+ * party could submit an arbitrary log and digest with no proof it ever ran
+ * a real RP's redaction pipeline.
  */
 void coap_qualify_submit_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
@@ -158,19 +146,18 @@ void coap_qualify_submit_handler(struct coap_resource_t* resource,
     int coap_r = 0;
     CHARRA_RC charra_r = CHARRA_RC_ERROR;
     coap_pdu_code_t response_code = COAP_RESPONSE_CODE_INTERNAL_ERROR;
-    const char* message = "Qualification check errored!\0";
+    const char* message = "Qualification check errored!";
 
-    log_peer_address("/qualify/submit", session);
+    charra_coap_log_peer_address(LOG_NAME, "/qualify/submit", session);
 
     /* declared/zeroed here so cleanup can always safely free them,
-     * regardless of which check below first failed -- same convention
-     * coap_certify_ak_handler() above uses */
+     * regardless of which check below first failed */
     msg_qualify_submit_request_dto req = {0};
     char* verifier_ca_cert_der = NULL;
-    /* Verdict + the deadline actually granted -- the RP has no other
-     * way to learn the window this Verifier chose. */
-    msg_qualify_submit_response_dto submit_response = {0};
     size_t verifier_ca_cert_der_len = 0;
+    /* Verdict + the deadline actually granted -- the RP has no other way to
+     * learn the window this Verifier chose. */
+    msg_qualify_submit_response_dto submit_response = {0};
 
     size_t data_len = 0;
     const uint8_t* data = NULL;
@@ -193,7 +180,7 @@ void coap_qualify_submit_handler(struct coap_resource_t* resource,
     }
 
     /* --- who is this: submitter's AK certificate must chain to our CA,
-     * same check Step 3a item 1 in coap_appraise_handler() runs --- */
+     * same check Step 3a item 1 runs --- */
     if ((charra_r = charra_io_read_file(verifier_ca_cert_path,
                  &verifier_ca_cert_der, &verifier_ca_cert_der_len)) !=
             CHARRA_RC_SUCCESS) {
@@ -203,28 +190,35 @@ void coap_qualify_submit_handler(struct coap_resource_t* resource,
         goto cleanup;
     }
 
-    /* ek_fingerprint identifies who this is, for the qualification-ledger
-     * write below -- declared here (not inside the block) so it survives
-     * past it, populated only when submitter_identity_ok ends up true. */
+    /* ek_fingerprint identifies who this is, for the ledger write below --
+     * declared out here so it survives the block, populated only when
+     * submitter_identity_ok ends up true. */
     uint8_t ek_fingerprint[32] = {0};
     bool submitter_identity_ok = false;
     {
         mbedtls_x509_crt ak_cert_rp_leaf;
-        uint8_t ak_serial_rp[16] = {0};
+        uint8_t ak_serial_rp[CHARRA_AK_STATE_SERIAL_LEN] = {0};
         CHARRA_RC chain_rc = charra_crypto_verify_x509_cert_chain(
                 req.ak_certificate_rp, req.ak_certificate_rp_len,
                 (uint8_t*)verifier_ca_cert_der, verifier_ca_cert_der_len,
                 &ak_cert_rp_leaf);
         if (chain_rc == CHARRA_RC_SUCCESS) {
-            if (ak_cert_rp_leaf.serial.len == 16) {
-                memcpy(ak_serial_rp, ak_cert_rp_leaf.serial.p, 16);
-            }
+            /* A serial of any other width is not one we issued; looking it
+             * up zero-padded would query the ledger for a serial nobody
+             * holds, which reads as "revoked" rather than "malformed". */
             submitter_identity_ok =
-                    charra_crypto_verify_cert_public_key_matches_der_key(
-                            &ak_cert_rp_leaf, req.rp_public_key,
-                            req.rp_public_key_len) == CHARRA_RC_SUCCESS &&
-                    charra_ak_state_check_serial_valid(rp_ak_state_file_path,
-                            ak_serial_rp, ek_fingerprint, NULL);
+                    ak_cert_rp_leaf.serial.len == sizeof(ak_serial_rp);
+            if (submitter_identity_ok) {
+                memcpy(ak_serial_rp, ak_cert_rp_leaf.serial.p,
+                        sizeof(ak_serial_rp));
+                submitter_identity_ok =
+                        charra_crypto_verify_cert_public_key_matches_der_key(
+                                &ak_cert_rp_leaf, req.rp_public_key,
+                                req.rp_public_key_len) == CHARRA_RC_SUCCESS &&
+                        charra_ak_state_check_serial_valid(
+                                rp_ak_state_file_path, ak_serial_rp,
+                                ek_fingerprint, NULL);
+            }
             if (submitter_identity_ok) {
                 charra_crypto_log_cert_summary(
                         "/qualify/submit submitter's AK cert",
@@ -238,13 +232,13 @@ void coap_qualify_submit_handler(struct coap_resource_t* resource,
                          "certificate did NOT verify (chain, key mismatch, "
                          "or expired/revoked).");
         response_code = COAP_RESPONSE_CODE_UNAUTHORIZED;
-        message = "Submitter AK certificate invalid or expired!\0";
+        message = "Submitter AK certificate invalid or expired!";
         goto cleanup;
     }
 
-    /* --- Quote_R signature: proves the certified key above actually
-     * signed submitted_pcr_digest, not that some unrelated certificate was
-     * merely attached to the request --- */
+    /* --- Quote_R signature: proves the certified key above actually signed
+     * submitted_pcr_digest, not that some unrelated certificate was merely
+     * attached to the request --- */
     bool signature_ok = false;
     {
         mbedtls_pk_context rp_pub_key_ctx;
@@ -269,17 +263,14 @@ void coap_qualify_submit_handler(struct coap_resource_t* resource,
         charra_log_error("[" LOG_NAME "] /qualify/submit: signature over "
                          "submitted PCR digest is NOT valid.");
         response_code = COAP_RESPONSE_CODE_UNAUTHORIZED;
-        message = "Signature over submitted PCR digest invalid!\0";
+        message = "Signature over submitted PCR digest invalid!";
         goto cleanup;
     }
 
-    /* --- the actual qualification comparison: golden answer vs.
-     * submission -- see charra_rp_qualification.h. The salt used to redact
-     * challenge_log is shared with the RP (see coap_qualify_handler()'s
-     * own comment on qualify_challenge_salt) specifically so a correctly-
-     * behaving RP's redaction comes out byte-identical to golden_log here;
-     * a passing check on a legitimately-behaving RP is the expected,
-     * common case, not a known-broken path. */
+    /* --- the actual comparison: golden answer vs. submission. The shared
+     * salt (see coap_qualify_handler()) is what makes a correctly-behaving
+     * RP's redaction come out byte-identical, so a pass here is the expected
+     * common case, not a known-broken path. --- */
     CHARRA_RC qualification_rc = charra_rp_qualification_check(
             &qualification_state, req.submitted_redacted_log,
             req.submitted_redacted_log_len, req.submitted_pcr_digest,
@@ -290,15 +281,16 @@ void coap_qualify_submit_handler(struct coap_resource_t* resource,
     const time_t granted_expires_at = qualification_state.expires_at;
     charra_rp_qualification_state_free(&qualification_state);
 
+    char ek_fingerprint_hex[17] = {0};
+    hex_prefix(ek_fingerprint, sizeof(ek_fingerprint), ek_fingerprint_hex,
+            sizeof(ek_fingerprint_hex));
+
     if (qualification_rc == CHARRA_RC_SUCCESS) {
-        /* Persist the verdict, keyed by this RP's identity -- this is what
+        /* Persist the verdict keyed by this RP's identity -- this is what
          * lets coap_appraise_handler() later confirm THIS SPECIFIC RP
-         * qualified, not just "someone did, recently". Deliberately done
-         * only here, once the check has actually passed -- a failed
-         * charra_qualification_state_renew() call below still leaves the
-         * RP correctly told it qualified (the check itself did pass), it
-         * just means the durable record didn't get written; logged, not
-         * fatal to this response. */
+         * qualified, not just "someone did, recently". A failed write still
+         * leaves the RP correctly told it qualified (the check did pass);
+         * logged, not fatal to this response. */
         charra_qualification_state_record qual_record = {0};
         memcpy(qual_record.ek_fingerprint, ek_fingerprint,
                 sizeof(qual_record.ek_fingerprint));
@@ -310,34 +302,28 @@ void coap_qualify_submit_handler(struct coap_resource_t* resource,
                              "persist qualification state.");
         }
 
-        char ek_fingerprint_hex[17] = {0};
-        hex_prefix(ek_fingerprint, sizeof(ek_fingerprint), ek_fingerprint_hex,
-                sizeof(ek_fingerprint_hex));
         charra_log_info(
                 "[" LOG_NAME "] /qualify/submit: RP %s... qualified (valid "
                 "until %ld, %ld second(s) from now).",
                 ek_fingerprint_hex, (long)granted_expires_at,
                 (long)(granted_expires_at - time(NULL)));
         response_code = COAP_RESPONSE_CODE_CONTENT;
-        message = "Qualification successful!\0";
+        message = "Qualification successful!";
         submit_response.qualified = 1;
         submit_response.expires_at = (uint64_t)granted_expires_at;
     } else {
-        char ek_fingerprint_hex[17] = {0};
-        hex_prefix(ek_fingerprint, sizeof(ek_fingerprint), ek_fingerprint_hex,
-                sizeof(ek_fingerprint_hex));
         charra_log_error(
                 "[" LOG_NAME "] /qualify/submit: RP %s...'s submitted "
                 "log/PCR did NOT match the golden answer.",
                 ek_fingerprint_hex);
         response_code = COAP_RESPONSE_CODE_CONTENT;
-        message = "Qualification failed!  \0";
+        message = "Qualification failed!";
     }
 
 cleanup:
     coap_pdu_set_code(response, response_code);
-    /* The human-readable message stays in the log; the wire now carries
-     * the structured verdict so RP need not assume the window. */
+    /* The human-readable message stays in the log; the wire carries the
+     * structured verdict so RP need not assume the window. */
     charra_log_info("[" LOG_NAME "] /qualify/submit: %s", message);
     {
         uint8_t* submit_resp_buf = NULL;
@@ -361,5 +347,4 @@ cleanup:
     charra_free_if_not_null(req.submitted_redacted_log);
     charra_free_if_not_null(req.ak_certificate_rp);
     charra_io_free_file_buffer(&verifier_ca_cert_der);
-    return;
 }

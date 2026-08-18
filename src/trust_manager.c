@@ -24,7 +24,6 @@
 #include "util/io_util.h"
 #include "util/tpm2_util.h"
 
-#define CHARRA_UNUSED __attribute__((unused))
 
 
 #define LOG_NAME "trust manager"
@@ -44,23 +43,6 @@ static void coap_handler(struct coap_resource_t* resource,
                                 const struct coap_pdu_t* request,
                                 const struct coap_string_t* query,
                                 struct coap_pdu_t* response);
-
-/**
- * @brief Logs the requesting peer's address:port for a CoAP handler --
- * same helper attester.c/verifier.c already added for the same reason.
- */
-static void log_peer_address(
-        const char* endpoint_name, struct coap_session_t* session) {
-    const coap_address_t* remote = coap_session_get_addr_remote(session);
-    if (remote == NULL) {
-        return;
-    }
-    unsigned char addr_buf[64] = {0};
-    size_t addr_len = coap_print_addr(remote, addr_buf, sizeof(addr_buf) - 1);
-    addr_buf[addr_len] = '\0';
-    charra_log_info("[" LOG_NAME "] %s: request from %s.", endpoint_name,
-            (const char*)addr_buf);
-}
 
 int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
     int result = EXIT_SUCCESS;
@@ -171,7 +153,7 @@ static void coap_handler(struct coap_resource_t* resource,
             get_verifiers_request_counter);
     charra_log_info("[" LOG_NAME
                     "] ============================================================");
-    log_peer_address("/get_verifiers", session);
+    charra_coap_log_peer_address(LOG_NAME, "/get_verifiers", session);
 
     /* get data */
     size_t data_len = 0;

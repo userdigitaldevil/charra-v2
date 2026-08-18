@@ -41,8 +41,8 @@
 #include "../common/charra_log.h"
 #include "io_util.h"
 #include "tpm2_util.h"
+#include "../common/charra_macro.h"
 
-#define CHARRA_UNUSED __attribute__((unused))
 
 static const unsigned char mbedtls_personalization[] =
         "CHARRA_mbedtls_random_personalization";

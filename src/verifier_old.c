@@ -42,7 +42,6 @@
 #include "util/io_util.h"
 #include "util/tpm2_util.h"
 
-#define CHARRA_UNUSED __attribute__((unused))
 
 /* --- config ------------------------------------------------------------- */
 

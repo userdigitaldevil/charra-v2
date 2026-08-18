@@ -23,6 +23,14 @@
 
 #include <stdlib.h>
 
+/** Marks a parameter the compiler would otherwise warn about -- mostly the
+ * fixed libcoap handler signature, where not every handler uses every
+ * argument. Guarded because several translation units defined it locally
+ * before it lived here. */
+#ifndef CHARRA_UNUSED
+#define CHARRA_UNUSED __attribute__((unused))
+#endif
+
 #define charra_free_and_null_ex(var, func_name)                                \
     {                                                                          \
         func_name(var);                                                        \

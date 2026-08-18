@@ -1,24 +1,18 @@
-#include <arpa/inet.h>
 #include <coap3/coap.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/stat.h>
 #include <time.h>
-#include <tinydtls/session.h>
-#include <tss2/tss2_mu.h>
-#include <tss2/tss2_tctildr.h>
 #include <tss2/tss2_tpm2_types.h>
 
 #include "common/charra_log.h"
 #include "common/charra_macro.h"
-#include "core/charra_ak_state.h"
-#include "core/charra_dto.h"
 #include "core/charra_rp_qualification.h"
 #include "util/cli_util.h"
 #include "util/coap_util.h"
+#include "util/io_util.h"
 #include "verifier/verifier_appraise.h"
 #include "verifier/verifier_certify_ak.h"
 #include "verifier/verifier_nonce.h"
@@ -29,19 +23,6 @@
 
 /* quit signal */
 static bool quit = false;
-CHARRA_RC attestation_rc = CHARRA_RC_ERROR;
-
-/* Counts attestation rounds this Verifier process has seen, purely for the
- * log delimiter coap_nonce_handler() prints -- /nonce is always the first
- * request of a new round (RP requests exactly one fresh nonce per cycle
- * per Verifier, before building and sending evidence), so incrementing it
- * there gives an easy-to-scan boundary in this Verifier's own log, the
- * same way relying_party.c's "Starting new attestation run" delimiter
- * does on the RP side. Not shared with or derived from the RP's own
- * num_verifiers/run numbering -- this Verifier has no visibility into
- * that, it only knows how many rounds *it itself* has been asked to
- * participate in. */
-unsigned int attestation_round_counter = 0;
 
 /* logging */
 #define LOG_NAME "verifier"
@@ -54,7 +35,7 @@ charra_log_t charra_log_level = CHARRA_LOG_INFO;
 
 /* config */
 static const char LISTEN_ADDRESS[] = "0.0.0.0";
-static unsigned int port = 31415;  
+static unsigned int port = 31415;
 bool use_ima_event_log = false;
 char* ima_event_log_path =
         "/sys/kernel/security/ima/binary_runtime_measurements";
@@ -71,29 +52,6 @@ char* dtls_rpk_private_key_path = "keys/verifier.der";
 char* dtls_rpk_public_key_path = "keys/verifier.pub.der";
 char* dtls_rpk_peer_public_key_path = "keys/relying_party.pub.der";
 bool dtls_rpk_verify_peer_public_key = true;
-
-msg_attestation_request_dto last_request = {0};
-
-/* The Verifier's OWN freshness challenge for Quote_r, generated fresh by
- * coap_nonce_handler() on every /nonce call -- deliberately separate from
- * last_request.nonce above (the nonce RP gave the ATTESTER, still needed
- * for Quote_a's own freshness check, Step 3b item 3). Quote_r's freshness
- * has to be checked against a value the VERIFIER picked, not one RP picked
- * itself: an RP echoing back its own nonce proves nothing to the Verifier
- * about freshness, since RP could replay an old signature over an old
- * self-chosen nonce it already knows will "match". Same single-in-flight-
- * global limitation as last_request (bug #6 in CHARRA_V2_NOTES.md's
- * verifier.c audit -- deliberately left as is for now, unchanged by this). */
-uint8_t verifier_challenge_nonce[TPM2_SHA256_DIGEST_SIZE] = {0};
-uint32_t verifier_challenge_nonce_len = 0;
-
-/* config for /qualify + /qualify/submit (RP qualification handshake) --
- * see charra_rp_qualification.h. Holds only the CURRENT outstanding
- * challenge's golden answer -- single global, same one-in-flight-round-at-
- * a-time assumption last_request above already makes. The durable verdict
- * ("is EK X currently qualified, until when") is NOT kept here: see
- * qualification_state_file_path below. */
-rp_qualification_state qualification_state = {0};
 
 /* config for /certify_ak (Verifier acting as Privacy CA) -- see
  * keys/gen-ak-pki.sh / keys/README.md for what these test-only files are */
@@ -159,6 +117,12 @@ char* attester_ak_state_file_path = "state/verifier/ak-provisioning/"
 char* qualification_state_file_path =
         "state/verifier/qualification/rp-qualification-state.txt";
 
+/* Per-round /appraise timings, appended by coap_appraise_handler(). Per
+ * port, same reason as the ledgers above: sibling Verifiers share one
+ * working directory and would otherwise interleave into one file. */
+static char durations_file_path_buf[64] = {0};
+char* durations_file_path = "durations_verifier.txt";
+
 /* Qualification window this Verifier grants, settable with
  * --qualification-validity. Pushed into charra_rp_qualification.c after
  * CLI parsing; must match the RP's own flag (see that module's header). */
@@ -171,11 +135,6 @@ static time_t qualification_validity_seconds =
  * @param signum the signal number.
  */
 static void handle_sigint(int signum);
-
-                                
-
-
-
 
 /* --- main --------------------------------------------------------------- */
 
@@ -263,6 +222,17 @@ int main(int argc, char** argv) {
     mkdir("state/verifier/ak-provisioning/attester", 0755);
     mkdir("state/verifier/qualification", 0755);
 
+    /* Per-port, matching the ledgers below: two Verifiers on different ports
+     * are meant to share state/verifier/, but two on the SAME port are two
+     * owners of one issuance ledger, each revoking the other's records. */
+    char state_lock_path[80] = {0};
+    snprintf(state_lock_path, sizeof(state_lock_path),
+            "state/verifier/verifier-%u.lock", port);
+    if (charra_io_lock_state_dir(state_lock_path, "verifier") !=
+            CHARRA_RC_SUCCESS) {
+        return EXIT_FAILURE;
+    }
+
     snprintf(rp_ak_state_file_path_buf, sizeof(rp_ak_state_file_path_buf),
             "state/verifier/ak-provisioning/rp/rp-ak-provisioning-state-%u."
             "txt",
@@ -287,6 +257,10 @@ int main(int argc, char** argv) {
             "keys/verifier-ca-%u.key", port);
     verifier_ca_key_path = verifier_ca_key_path_buf;
 
+    snprintf(durations_file_path_buf, sizeof(durations_file_path_buf),
+            "durations_verifier-%u.txt", port);
+    durations_file_path = durations_file_path_buf;
+
     /* Self-describing log: everything below is derived from CLI flags/
      * defaults that never appear again in the log stream once startup is
      * done, so a reader coming to this log file cold has no other way to
@@ -294,10 +268,12 @@ int main(int argc, char** argv) {
     charra_log_info("[" LOG_NAME "] Effective configuration: port=%d "
                     "rp_ak_state_file='%s' attester_ak_state_file='%s' "
                     "qualification_state_file='%s' "
-                    "manufacturer_root='%s' verifier_ca_cert='%s'",
+                    "manufacturer_root='%s' verifier_ca_cert='%s' "
+                    "durations_file='%s'",
             port, rp_ak_state_file_path, attester_ak_state_file_path,
             qualification_state_file_path,
-            manufacturer_root_cert_path, verifier_ca_cert_path);
+            manufacturer_root_cert_path, verifier_ca_cert_path,
+            durations_file_path);
 
     charra_log_debug("[" LOG_NAME "] Verifier Configuration:");
     charra_log_debug("[" LOG_NAME "]     Used local port: %d", port);

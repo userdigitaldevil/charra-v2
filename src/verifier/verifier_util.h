@@ -20,11 +20,6 @@
  */
 void hex_prefix(const uint8_t* buf, size_t buf_len, char* out, size_t out_len);
 
-/** @brief Logs the requesting peer's address:port, to tell which physical
- * connection a round's log lines belong to. */
-void log_peer_address(
-        const char* endpoint_name, struct coap_session_t* session);
-
 /** @brief coap_add_data_large_response() release callback: frees the
  * marshaled response buffer once libcoap has finished sending it. */
 void release_response_data(

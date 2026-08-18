@@ -47,7 +47,6 @@
 #include "util/io_util.h"
 #include "util/tpm2_util.h"
 
-#define CHARRA_UNUSED __attribute__((unused))
 
 /* --- config ------------------------------------------------------------- */
 
@@ -414,25 +413,6 @@ finish:
 /* --- function definitions ----------------------------------------------- */
 
 static void handle_sigint(int signum CHARRA_UNUSED) { quit = true; }
-
-/**
- * @brief Logs the requesting peer's address:port for a CoAP handler --
- * useful once more than one RP can hit one Attester, to tell which
- * physical connection a given cycle's log lines belong to. Same helper
- * verifier.c added for the same reason.
- */
-static void log_peer_address(
-        const char* endpoint_name, struct coap_session_t* session) {
-    const coap_address_t* remote = coap_session_get_addr_remote(session);
-    if (remote == NULL) {
-        return;
-    }
-    unsigned char addr_buf[64] = {0};
-    size_t addr_len = coap_print_addr(remote, addr_buf, sizeof(addr_buf) - 1);
-    addr_buf[addr_len] = '\0';
-    charra_log_info("[" LOG_NAME "] %s: request from %s.", endpoint_name,
-            (const char*)addr_buf);
-}
 
 /**
  * @brief Formats a TPML_PCR_SELECTION's selected PCR indices (across all
@@ -1039,7 +1019,7 @@ static void coap_certify_ak_of_attester_handler(
     uint8_t* marshaled_response = NULL;
     uint32_t marshaled_response_len = 0;
 
-    log_peer_address("/certify_ak_of_attester", session);
+    charra_coap_log_peer_address(LOG_NAME, "/certify_ak_of_attester", session);
 
     if ((charra_r = ensure_attester_ak_keypair()) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] /certify_ak_of_attester: could not "
@@ -1343,7 +1323,7 @@ static void coap_attest_handler(struct coap_resource_t* resource,
             attest_request_counter);
     charra_log_info("[" LOG_NAME
                     "] ============================================================");
-    log_peer_address("/attest", session);
+    charra_coap_log_peer_address(LOG_NAME, "/attest", session);
 
     /* must run before the ESAPI init below opens its own TPM connection --
      * the simulator only accepts one at a time */
@@ -1762,7 +1742,7 @@ static void coap_attest_result_handler(
         struct coap_session_t* session, const struct coap_pdu_t* request,
         const struct coap_string_t* query CHARRA_UNUSED,
         struct coap_pdu_t* response) {
-    log_peer_address("/attest_result", session);
+    charra_coap_log_peer_address(LOG_NAME, "/attest_result", session);
 
     size_t data_len = 0;
     const uint8_t* data = NULL;

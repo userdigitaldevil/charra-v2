@@ -203,4 +203,17 @@ int charra_coap_log_level_from_str(
  */
 const char* charra_coap_method_to_str(const coap_request_t method);
 
+/**
+ * @brief Logs the requesting peer's address:port for a CoAP handler, so a
+ * round's log lines can be tied to the physical connection they came from.
+ *
+ * Silent when the session has no remote address.
+ *
+ * @param log_name the calling role's log prefix, i.e. its own LOG_NAME.
+ * @param endpoint_name the resource being served, e.g. "/appraise".
+ * @param session the session the request arrived on.
+ */
+void charra_coap_log_peer_address(const char* log_name,
+        const char* endpoint_name, struct coap_session_t* session);
+
 #endif /* COAP_UTIL_H */

@@ -11,12 +11,10 @@
 #include "verifier_certify_ak.h"
 
 #include <stdbool.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-#include <tss2/tss2_mu.h>
 #include <tss2/tss2_tctildr.h>
 #include <tss2/tss2_tpm2_types.h>
 
@@ -24,12 +22,8 @@
 #include "../common/charra_macro.h"
 #include "../core/charra_ak_state.h"
 #include "../core/charra_dto.h"
-#include "../core/charra_helper.h"
 #include "../core/charra_key_mgr.h"
 #include "../core/charra_marshaling.h"
-#include "../core/charra_qualification_state.h"
-#include "../core/charra_rp_qualification.h"
-#include "../util/cbor_util.h"
 #include "../util/charra_util.h"
 #include "../util/coap_util.h"
 #include "../util/crypto_util.h"
@@ -441,7 +435,7 @@ static CHARRA_RC certify_ak_do_confirm(const msg_certify_ak_request_dto* req,
         goto cleanup;
     }
 
-    uint8_t ak_cert_serial[16] = {0};
+    uint8_t ak_cert_serial[CHARRA_AK_STATE_SERIAL_LEN] = {0};
     if ((charra_r = charra_crypto_sign_ak_certificate(
                  (TPM2B_PUBLIC*)challenge.ak_public_key, "CN=CHARRA AK",
                  verifier_ca_subject_name, ak_cert_not_before_utc,
@@ -559,7 +553,7 @@ void coap_certify_ak_handler(struct coap_resource_t* resource,
     CHARRA_RC charra_r = CHARRA_RC_ERROR;
     coap_pdu_code_t response_code = COAP_RESPONSE_CODE_INTERNAL_ERROR;
 
-    log_peer_address("/certify_ak", session);
+    charra_coap_log_peer_address(LOG_NAME, "/certify_ak", session);
 
     msg_certify_ak_request_dto req = {0};
     bool req_unmarshaled = false;

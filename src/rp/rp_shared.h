@@ -18,10 +18,6 @@
 #ifndef CHARRA_RP_SHARED_H
 #define CHARRA_RP_SHARED_H
 
-#ifndef CHARRA_UNUSED
-#define CHARRA_UNUSED __attribute__((unused))
-#endif
-
 #include <coap3/coap.h>
 #include <stdbool.h>
 #include <stdint.h>

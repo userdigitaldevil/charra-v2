@@ -1,39 +1,39 @@
 /**
  * @file verifier_nonce.c
  * @brief See verifier_nonce.h.
+ *
+ * Owns the per-round challenge state it produces: the nonce the RP gave the
+ * Attester (kept for Step 3b item 3) and this Verifier's own challenge for
+ * Quote_r (Step 3a item 3). Both are consumed by verifier_appraise.c, which
+ * reaches them through verifier_shared.h.
  */
 
 #include "verifier_nonce.h"
 
-#include <stdbool.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
-#include <tss2/tss2_mu.h>
-#include <tss2/tss2_tctildr.h>
 #include <tss2/tss2_tpm2_types.h>
 
 #include "../common/charra_log.h"
 #include "../common/charra_macro.h"
-#include "../core/charra_ak_state.h"
 #include "../core/charra_dto.h"
-#include "../core/charra_helper.h"
-#include "../core/charra_key_mgr.h"
 #include "../core/charra_marshaling.h"
-#include "../core/charra_qualification_state.h"
-#include "../core/charra_rp_qualification.h"
-#include "../util/cbor_util.h"
 #include "../util/charra_util.h"
 #include "../util/coap_util.h"
-#include "../util/crypto_util.h"
-#include "../util/io_util.h"
-#include "../util/tpm2_util.h"
 #include "verifier_shared.h"
-#include "verifier_util.h"
 
 #define LOG_NAME "verifier"
+
+msg_attestation_request_dto last_request = {0};
+
+uint8_t verifier_challenge_nonce[TPM2_SHA256_DIGEST_SIZE] = {0};
+uint32_t verifier_challenge_nonce_len = 0;
+
+/* Rounds served, purely for the log delimiter below. Not derived from the
+ * RP's own run numbering -- this Verifier only knows how many rounds it was
+ * itself asked to join. */
+static unsigned int attestation_round_counter = 0;
 
 void coap_nonce_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
@@ -43,21 +43,12 @@ void coap_nonce_handler(struct coap_resource_t* resource,
     CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
     int coap_r = 0;
 
-    /* Clear delimiter between attestation rounds -- without this, a busy
-     * Verifier's log (interleaved /certify_ak, /qualify, /qualify_submit,
-     * /appraise handling across many rounds) has no visible boundary
-     * between one round's requests and the next. /nonce is the best
-     * available anchor for "a new round started": on every round after the
-     * first with a given RP identity, it genuinely IS the first request
-     * (RP's AK certificate and qualification are both cached by then, so
-     * neither /certify_ak nor /qualify/qualify_submit get called at all
-     * that round -- see relying_party.c's rp_perform_qualification_
-     * handshake()). Only on an RP's very first round with this Verifier
-     * does the delimiter print a little late, after /certify_ak and
-     * /qualify already ran -- acceptable since that round is already
-     * self-evidently distinctive in the log (EK/AK certification and
-     * qualification-challenge lines that never repeat afterward). Mirrors
-     * relying_party.c's own "Starting new attestation run" delimiter. */
+    /* Round delimiter. /nonce is the best anchor for "a new round started":
+     * from an RP's second round on, its AK certificate and qualification are
+     * both cached, so /certify_ak and /qualify don't run at all and /nonce
+     * genuinely is the round's first request. Only a first round prints the
+     * delimiter late, and that round is self-evident in the log anyway.
+     * Mirrors relying_party.c's "Starting new attestation run". */
     attestation_round_counter++;
     charra_log_info("[" LOG_NAME
                     "] ============================================================");
@@ -66,7 +57,7 @@ void coap_nonce_handler(struct coap_resource_t* resource,
             attestation_round_counter);
     charra_log_info("[" LOG_NAME
                     "] ============================================================");
-    log_peer_address("/nonce", session);
+    charra_coap_log_peer_address(LOG_NAME, "/nonce", session);
 
     /* --- receive incoming data --- */
     coap_show_pdu(LOG_DEBUG, request);
@@ -80,12 +71,9 @@ void coap_nonce_handler(struct coap_resource_t* resource,
                  request, &data_len, &data, &data_offset, &data_total_len)) == 0) {
         charra_log_error("[" LOG_NAME "] Could not get CoAP PDU data.");
         goto error;
-    } else {
-        charra_log_info(
-                "[" LOG_NAME "] Received nonce of length %zu.", data_len);
-        charra_log_info("[" LOG_NAME "] Received nonce of total length %zu.",
-                data_total_len);
     }
+    charra_log_info("[" LOG_NAME "] Received nonce of length %zu (%zu total).",
+            data_len, data_total_len);
 
     /* unmarshal data */
     charra_log_info("[" LOG_NAME "] Parsing received CBOR data.");
@@ -98,24 +86,24 @@ void coap_nonce_handler(struct coap_resource_t* resource,
 
     /* nonce RP gave the Attester -- kept in last_request for Quote_a's own
      * freshness check (Step 3b item 3); NOT used for Quote_r's, see
-     * verifier_challenge_nonce's own comment above. */
-    if (req.nonce_len > sizeof(TPMU_HA)) {
+     * verifier_challenge_nonce below. */
+    if (req.nonce_len > sizeof(req.nonce)) {
         charra_log_error("[" LOG_NAME "] Nonce too long.");
+        charra_free_if_not_null(req.event_log_path);
         goto error;
     }
+    /* charra_unmarshal_attestation_request() heap-allocates event_log_path,
+     * so the round being replaced has to be released before the struct
+     * assignment drops the only pointer to it. */
+    charra_free_if_not_null(last_request.event_log_path);
     last_request = req;
 
-    /* Generate the Verifier's own freshness challenge and send THAT back as
-     * this response's body -- not req.nonce. A challenge RP picked itself
-     * and merely echoed back would prove nothing about freshness from the
-     * Verifier's side (RP could replay an old Quote_r over a nonce it
-     * already knows will "match"); the challenger has to pick the value.
-     * RP's coap_verifier_handler_nonce() stores whatever comes back here as
-     * verifier_nonce and signs it into Quote_r, which Step 3a item 3 below
-     * then checks against verifier_challenge_nonce. Without a response
-     * body at all, RP's client-side nonce wait loop fails every time
-     * ("Verifier returned no nonce") -- this handler previously never sent
-     * one, before it was fixed to (at the time) echo req.nonce. */
+    /* Generate the Verifier's OWN freshness challenge and send THAT back,
+     * not req.nonce: a value the RP picked itself proves nothing about
+     * freshness, since it could replay an old Quote_r over a nonce it
+     * already knows will match. The challenger has to pick the value. RP
+     * signs whatever comes back here into Quote_r, which Step 3a item 3
+     * checks against verifier_challenge_nonce. */
     if ((charra_r = charra_random_bytes(sizeof(verifier_challenge_nonce),
                  verifier_challenge_nonce)) != CHARRA_RC_SUCCESS) {
         charra_log_error(
@@ -137,5 +125,4 @@ void coap_nonce_handler(struct coap_resource_t* resource,
 
 error:
     coap_pdu_set_code(response, COAP_RESPONSE_CODE_BAD_REQUEST);
-    return;
 }

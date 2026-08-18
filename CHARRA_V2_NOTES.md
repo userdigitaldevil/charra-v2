@@ -32,7 +32,7 @@ the privacy-preserving redaction scheme from
   - `src/verifier.c` — new design: passive CoAP server :31415, resources
     `nonce`, `appraise`, `certify_ak`, `qualify` + `qualify_submit`, meant
     to be called by an orchestrator. Logs per-step timing to
-    `durations_verifier.txt`.
+    `durations_verifier-<port>.txt` (per port, appended).
 - **Trust Manager** (`src/trust_manager.c`, :6000) — new role, the poster's
   "Verifier Manager." Resource `get_verifiers`: takes a list of verifier
   IDs, resolves them to `{ip, port}` via `verifiers_config.txt`. Pure
@@ -45,7 +45,8 @@ the privacy-preserving redaction scheme from
   aggregate result. Runs that cycle in a **loop by default** (daemon mode:
   attest, renew qualification if it is near expiry, sleep `--interval`,
   repeat until SIGINT); `--benchmark` selects the bounded 1→5-verifier
-  timing sweep (`NUM_RUNS = 1`, writes `timings_RP_multi_verifiers.txt`)
+  timing sweep (`NUM_RUNS = 5` measured cycles per step, after one discarded
+  warm-up; writes `timings_RP_multi_verifiers.txt`)
   and exits instead. **Also acts as the privacy-preserving proxy** — see
   Part 2.
 
@@ -59,7 +60,7 @@ defined only by struct order, no schema self-description on the wire.
 | Role | File | Port | CoAP resource(s) | Timing log |
 |---|---|---|---|---|
 | Attester | `src/attester.c` | 5683 | `attest`, `certify_ak_of_attester` (both FETCH) | `timings_attester.txt` |
-| Verifier (new, passive) | `src/verifier.c` | 31415 | `nonce`, `appraise`, `certify_ak`, `qualify`, `qualify_submit` | `durations_verifier.txt` |
+| Verifier (new, passive) | `src/verifier.c` | 31415 | `nonce`, `appraise`, `certify_ak`, `qualify`, `qualify_submit` | `durations_verifier-<port>.txt` |
 | Verifier (old, active — baseline) | `src/verifier_old.c` | n/a (client) | — (calls Attester's `attest`) | `timings_verifier.txt` |
 | Trust Manager | `src/trust_manager.c` | 6000 | `get_verifiers` | — |
 | Relying Party | `src/relying_party.c` | n/a (client) | — (calls Trust Manager + Attester + each Verifier) | `timings_RP_multi_verifiers.txt` (`--benchmark` only) |
@@ -164,7 +165,7 @@ majority vote is this team's own extension, not RATS-native:
   `num_used_verifiers` variable — no longer exists under that name, but the
   capability is back: `--verifiers COUNT` sets how many Verifiers each
   daemon-mode cycle uses. Only `--benchmark` still hardcodes the 1→5 sweep
-  (at `NUM_RUNS = 1`, not the manual's 10).
+  (at `NUM_RUNS = 5`, not the manual's 10).
 - Multi-attester support (heterogeneous testbeds) is mentioned on the poster
   but not found in `src/` — likely Docker/deployment-level if it exists.
 
@@ -667,7 +668,7 @@ First attempt: a standalone, cross-role `charra_verify_tpm2_quote()`
 generic over who produced the quote (Attester or RP), verified live (9/9
 assertions). **Reverted**: it would have merged the per-sub-step
 `clock()`-bracketed timing instrumentation `coap_appraise_handler` writes to
-`durations_verifier.txt` (load/verify/nonce/PCR measured separately) into
+`durations_verifier-<port>.txt` (load/verify/nonce/PCR measured separately) into
 one opaque call, for reuse that had no second caller. Decision at the time:
 decompose by *readability*, not by *reuse* — small helpers callable from
 `coap_appraise_handler`, kept local to `verifier.c`.
@@ -699,7 +700,12 @@ their old side effect of writing `verifier.c`'s file-scope `attestation_rc`
 global: traced every use of that global in `coap_appraise_handler` and
 confirmed the value these two wrote was always unconditionally overwritten
 before ever being read, so removing the write (replaced with a purely local
-`CHARRA_RC` inside each function) is behavior-preserving. Verified: clean
+`CHARRA_RC` inside each function) is behavior-preserving. That reasoning
+turned out to hold for *every* write to it: the later verifier-folder audit
+found `attestation_rc` was write-only across the whole Verifier binary — a
+leftover from `verifier_old.c`, where `main()` genuinely did read it as the
+process exit status. It has since been deleted along with its 14 assignments
+in `coap_appraise_handler`. Verified: clean
 rebuild (zero warnings) + a full live 1–5-verifier sweep, all attestations
 passing, log tags now `[crypto_util]`/untagged in place of `[verifier]`.
 
@@ -755,18 +761,27 @@ and `verifier.c` 2231 → 450 across `src/verifier/`:
 | `verifier_nonce.c` | `coap_nonce_handler` |
 | `verifier_certify_ak.c` | both `/certify_ak` legs + the pending-challenge table |
 | `verifier_qualify.c` | `/qualify` and `/qualify_submit` |
-| `verifier_util.c` | `hex_prefix`, `log_peer_address`, `release_response_data` |
+| `verifier_util.c` | `hex_prefix`, `release_response_data` |
 
 **On the globals.** An earlier note argued the handlers couldn't be split
 because they're coupled to ~20 file-scope statics. That coupling is real,
-but it doesn't actually block the split: the globals stay *defined* in
-`verifier.c` and are declared in `verifier_shared.h`, which is enough for
-the moved code to compile unchanged. Threading a context struct through
-every handler was never a prerequisite — it's a separate, larger job, and
-the one that would actually lift the "one attestation round in flight per
-Verifier" limit those globals impose. `src/rp/rp_shared.h` does the same.
-Only genuinely shared state is exported; anything one module owns stays
-`static` in it (the `/certify_ak` pending table, `constant_time_equal`).
+but it doesn't actually block the split: `verifier_shared.h` declares what
+crosses module boundaries, which is enough for the moved code to compile
+unchanged. Threading a context struct through every handler was never a
+prerequisite — it's a separate, larger job, and the one that would actually
+lift the "one attestation round in flight per Verifier" limit those globals
+impose. `src/rp/rp_shared.h` does the same.
+
+Each item is now *defined by the module that produces it*, not parked in
+`verifier.c`: `last_request` and `verifier_challenge_nonce` in
+`verifier_nonce.c` (issued by `/nonce`, consumed by `/appraise`), the
+outstanding `qualification_state` and `CHARRA_RP_QUALIFICATION_NUM_ENTRIES`
+in `verifier_qualify.c`, `attestation_round_counter` in `verifier_nonce.c`.
+Anything a single module owns end to end is `static` there and absent from
+`verifier_shared.h` entirely — so the header now lists only genuine
+cross-module state plus the paths `main()` finalizes once `--port` is known.
+`verifier.c` keeps configuration and `main()`, which is all an entry point
+should hold.
 
 Both folders are wired through their own `$(RP_OBJECTS)`/
 `$(VERIFIER_OBJECTS)` lists rather than `$(OBJECTS)`, which links into all
@@ -1470,6 +1485,7 @@ context since old file/path names still appear in older commit messages:
 ```
 state/
   verifier/
+    verifier-<port>.lock
     ak-provisioning/
       rp/
         rp-ak-provisioning-state-<port>.txt(.lock)
@@ -1478,6 +1494,7 @@ state/
     qualification/
       rp-qualification-state.txt(.lock)
   relying-party/
+    relying-party.lock
     identity/
       rp-ek-certificate.der
       rp-ak-public.bin
@@ -2055,6 +2072,157 @@ live Verifier holding a valid certificate: an abandoned CHALLENGE, a CONFIRM
 with a wrong secret (4.01), and a CONFIRM with no live challenge (4.01, also
 proving single-use consumption) all left the AK-provisioning ledger
 byte-identical -- nothing revoked.
+
+### The multi-verifier sweep was measuring onboarding, not steady state — FIXED
+
+`--benchmark` ran `NUM_RUNS = 1` cycle per Verifier count, which made every
+published number wrong in the same direction, for a reason that is invisible
+in the output.
+
+`timing->appraisal` brackets `get_attestation_results()`, and inside that call
+each per-Verifier thread runs `ensure_rp_ak_certificate()`. On a cold state
+directory that is a full two-leg `/certify_ak` with credential activation. So
+at step *k* of the sweep, Verifiers 1..*k*-1 are already certified but Verifier
+*k* has never been seen — every sample was "*k*-1 steady-state appraisals plus
+one onboarding", and the step-to-step delta read as per-Verifier scaling when
+most of it was a one-off cost. With a single sample there was also nothing to
+average, so `calculate_stats()` reported `stddev: 0.000000` throughout — an
+error bar that was zero by construction, not by precision.
+
+The sweep now runs **one discarded warm-up cycle per step, then `NUM_RUNS = 5`
+measured cycles**. The warm-up is not thrown away: onboarding is the expensive
+TPM path, so it is reported as its own `Onboarding …` lines rather than blended
+into the averages. `plot_multi_verifiers.py` draws two panels from that —
+steady state with real error bars, onboarding as a separate dashed series.
+
+The correction is large enough to change the conclusion:
+
+| Appraisal phase | 1 Verifier | 4 Verifiers | marginal cost |
+|---|---|---|---|
+| Old (blended, n=1) | 2.954s | 4.013s | ~0.35s/Verifier |
+| New (steady state, n=5) | 0.646s | 2.583s | ~0.65s/Verifier |
+| New (onboarding, one-off) | 2.881s | 3.969s | — |
+
+The old curve understated the marginal cost of a Verifier by roughly half and
+inflated the one-Verifier baseline more than fourfold — it was, in effect, a
+plot of the onboarding panel. Steady state is now clean and very nearly linear
+(0.646 / 1.273 / 1.931 / 2.583 / 3.211s for 1–5 Verifiers, stddev 0.006–0.021s
+over 5 samples).
+
+`get_evidence` shows the same artifact at step 1 only: 3.23s in the onboarding
+cycle versus 0.38s steady, the difference being the Attester's one-time AK
+provisioning, which the old sweep charged to the 1-Verifier measurement.
+
+**Benchmarking rule this establishes:** wipe `state/` **and** `/tmp/NVChip`
+together between whole sweeps and restart every daemon — never mid-sweep. The
+RP holds its keypair, per-Verifier certificates and qualification grant in
+memory, and both `verifier.c` and `relying_party.c` `mkdir()` their state
+subtree once at startup, so `rm -rf state` under a running daemon deletes
+directories it will never recreate. Within a sweep, adding a Verifier needs no
+wipe — just the warm-up cycle above.
+
+### `run_live_test.sh` — shared-mount guard, non-interactive use, contamination check
+
+Three gaps closed after the shared-state investigation above:
+
+- It removed a leftover container named `charra`, but nothing stopped a
+  container under **any other name** from having this checkout mounted — the
+  exact situation that caused the ledger-revocation failure. It now enumerates
+  running containers, compares each one's mount sources against `$PWD`, and
+  refuses with the offending container names and a ready-to-paste
+  `docker stop` line.
+- `docker run -it` fails outright without a terminal, so the script could not
+  run from CI or a non-interactive shell. `-t` is now added only when
+  `[ -t 0 ]`.
+- After the sweep it checks every log for NUL padding (`wc -c` versus
+  `tr -d '\0' | wc -c`) and warns that the run is contaminated. That is the
+  fingerprint of two processes sharing one log file, and it is worth failing
+  loudly on rather than letting the timings look trustworthy.
+
+### One state directory, many owners — the "intermittent 0/2 cycle" failure, FIXED
+
+A long-standing intermittent failure: a clean RP would pass two or three
+cycles, then **every** Verifier would reject a cycle at once, with the same
+four reasons — RP AK certificate `REVOKED or EXPIRED in this Verifier's
+ledger`, qualification `NOT EVALUATED`, `Quote_r signature MISMATCH`, and the
+Attester's AK certificate `WRONG`. It reproduced roughly one run in three to
+five and resisted several rounds of diagnosis, because every one of those
+reasons points at the RP's credentials and none of them point at the actual
+cause.
+
+**Root cause: nothing stopped two instances from owning one `state/` tree.**
+Three abandoned Docker containers from earlier experiments were still running,
+each bind-mounting the same host checkout at `/home/bob/charra`, each with its
+own `tpm_server`, Verifiers on ports 5684/5685, and a long-running
+`relying_party` — twelve processes sharing one `state/` and one `logs/`. Every
+one of those RPs periodically re-certifies its AK, and
+`charra_ak_state_renew()` deliberately **revokes any existing record for the
+same EK fingerprint** before appending the new one. So each RP's provisioning
+silently revoked the others' certificates in the shared per-port ledger, and
+each one's cache writes left the others presenting a certificate that no
+longer matched the key they signed `Quote_r` with. Both halves of the symptom,
+from one cause.
+
+Two artifacts in the captured logs identify this unambiguously, and are worth
+knowing as fingerprints of the general condition:
+
+- **NUL padding.** `logs/FAIL-v5684.log` was 110 855 bytes on disk but only
+  15 742 bytes of text — the rest NUL. That hole is what a file looks like
+  when one process truncates it while another still holds a descriptor at a
+  large offset: two writers, one path.
+- **A discontinuous round counter.** `attestation_round_counter` increments
+  once per `/nonce`, in the same statement that prints the delimiter, so the
+  banners cannot skip. The log showed rounds 1, 2, then **15**, against
+  exactly three `/nonce` requests — the file was interleaving two Verifier
+  processes.
+
+**Fix: `charra_io_lock_state_dir()` (`src/util/io_util.h`/`.c`)**, called from
+both `main()`s right after the `mkdir()` block. RP takes
+`state/relying-party/relying-party.lock`; each Verifier takes a **per-port**
+`state/verifier/verifier-<port>.lock`, matching the granularity of the ledgers
+it guards — two Verifiers on different ports are *meant* to share
+`state/verifier/`, two on the same port are two owners of one ledger. A second
+instance now refuses to start and names the holder rather than corrupting it.
+
+It deliberately does **not** use `flock()`, and this is the point worth
+remembering: **`flock()` is silently a no-op on the macOS Docker bind mount.**
+Measured directly — two processes locking the same file under
+`/home/bob/charra` both got `ACQUIRED`, while the identical test on the
+container's own filesystem correctly returned `EWOULDBLOCK`. A `flock`-based
+guard would have been inert in precisely the environment that produced the
+bug. The lock is an atomic `open(O_RDWR|O_CREAT|O_EXCL)` holding
+`"<pid> <hostname>"`, removed via `atexit()` on normal exit, and reclaimed
+automatically when it names a PID **on this host** that no longer exists.
+Cross-host staleness is deliberately not auto-reclaimed — PIDs are
+per-namespace, so a PID from another container may well be live here by
+coincidence — so that case prints the path and asks for a manual delete.
+
+**Known consequence, not fixed here:** `charra_ak_state_renew()` and
+`charra_qualification_state_*` serialise their read-modify-write cycles with
+`flock()` on a `<file>.lock` companion, and by the same measurement those are
+inert under the dev environment's bind mount too. The startup lock makes it
+moot in practice (single owner per ledger, and each owner serialises its own
+threads), but the ledger-level guard is weaker than it reads.
+
+**Verified:** the lock refuses a second RP, refuses a second Verifier on the
+same port, allows a Verifier on a different port, releases on normal exit, and
+reclaims a lock left by a `SIGKILL`ed instance. With the stray containers
+stopped, six consecutive isolated runs of
+`bin/relying_party --verifiers 2 --interval 60 --qualify-renew-margin 30
+--duration 250` passed all 4 cycles each — 24 for 24, with no failed
+majorities, no Verifier NO votes, and no NUL-padded logs.
+
+The reproduction harness itself needs the TPM simulator reset per run
+(`rm -f /tmp/NVChip`, restart `tpm_server`, `tpm2_startup --clear`), exactly as
+`run_live_test.sh` does: `state/` is meaningless against a re-randomized TPM,
+and a simulator left running across repeated `SIGKILL`s degrades into
+`the Attester's public key could not be loaded into the TPM (Step 3b item 2)`
+— a failure that looks like an appraisal bug and is not one.
+
+**Debugging note that cost the most time here:** a false vote is logged by
+`coap_verifier_handler_appraisal()` at INFO (`] False`), not ERROR. Grepping
+only for `ERROR` returns nothing and reads as "clean run". Grep for `] False`
+and `Voting NO`.
 
 ### Timeout-handling bugs, wall-clock timing rewrite, and a stale-vote bug — FIXED
 

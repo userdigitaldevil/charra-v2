@@ -34,6 +34,11 @@
 
 #include "../common/charra_error.h"
 
+/** Width of an issued certificate's serial number, in bytes -- fixed by
+ * charra_crypto_sign_ak_certificate(). A certificate whose serial is any
+ * other width was not issued here. */
+#define CHARRA_AK_STATE_SERIAL_LEN 16
+
 /** One issued-AK-certificate record. */
 typedef struct {
     /** SHA-256 of the requester's EK certificate (DER) -- the stable
@@ -44,7 +49,7 @@ typedef struct {
     uint32_t ak_name_len;
     /** The issued certificate's serial number, see
      * charra_crypto_sign_ak_certificate()'s serial_out. */
-    uint8_t serial[16];
+    uint8_t serial[CHARRA_AK_STATE_SERIAL_LEN];
     time_t issued_at;
     time_t expires_at;
     bool revoked;
@@ -97,7 +102,7 @@ bool charra_ak_state_find_by_ek_fingerprint(
  * @returns true iff found
  */
 bool charra_ak_state_find_by_serial(const charra_ak_state_record* records,
-        uint32_t count, const uint8_t serial[16], uint32_t* index_out);
+        uint32_t count, const uint8_t serial[CHARRA_AK_STATE_SERIAL_LEN], uint32_t* index_out);
 
 /**
  * @brief Renew: atomically (via an advisory file lock, safe across the
@@ -144,7 +149,7 @@ bool charra_ak_state_is_valid(const charra_ak_state_record* record, time_t now);
  * record. False on any lookup/load failure as well as a genuine miss.
  */
 bool charra_ak_state_check_serial_valid(const char* ak_state_file_path,
-        const uint8_t serial[16], uint8_t ek_fingerprint_out[32],
+        const uint8_t serial[CHARRA_AK_STATE_SERIAL_LEN], uint8_t ek_fingerprint_out[32],
         time_t* expires_at_out);
 
 #endif /* CHARRA_AK_STATE_H */
