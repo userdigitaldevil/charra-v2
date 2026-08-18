@@ -294,5 +294,7 @@ clean:
 	$(RM) obj/common/*.*
 	$(RM) obj/core/*.*
 	$(RM) obj/util/*.*
+	$(RM) obj/rp/*.*
+	$(RM) obj/verifier/*.*
 	$(RM) obj/*.*
 

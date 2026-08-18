@@ -1199,9 +1199,12 @@ void* get_attestation_results_thread(void *arg) {
          * that ever reads or writes rp_ak_cert_der[current_thread_index],
          * since each Verifier's certificate is now independently owned by
          * its own thread's array slot. */
-        charra_r = charra_rp_build_evidence_message(
+        /* Local, not the file-scope charra_r this used to assign: every
+         * Verifier thread runs this, so a shared result variable lets one
+         * thread's failure be read as another's. */
+        CHARRA_RC build_rc = charra_rp_build_evidence_message(
                 current_thread_index, &res_buf_len, &res_buf);
-        if (charra_r != CHARRA_RC_SUCCESS) {
+        if (build_rc != CHARRA_RC_SUCCESS) {
             charra_log_error(
                     "[" LOG_NAME "] Error building RP evidence message.");
             goto error;

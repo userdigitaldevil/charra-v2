@@ -311,6 +311,7 @@ Inside: `cd ~/charra && make -j`. The TPM simulator starts automatically;
 | RP exits immediately after one sweep | `--benchmark` is set; drop it for daemon mode |
 | RP hangs, no verifier answers | Fewer Verifiers running than `--verifiers` |
 | Every attestation fails after a TPM reset | Stale `state/` — delete it |
+| `Esys_Create: 0x921`, Attester cannot create its AK | TPM is in dictionary-attack lockout; run `tpm2_dictionarylockout --clear-lockout`. Every later step fails in a confusing cascade from this one cause |
 | `could not read keys/verifier-ca-<port>.crt` | Port not in `verifiers_config.txt` when `gen-ak-pki.sh` ran |
 | RP re-qualifies every cycle | `--qualify-margin` ≥ the Verifier's validity window |
 | `timeout`/`docker stop` kills RP mid-cycle | Fixed — SIGTERM now shuts down cleanly |

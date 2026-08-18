@@ -27,6 +27,7 @@
 #include "../util/crypto_util.h"
 #include "../util/io_util.h"
 #include "rp_coap.h"
+#include "rp_identity.h"
 #include "rp_shared.h"
 
 #define LOG_NAME "relying party"

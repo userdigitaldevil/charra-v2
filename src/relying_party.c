@@ -55,13 +55,10 @@ int rp_num_verifiers = RP_DEFAULT_NUM_VERIFIERS;
 unsigned int rp_duration_s = 0;
 unsigned long rp_max_cycles = 0;
 
-/* logging and coap config */ 
-#define CHARRA_UNUSED __attribute__((unused))
+/* logging and coap config (CHARRA_UNUSED comes from rp_shared.h) */
 #define LOG_NAME "relying party"
-// #define LOG_LEVEL_CBOR LOG_DEBUG
 coap_log_t coap_log_level = LOG_INFO;
 charra_log_t charra_log_level = CHARRA_LOG_INFO;
-CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
 bool quit = false;
 
 /* trust manager config */ 
@@ -70,12 +67,10 @@ unsigned int trust_manager_port = 6000;
 uint16_t trust_manager_response_timeout = 30;  
 bool processing_trust_manager_response = false;
 
-/* Sized to MAX_VERIFIERS, not the sweep's current hardcoded bound of 5
- * (see main()'s "for (int num_verifiers = 1; num_verifiers <= 5; ...)"),
- * so raising that bound later can't silently overflow this array the way
- * a fixed verifier_list[5] would -- every other per-Verifier array in this
- * file (attestation_results, verifiers, etc.) is already sized to
- * MAX_VERIFIERS for the same reason. */
+/* Sized to MAX_VERIFIERS, not to the benchmark sweep's smaller
+ * RP_MAX_SWEEP_VERIFIERS bound, so raising that bound can't silently
+ * overflow this array. Every per-Verifier array below is sized the same
+ * way for the same reason. */
 int verifier_list[MAX_VERIFIERS];
 bool attestation_results[MAX_VERIFIERS];
 /* Set by coap_verifier_handler_appraisal() when a Verifier's /appraise
@@ -94,8 +89,8 @@ verifier_info verifiers[MAX_VERIFIERS];
 uint16_t verifier_response_timeout = 6;  // timeout when waiting for verifier's answer (attestation results) in seconds
 bool processing_appraisal_response[MAX_VERIFIERS] = {false};
 
-/* attester config */ 
-#define PERIODIC_ATTESTATION_WAIT_TIME_S 2  // Wait time between attestations in seconds (not implemented)
+/* attester config (the wait between attestations is --interval, see
+ * rp_attestation_interval_s above) */
 bool processing_attestation_response = false;
 CHARRA_RC attestation_rc = CHARRA_RC_ERROR;
 const bool USE_TPM_FOR_RANDOM_NONCE_GENERATION = false;
@@ -142,24 +137,24 @@ char* manufacturer_root_cert_path = "keys/manufacturer-root.crt";
 char* manufacturer_root_key_path = "keys/manufacturer-root.key";
 const char* rp_ek_cert_not_before_utc = "20240101000000";
 const char* rp_ek_cert_not_after_utc = "20340101000000";
-/* Cache files -- created on first successful provisioning, reused (skipping
- * the whole /certify_ak round trip) on every later run. All of RP's own
- * runtime state lives under state/relying-party/ -- mkdir'd by main() --
- * split by purpose the same way verifier.c splits its own state under
- * state/verifier/: identity/ holds the one TPM-resident EK/AK keypair
- * (verifier-agnostic), ak-certificates/ holds the per-Verifier AK
- * certificates that keypair has been issued (see rp_ak_cert_der below;
- * ensure_rp_ak_certificate() computes
- * "state/relying-party/ak-certificates/rp-ak-certificate-<port>.der" per
- * call), and qualification-cache/ holds RP's own belief about whether it's
- * still qualified, now a single file since qualifying is Verifier-agnostic
- * (rp_qualification_cache_path above). */
+/* Cache files -- written on first successful provisioning, reused (skipping
+ * the /certify_ak round trip) on every later run. All of RP's runtime state
+ * lives under state/relying-party/, mkdir'd by main() and split by purpose
+ * the same way verifier.c splits state/verifier/:
+ *   identity/            the one TPM-resident EK/AK keypair (Verifier-agnostic)
+ *   ak-certificates/     per-Verifier AK certificates for that keypair, named
+ *                        rp-ak-certificate-<port>.der by
+ *                        ensure_rp_ak_certificate()
+ *   qualification-cache/ whether RP is still qualified -- a single file,
+ *                        since qualifying is Verifier-agnostic */
 char* rp_ek_cert_cache_path =
         "state/relying-party/identity/rp-ek-certificate.der";
 char* rp_ak_public_path =
         "state/relying-party/identity/rp-ak-public.bin";
 char* rp_ak_private_path =
         "state/relying-party/identity/rp-ak-private.bin";
+char* rp_qualification_cache_path =
+        "state/relying-party/qualification-cache/rp-qualification-until.txt";
 
 /* True once the TPM-resident EK+AK keypair exists and rp_public_key_der is
  * populated -- set once by ensure_rp_ak_keypair(), never per-Verifier. */
@@ -180,14 +175,13 @@ CHARRA_RC certify_ak_rc = CHARRA_RC_ERROR;
  * other's issuance -- see CHARRA_V2_NOTES.md. RP acts as the sole initiator
  * throughout (Attester and every Verifier stay fully passive):
  *   - RP's own CA: one relationship, one certificate, provisioned once per
- *     process (ensure_attester_identity_provisioned() below) -- mirrors
- *     ensure_rp_ak_keypair() being a one-time thing.
- *   - Each Verifier's own CA: now symmetric with how RP's own AK is
- *     certified (ensure_rp_ak_certificate()) -- a SEPARATE certificate per
- *     Verifier, since Verifiers now hold independent CA keys (see
- *     verifier.c's verifier_ca_key_path). ensure_attester_identity_
- *     certified_by_verifier() below runs once per Verifier, from that
- *     Verifier's own thread, not once globally. */
+ *     process by ensure_attester_identity_provisioned() -- the same
+ *     one-time shape as ensure_rp_ak_keypair().
+ *   - Each Verifier's own CA: a SEPARATE certificate per Verifier, since
+ *     Verifiers hold independent CA keys (see verifier.c's
+ *     verifier_ca_key_path). ensure_attester_identity_certified_by_verifier()
+ *     runs once per Verifier, from that Verifier's own thread.
+ * Both live in rp/rp_attester_identity.c. */
 char* rp_ca_cert_path = "keys/rp-ca.crt";
 char* rp_ca_key_path = "keys/rp-ca.key";
 /* Lifetime of the Attester AK certificate RP issues under its own CA,
@@ -235,36 +229,31 @@ msg_activate_credential_response_dto activate_credential_response = {0};
 CHARRA_RC activate_credential_rc = CHARRA_RC_ERROR;
 bool processing_activate_credential_response = false;
 
-/* Per-Verifier Attester AK certificate, mirroring rp_ak_cert_der/_len/
- * _ready above exactly -- same pattern, same reason (each Verifier issues
- * and must be sent back its OWN certificate). Substituted directly into
- * that Verifier's evidence message by charra_rp_build_evidence_message(),
- * instead of whatever (if anything) the Attester itself reports in its own
- * /appraise response: only RP knows which certificate belongs to which
- * Verifier, and the certificate's validity depends only on its own CA
- * signature, not on who carried the bytes -- so this is not a trust
- * shortcut, just cutting out a redundant hop. */
+/* Per-Verifier Attester AK certificate -- mirrors rp_ak_cert_der/_len/_ready
+ * above, same reason: each Verifier issues, and must be sent back, its OWN
+ * certificate. charra_rp_build_evidence_message() substitutes it directly
+ * rather than relaying whatever the Attester reports, since only RP knows
+ * which certificate belongs to which Verifier. Not a trust shortcut: a
+ * certificate's validity rests on its CA signature, not on who carried it. */
 bool attester_ak_cert_by_verifier_ready[MAX_VERIFIERS] = {false};
 uint8_t* attester_ak_cert_by_verifier_der[MAX_VERIFIERS] = {NULL};
 uint32_t attester_ak_cert_by_verifier_der_len[MAX_VERIFIERS] = {0};
-/* Guards the Attester-relay round trips inside ensure_attester_identity_
+/* Guards the Attester-relay round trips in ensure_attester_identity_
  * certified_by_verifier() (ACTIVATE, DELIVER_VERIFIER) against concurrent
- * Verifier threads -- both use shared response globals (activate_
- * credential_response/_rc/processing_ above, processing_certify_ak_of_
- * attester_deliver_response) the way /certify_ak's own globals need rp_ak_
- * reprovision_mutex. Held for the whole per-Verifier function body, not
- * just individual exchanges (unlike rp_ak_reprovision_mutex): the Attester
- * itself is single-threaded and serializes these anyway (see attester.c),
- * so there's no concurrency to preserve, only correctness to add. */
+ * Verifier threads: both use the shared response globals above, just as
+ * /certify_ak's globals need rp_ak_reprovision_mutex. Held for the whole
+ * function body rather than per-exchange, because the Attester is
+ * single-threaded and serializes these anyway (see attester.c) -- there is
+ * no concurrency to preserve here, only correctness to add. */
 pthread_mutex_t attester_identity_relay_mutex =
         PTHREAD_MUTEX_INITIALIZER;
 
 /* --- RP qualification handshake state (/qualify + /qualify/submit) ------
- * See charra_rp_qualification.h. Verifier's qualification ledger is now
+ * See charra_rp_qualification.h. The Verifier-side qualification ledger is
  * shared across all Verifier instances (see qualification_state_file_path
- * in verifier.c), so RP only ever runs this handshake once per validity
- * window, against whichever Verifier is reachable first -- not once per
- * Verifier like AK provisioning below. */
+ * in verifier.c), so RP runs this handshake only once per validity window,
+ * against whichever Verifier is reachable first -- unlike the per-Verifier
+ * AK provisioning above. */
 uint8_t* qualify_challenge_log = NULL;
 uint32_t qualify_challenge_log_len = 0;
 /* Salt to redact qualify_challenge_log with, sent alongside it -- see
@@ -311,31 +300,19 @@ bool rp_qualification_rejected[MAX_VERIFIERS];
  * This mutex keeps RP's own accesses serialized and, just as importantly,
  * keeps each one short-lived so other processes get a turn. */
 pthread_mutex_t rp_tpm_mutex = PTHREAD_MUTEX_INITIALIZER;
-/* Guards the /certify_ak CoAP round trip's shared response globals
- * (certify_ak_response/certify_ak_rc/processing_certify_ak_response,
- * above) against concurrent verifier threads: each thread now
- * independently certifies RP's AK with its OWN Verifier (see
- * rp_ak_cert_der's comment above), so several threads can legitimately be
- * mid-/certify_ak at once -- without this, two concurrent responses would
- * race to write the same three globals and one thread could read the
- * other's response. No longer used for the thundering-herd problem this
- * mutex originally guarded against (multiple threads racing to
- * re-provision one shared identity): that problem doesn't exist anymore
- * either, since each thread only ever touches its own rp_ak_cert_der[i]
- * slot. */
+/* Guards /certify_ak's shared response globals (certify_ak_response/_rc/
+ * processing_, above) against concurrent Verifier threads: each thread
+ * certifies RP's AK with its own Verifier, so several can legitimately be
+ * mid-/certify_ak at once and would otherwise read each other's response.
+ * It no longer guards the thundering herd it was written for -- threads
+ * each own their rp_ak_cert_der[i] slot now, so that race is gone. */
 pthread_mutex_t rp_ak_reprovision_mutex = PTHREAD_MUTEX_INITIALIZER;
-/* Guards the /qualify + /qualify/submit CoAP round trips' shared response
- * globals (qualify_challenge_log/qualify_challenge_log_len/
- * qualify_challenge_salt/qualify_response_rc/processing_qualify_response/
- * qualify_submit_qualified/processing_qualify_submit_response, below).
- * The handshake itself now runs at most once per attestation cycle (see
- * rp_perform_qualification_handshake_once()), but the retry-on-rejection
- * path can still call it from more than one Verifier thread concurrently
- * -- this mutex serializes those calls onto the shared globals; the first
- * one through re-qualifies, the rest observe the now-valid cache and
- * short-circuit. Separate from rp_ak_reprovision_mutex so AK
- * (re)certification and qualification can still proceed concurrently --
- * they guard disjoint globals. */
+/* Guards /qualify + /qualify/submit's shared response globals (above).
+ * The handshake runs at most once per cycle, but the retry-on-rejection
+ * path can still reach it from several threads at once: the first through
+ * re-qualifies, the rest see the now-valid cache and short-circuit.
+ * Separate from rp_ak_reprovision_mutex -- disjoint globals, so AK
+ * certification and qualification may proceed concurrently. */
 pthread_mutex_t rp_qualification_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* Nonces received from each Verifier, indexed by verifier slot. */
 uint8_t verifier_nonces[MAX_VERIFIERS][sizeof(TPMU_HA)] = {{0}};
@@ -357,25 +334,18 @@ bool dtls_rpk_verify_peer_public_key = true;
 char* dtls_rpk_attester_public_key_path = "keys/attester.pub.der";
 char* dtls_rpk_verifier_public_key_path = "keys/verifier.pub.der";
 
-/* --- function forward declarations -------------------------------------- */
-
-/**
- * @brief SIGINT handler: set quit to 1 for graceful termination.
- *
- * @param signum the signal number.
- */
-static void handle_sigint(int signum);
-
-/* --- static variables --------------------------------------------------- */
+/* --- in-flight message state -------------------------------------------
+ * Declared in rp_shared.h; the pipeline modules in src/rp/ fill these in
+ * from their CoAP response handlers, which cannot return data. */
 
 msg_attestation_request_dto last_request = {0};
 msg_attestation_response_dto last_response = {0};
 msg_certify_ak_response_dto certify_ak_response = {0};
 
-/* --- main --------------------------------------------------------------- */
+/** @brief SIGINT/SIGTERM handler: requests graceful termination. */
+static void handle_sigint(int signum CHARRA_UNUSED) { quit = true; }
 
-
-/* --- daemon mode -------------------------------------------------------- */
+/* --- attestation cycle -------------------------------------------------- */
 
 /** Per-cycle phase timings, filled by run_one_attestation_cycle() for the
  * benchmark sweep. Daemon mode passes NULL -- it logs each phase's duration
@@ -435,20 +405,17 @@ static CHARRA_RC run_one_attestation_cycle(
     charra_log_info("[" LOG_NAME "] Phase timing: get_verifiers took %.3fs.",
             duration);
 
-    /* RP's AK certificate is no longer provisioned here: each Verifier now
-     * independently certifies (and tracks) RP's AK -- see
-     * ensure_rp_ak_certificate()'s docstring -- so it's ensured
-     * per-Verifier, inside get_attestation_results_thread(), not once here
-     * against a single verifiers[0]. */
-
-    /* The Attester's identity is FETCHed and certified by RP's own CA only
-     * once per process -- ensure_attester_identity_provisioned() itself
-     * no-ops on every call after the first. Hard fail-closed: this is RP's
-     * own local gate on the Attester's identity, so any failure here aborts
-     * the whole cycle rather than proceeding with unverified evidence. Each
-     * Verifier's OWN certificate is ensured per-Verifier instead, inside
-     * get_attestation_results_thread(), the same way RP's own AK
-     * certificate already is (see the comment above). */
+    /* Only the RP-CA leg of the Attester's identity is ensured here: it is
+     * one relationship, FETCHed and signed once per process, and the call
+     * no-ops thereafter. Fail-closed -- this is RP's own gate on the
+     * Attester's identity, so a failure aborts the cycle rather than
+     * appraising unverified evidence.
+     *
+     * Everything per-Verifier (RP's own AK certificate, and the Attester's
+     * certificate from that Verifier's CA) is ensured inside
+     * get_attestation_results_thread() instead, since Verifiers hold
+     * independent CA keys -- one certificate from verifiers[0] cannot be
+     * assumed good everywhere. */
     if ((result = ensure_attester_identity_provisioned()) !=
             CHARRA_RC_SUCCESS) {
         charra_log_error(
@@ -494,9 +461,8 @@ static CHARRA_RC run_one_attestation_cycle(
     return CHARRA_RC_SUCCESS;
 }
 
-/** sleep(), but returns within a second of SIGINT instead of up to a whole
- * interval later -- a daemon that ignores Ctrl+C for a minute is not a
- * daemon anyone wants to run in a terminal. */
+/* --- main --------------------------------------------------------------- */
+
 int main(int argc, char** argv) {
     CHARRA_RC result = EXIT_FAILURE;
 
@@ -707,44 +673,3 @@ int main(int argc, char** argv) {
     coap_cleanup();
     return EXIT_SUCCESS;
 }
-/* --- function definitions ----------------------------------------------- */
-
-static void handle_sigint(int signum CHARRA_UNUSED) { quit = true; }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/* Single, not per-port, cache file path -- qualification is Verifier-
- * agnostic now (see rp_qualified_until's comment). */
-char* rp_qualification_cache_path =
-        "state/relying-party/qualification-cache/rp-qualification-until.txt";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

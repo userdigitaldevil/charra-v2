@@ -12,6 +12,7 @@
 #include <time.h>
 
 #include <mbedtls/rsa.h>
+#include <tss2/tss2_tctildr.h>
 
 #include "../common/charra_log.h"
 #include "../common/charra_macro.h"
@@ -23,6 +24,7 @@
 #include "../util/charra_util.h"
 #include "../util/crypto_util.h"
 #include "../util/io_util.h"
+#include "rp_identity.h"
 #include "rp_shared.h"
 
 #define LOG_NAME "relying party"

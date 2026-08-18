@@ -16,26 +16,22 @@
 #include <string.h>
 #include <time.h>
 
+#include <tss2/tss2_tctildr.h>
+
 #include "../common/charra_log.h"
 #include "../common/charra_macro.h"
 #include "../core/charra_dto.h"
 #include "../core/charra_event_log.h"
+#include "../core/charra_identity_key_mgr.h"
 #include "../core/charra_marshaling.h"
 #include "../core/charra_rp_qualification.h"
 #include "../core/charra_sdk.h"
 #include "../util/io_util.h"
 #include "rp_coap.h"
+#include "rp_identity.h"
 #include "rp_shared.h"
 
 #define LOG_NAME "relying party"
-
-/* Defined below, used by the handshake above them. */
-static coap_response_t coap_qualify_response_handler(coap_session_t* session,
-        const coap_pdu_t* sent, const coap_pdu_t* received,
-        const coap_mid_t mid);
-static coap_response_t coap_qualify_submit_response_handler(
-        coap_session_t* session, const coap_pdu_t* sent,
-        const coap_pdu_t* received, const coap_mid_t mid);
 
 static coap_response_t coap_qualify_response_handler(
         coap_session_t* session CHARRA_UNUSED,

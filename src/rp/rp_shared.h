@@ -209,7 +209,6 @@ extern const bool USE_TPM_FOR_RANDOM_NONCE_GENERATION;
 extern CHARRA_RC attestation_rc;
 extern bool attestation_results[MAX_VERIFIERS];
 extern uint16_t attester_response_timeout;
-extern CHARRA_RC charra_r;
 extern char* dtls_psk_identity;
 extern char* dtls_psk_key;
 extern char* dtls_rpk_attester_public_key_path;

@@ -550,8 +550,6 @@ CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
         return result;
     }
 
-    /* --- /certify_ak request, built now while ak_name is still valid,
-     * sent AFTER the TPM connection below is closed -------------- */
     /* --- CHALLENGE request, built now while ak_name is still valid, sent
      * AFTER the TPM connection below is closed -------------------------- */
     msg_certify_ak_request_dto req = {0};
