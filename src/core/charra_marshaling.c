@@ -202,16 +202,29 @@ CHARRA_RC charra_unmarshal_attestation_request(
         goto cbor_parse_error;
     req.hello = charra_cbor_get_bool_val(&item);
 
+    /* Every length below is checked against its destination before the copy:
+     * this is unauthenticated input (the Verifier's /nonce and the Attester's
+     * /attest both decode it) and every destination is a fixed-size field of
+     * a stack-allocated req. */
+
     /* parse "key-id" (bytes) */
     if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
         goto cbor_parse_error;
     req.sig_key_id_len = item.val.string.len;
+    if (req.sig_key_id_len > sizeof(req.sig_key_id)) {
+        charra_log_error("CBOR parser: key ID exceeds maximum allowed size.");
+        goto cbor_parse_error;
+    }
     memcpy(&(req.sig_key_id), item.val.string.ptr, req.sig_key_id_len);
 
     /* parse "nonce" (bytes) */
     if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
         goto cbor_parse_error;
     req.nonce_len = item.val.string.len;
+    if (req.nonce_len > sizeof(req.nonce)) {
+        charra_log_error("CBOR parser: nonce exceeds maximum allowed size.");
+        goto cbor_parse_error;
+    }
     memcpy(&(req.nonce), item.val.string.ptr, req.nonce_len);
 
     /* parse array "pcr-selections" */
@@ -220,6 +233,11 @@ CHARRA_RC charra_unmarshal_attestation_request(
 
     /* initialize array and array length */
     req.pcr_selections_len = (uint32_t)item.val.uCount;
+    if (req.pcr_selections_len >
+            sizeof(req.pcr_selections) / sizeof(req.pcr_selections[0])) {
+        charra_log_error("CBOR parser: too many PCR selections.");
+        goto cbor_parse_error;
+    }
 
     /* go through all elements */
     for (uint32_t i = 0; i < req.pcr_selections_len; ++i) {
@@ -238,6 +256,12 @@ CHARRA_RC charra_unmarshal_attestation_request(
 
         /* initialize array and array length */
         req.pcr_selections[i].pcrs_len = (uint32_t)item.val.uCount;
+        if (req.pcr_selections[i].pcrs_len >
+                sizeof(req.pcr_selections[i].pcrs)) {
+            charra_log_error(
+                    "CBOR parser: too many PCRs in a PCR selection.");
+            goto cbor_parse_error;
+        }
 
         /* go through all elements */
         for (uint32_t j = 0; j < req.pcr_selections[i].pcrs_len; ++j) {

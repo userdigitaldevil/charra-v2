@@ -1,7 +1,9 @@
 /**
  * @file test_marshaling_bounds.c
- * @brief Standalone tests for charra_unmarshal_attestation_response()'s
- * bounds checks on attestation_data/tpm2_signature/tpm2_public_key.
+ * @brief Standalone tests for the bounds checks in
+ * charra_unmarshal_attestation_response() (attestation_data/tpm2_signature/
+ * tpm2_public_key) and charra_unmarshal_attestation_request() (key ID,
+ * nonce, and the two nested PCR-selection array lengths).
  *
  * Before the fix, these three fields were memcpy'd out of attacker-supplied
  * CBOR byte strings straight into fixed-size struct fields with no length
@@ -216,8 +218,152 @@ static void test_large_event_log_still_accepted(void) {
     free(res.event_log);
 }
 
+
+/* --- attestation REQUEST bounds -----------------------------------------
+ *
+ * Same class of bug as the response tests above, on the message the
+ * Verifier's /nonce and the Attester's /attest both decode -- and reachable
+ * without any credential, since it is parsed before anything is verified.
+ * All four fields below were copied out with no length check at all, into a
+ * stack-allocated msg_attestation_request_dto. */
+
+/**
+ * @brief Hand-encode the 5-element root array
+ * charra_marshal_attestation_request() produces, from raw buffers rather
+ * than a DTO, so a field can be made larger than its destination allows.
+ * pcr_banks/pcrs_per_bank control the two nested array lengths.
+ */
+static void encode_raw_request(const uint8_t* key_id, size_t key_id_len,
+        const uint8_t* nonce, size_t nonce_len, size_t pcr_banks,
+        size_t pcrs_per_bank, uint8_t** out, size_t* out_len) {
+    size_t cap = key_id_len + nonce_len +
+            (pcr_banks * (pcrs_per_bank + 8)) + 128;
+    uint8_t* buf = malloc(cap);
+
+    QCBOREncodeContext ec = {0};
+    QCBOREncode_Init(&ec, (UsefulBuf){.ptr = buf, .len = cap});
+    QCBOREncode_OpenArray(&ec);
+    QCBOREncode_AddBool(&ec, true);
+    QCBOREncode_AddBytes(&ec, (UsefulBufC){.ptr = key_id, .len = key_id_len});
+    QCBOREncode_AddBytes(&ec, (UsefulBufC){.ptr = nonce, .len = nonce_len});
+    QCBOREncode_OpenArray(&ec);
+    for (size_t i = 0; i < pcr_banks; ++i) {
+        QCBOREncode_OpenArray(&ec);
+        QCBOREncode_AddUInt64(&ec, 0x000B); /* TPM2_ALG_SHA256 */
+        QCBOREncode_OpenArray(&ec);
+        for (size_t j = 0; j < pcrs_per_bank; ++j) {
+            QCBOREncode_AddUInt64(&ec, j);
+        }
+        QCBOREncode_CloseArray(&ec);
+        QCBOREncode_CloseArray(&ec);
+    }
+    QCBOREncode_CloseArray(&ec);
+    QCBOREncode_AddBytes(&ec, (UsefulBufC){.ptr = NULL, .len = 0});
+    QCBOREncode_CloseArray(&ec);
+
+    UsefulBufC buf_out = {0};
+    QCBOREncode_Finish(&ec, &buf_out);
+    *out = buf;
+    *out_len = buf_out.len;
+}
+
+static void check_request_rejected(const char* name, const uint8_t* key_id,
+        size_t key_id_len, const uint8_t* nonce, size_t nonce_len,
+        size_t pcr_banks, size_t pcrs_per_bank) {
+    uint8_t* raw = NULL;
+    size_t raw_len = 0;
+    encode_raw_request(key_id, key_id_len, nonce, nonce_len, pcr_banks,
+            pcrs_per_bank, &raw, &raw_len);
+
+    msg_attestation_request_dto res = {0};
+    CHARRA_RC rc =
+            charra_unmarshal_attestation_request((uint32_t)raw_len, raw, &res);
+    check(name, rc == CHARRA_RC_MARSHALING_ERROR);
+
+    free(raw);
+    free(res.event_log_path);
+}
+
+static void test_request_at_exact_boundary_accepted(void) {
+    printf("\na request with every field at exactly its max size is accepted\n");
+
+    msg_attestation_request_dto probe = {0};
+    uint8_t key_id[sizeof(probe.sig_key_id)];
+    memset(key_id, 0x5A, sizeof(key_id));
+    uint8_t nonce[sizeof(probe.nonce)];
+    memset(nonce, 0xA5, sizeof(nonce));
+    const size_t max_banks =
+            sizeof(probe.pcr_selections) / sizeof(probe.pcr_selections[0]);
+    const size_t max_pcrs = sizeof(probe.pcr_selections[0].pcrs);
+
+    uint8_t* raw = NULL;
+    size_t raw_len = 0;
+    encode_raw_request(key_id, sizeof(key_id), nonce, sizeof(nonce), max_banks,
+            max_pcrs, &raw, &raw_len);
+
+    msg_attestation_request_dto res = {0};
+    CHARRA_RC rc =
+            charra_unmarshal_attestation_request((uint32_t)raw_len, raw, &res);
+    check("accepted", rc == CHARRA_RC_SUCCESS);
+    check("key ID round-trips",
+            res.sig_key_id_len == sizeof(key_id) &&
+                    memcmp(res.sig_key_id, key_id, sizeof(key_id)) == 0);
+    check("nonce round-trips",
+            res.nonce_len == sizeof(nonce) &&
+                    memcmp(res.nonce, nonce, sizeof(nonce)) == 0);
+    check("PCR selections round-trip", res.pcr_selections_len == max_banks &&
+                                               res.pcr_selections[0].pcrs_len ==
+                                                       max_pcrs);
+
+    free(raw);
+    free(res.event_log_path);
+}
+
+static void test_oversized_request_key_id_rejected(void) {
+    printf("\na key ID one byte over its max size is rejected, not overflowed\n");
+
+    uint8_t oversized[sizeof(((msg_attestation_request_dto*)0)->sig_key_id) + 1];
+    memset(oversized, 0x41, sizeof(oversized));
+    uint8_t nonce[8] = {0};
+    check_request_rejected("rejected with CHARRA_RC_MARSHALING_ERROR",
+            oversized, sizeof(oversized), nonce, sizeof(nonce), 1, 4);
+}
+
+static void test_oversized_request_nonce_rejected(void) {
+    printf("\na nonce one byte over its max size is rejected, not overflowed\n");
+
+    uint8_t key_id[8] = {0};
+    uint8_t oversized[sizeof(((msg_attestation_request_dto*)0)->nonce) + 1];
+    memset(oversized, 0x42, sizeof(oversized));
+    check_request_rejected("rejected with CHARRA_RC_MARSHALING_ERROR", key_id,
+            sizeof(key_id), oversized, sizeof(oversized), 1, 4);
+}
+
+static void test_too_many_pcr_selections_rejected(void) {
+    printf("\none PCR selection too many is rejected, not overflowed\n");
+
+    msg_attestation_request_dto probe = {0};
+    uint8_t key_id[8] = {0};
+    uint8_t nonce[8] = {0};
+    check_request_rejected("rejected with CHARRA_RC_MARSHALING_ERROR", key_id,
+            sizeof(key_id), nonce, sizeof(nonce),
+            (sizeof(probe.pcr_selections) / sizeof(probe.pcr_selections[0])) + 1,
+            4);
+}
+
+static void test_too_many_pcrs_per_selection_rejected(void) {
+    printf("\none PCR too many inside a selection is rejected, not overflowed\n");
+
+    msg_attestation_request_dto probe = {0};
+    uint8_t key_id[8] = {0};
+    uint8_t nonce[8] = {0};
+    check_request_rejected("rejected with CHARRA_RC_MARSHALING_ERROR", key_id,
+            sizeof(key_id), nonce, sizeof(nonce), 1,
+            sizeof(probe.pcr_selections[0].pcrs) + 1);
+}
+
 int main(void) {
-    printf("Attestation response marshaling bounds-check tests\n");
+    printf("Attestation message marshaling bounds-check tests\n");
     printf("====================================================\n");
 
     test_legitimate_message_at_exact_boundary_size();
@@ -225,6 +371,11 @@ int main(void) {
     test_oversized_tpm2_signature_rejected();
     test_oversized_tpm2_public_key_rejected();
     test_large_event_log_still_accepted();
+    test_request_at_exact_boundary_accepted();
+    test_oversized_request_key_id_rejected();
+    test_oversized_request_nonce_rejected();
+    test_too_many_pcr_selections_rejected();
+    test_too_many_pcrs_per_selection_rejected();
 
     printf("\n====================================================\n");
     printf("%u tests, %u failed\n", tests_run, tests_failed);
