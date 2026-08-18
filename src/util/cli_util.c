@@ -25,6 +25,8 @@
 #include "io_util.h"
 #include <errno.h>
 #include <getopt.h>
+#include <limits.h>
+#include <stdbool.h>
 #include <stdlib.h>
 
 /* command line argument handling */
@@ -60,6 +62,20 @@ static const struct option attester_options[] = {
         {"verify-peer", required_argument, 0, '4'},
         {"port", required_argument, 0, 'b'}, {0}};
 
+/* Which options actually appeared on the command line, indexed by their
+ * getopt identifier -- lets a caller tell "you chose this" from "this is the
+ * built-in default" when echoing its configuration. Parsing never reads it. */
+static bool cli_flag_given[UCHAR_MAX + 1] = {false};
+
+bool charra_cli_flag_was_given(int identifier) {
+    return identifier >= 0 && identifier <= UCHAR_MAX &&
+           cli_flag_given[(unsigned char)identifier];
+}
+
+const char* charra_cli_default_tag(int identifier) {
+    return charra_cli_flag_was_given(identifier) ? "" : " (default)";
+}
+
 int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
     cli_parser_caller caller = variables->caller;
     char* log_name;
@@ -77,7 +93,13 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
 
         if (identifier == -1) {
             return 0;  // end of command line arguments reached
-        } else if (identifier == '0' || identifier == '?') {
+        }
+        /* Recorded before the dispatch below so one line covers every
+         * option, rather than a statement in each branch. */
+        if (identifier >= 0 && identifier <= UCHAR_MAX) {
+            cli_flag_given[(unsigned char)identifier] = true;
+        }
+        if (identifier == '0' || identifier == '?') {
             // print help message
             printf("\nUsage: %s [OPTIONS]\n", log_name);
             printf("     --help:                     Print this help "

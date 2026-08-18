@@ -99,4 +99,13 @@ void charra_log_log_raw(charra_log_t level, const char* fmt, ...);
 int charra_log_level_from_str(
         const char* log_level_str, charra_log_t* log_level);
 
+/**
+ * @brief The name of a CHARRA log level -- the counterpart to
+ * charra_log_level_from_str(), for echoing an effective configuration back.
+ *
+ * @param[in] log_level the level to name.
+ * @return its name, or "UNKNOWN" if it is not a valid level.
+ */
+const char* charra_log_level_to_str(charra_log_t log_level);
+
 #endif /* CHARRA_LOG_H */

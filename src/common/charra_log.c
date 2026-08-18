@@ -184,3 +184,10 @@ int charra_log_level_from_str(
 
     return -1;
 }
+
+const char* charra_log_level_to_str(charra_log_t log_level) {
+    if (log_level < CHARRA_LOG_TRACE || log_level > CHARRA_LOG_FATAL) {
+        return "UNKNOWN";
+    }
+    return charra_level_names[log_level];
+}

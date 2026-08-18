@@ -97,3 +97,20 @@ arguments.
 * @return 0 on success, -1 on parse error, 1 when help message was displayed
 */
 int parse_command_line_arguments(int argc, char** argv, cli_config* variables);
+
+/**
+ * @brief Did this option actually appear on the command line?
+ *
+ * Only meaningful after parse_command_line_arguments() has run. Lets a
+ * caller distinguish a value the user chose from one left at its built-in
+ * default when logging its effective configuration.
+ *
+ * @param identifier the option's getopt identifier, e.g. 'b' for --port.
+ */
+bool charra_cli_flag_was_given(int identifier);
+
+/**
+ * @brief " (default)" when the option was not given, "" when it was --
+ * intended to be appended directly to a logged value.
+ */
+const char* charra_cli_default_tag(int identifier);
