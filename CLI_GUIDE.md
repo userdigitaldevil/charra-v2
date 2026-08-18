@@ -144,9 +144,15 @@ bin/verifier --port 5684 [OPTIONS]
 | `--port=PORT` | 31415 | **Port to listen on** |
 | `--qualification-validity=SECONDS` | 300 | How long a passed RP qualification stays valid |
 | `--ak-validity=SECONDS` | 315360000 (10y) | Lifetime of AK certs **this Verifier** issues, from issuance |
-| `-f`, `--pcr-file=PATH` | `reference-pcrs.txt` | Reference PCRs |
-| `-s`, `--pcr-selection=X1[,X2…]` | 0,1,2,3,4,5,6,7,10 | PCRs to check, ascending, no spaces |
-| `--ima[=PATH]` | kernel IMA log | Request an IMA event log |
+| `-f`, `--pcr-file=PATH` | `reference-pcrs.txt` | Reference PCRs. **Vestigial** — see below |
+| `-s`, `--pcr-selection=X1[,X2…]` | 0,1,2,3,4,5,6,7,10 | PCRs to check. **Vestigial** — see below |
+| `--ima[=PATH]` | kernel IMA log | Request an IMA event log. **Vestigial** — see below |
+
+> These three parse and set their variables, but nothing in this Verifier
+> reads them. Log-content verification (self-consistency, PCR replay,
+> file-hash policy) is deliberately the **RP's** Step 2a gate, run against
+> the raw log before cleansing — the Verifier only ever sees the redacted
+> `log_r`. Inherited from upstream CHARRA, where the Verifier did this work.
 
 > The help text says "*Connect to* PORT" — inherited from upstream, where the
 > Verifier was the client. This Verifier is passive: `--port` is the **listen**

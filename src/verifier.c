@@ -16,18 +16,9 @@
 #include "common/charra_macro.h"
 #include "core/charra_ak_state.h"
 #include "core/charra_dto.h"
-#include "core/charra_helper.h"
-#include "core/charra_key_mgr.h"
-#include "core/charra_marshaling.h"
-#include "core/charra_qualification_state.h"
 #include "core/charra_rp_qualification.h"
-#include "util/cbor_util.h"
-#include "util/charra_util.h"
 #include "util/cli_util.h"
 #include "util/coap_util.h"
-#include "util/io_util.h"
-#include "util/tpm2_util.h"
-#include "util/crypto_util.h"
 #include "verifier/verifier_appraise.h"
 #include "verifier/verifier_certify_ak.h"
 #include "verifier/verifier_nonce.h"
@@ -111,7 +102,7 @@ char* manufacturer_root_cert_path = "keys/manufacturer-root.crt";
  * genuine key material isolation, not just independent ledgers: a
  * compromised or unavailable Verifier's CA no longer affects any other
  * Verifier's ability to issue or validate certificates. Computed once port
- * is known, same mechanism as ak_state_file_path_buf below. */
+ * is known, same mechanism as the two *_ak_state_file_path_buf below. */
 static char verifier_ca_cert_path_buf[64] = {0};
 char* verifier_ca_cert_path = "keys/verifier-ca.crt";
 static char verifier_ca_key_path_buf[64] = {0};

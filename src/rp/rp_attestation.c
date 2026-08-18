@@ -963,7 +963,7 @@ void* get_attestation_results_thread(void *arg) {
      * for its own separate Quote_a freshness check -- then generates and
      * returns its own fresh challenge as the response body, a genuinely
      * Verifier-picked value rather than an echo of what RP just sent (see
-     * verifier_challenge_nonce's comment in verifier.c for why that
+     * verifier_challenge_nonce's comment in verifier/verifier_shared.h for why that
      * distinction matters). An empty request body here made unmarshaling
      * fail immediately ("Could not get CoAP PDU data"), which is why RP
      * never received a nonce and Quote_r could never be built, before this
@@ -1341,7 +1341,7 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
 
     /* Qualify once, before any verifier thread starts -- the qualification
      * ledger is shared across all Verifiers (see qualification_state_file_
-     * path in verifier.c), so one Verifier's answer is every Verifier's
+     * path in verifier/verifier_shared.h), so one Verifier's answer is every Verifier's
      * answer. No Verifier will accept /appraise without it, so abort here
      * rather than spawning threads that would all fail identically. */
     rp_num_verifiers_this_cycle = num_verifiers;
