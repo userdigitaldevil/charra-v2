@@ -202,109 +202,6 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
     int* current_thread_index = coap_session_get_app_data(session);
     processing_appraisal_response[*current_thread_index] = true;
 
-    rp_ak_cert_rejected[*current_thread_index] = false;
-    rp_qualification_rejected[*current_thread_index] = false;
-    attester_ak_cert_rejected[*current_thread_index] = false;
-
-    if (coap_pdu_get_code(received) == COAP_RESPONSE_CODE_UNAUTHORIZED) {
-        /* Verifier rejected our AK certificate specifically (see
-         * verifier.c's coap_appraise_handler, Step 3a item 1), not the
-         * evidence itself -- signal the caller to re-provision via
-         * /certify_ak and retry, rather than just recording a failed
-         * vote a blind retry could never fix. */
-        charra_log_info("[" LOG_NAME "] Verifier n° %d (port %u) rejected "
-                        "our AK certificate as invalid or expired.",
-                *current_thread_index + 1,
-                verifiers[*current_thread_index].port_number);
-        snprintf(rejection_reason[*current_thread_index],
-                sizeof(rejection_reason[*current_thread_index]),
-                "AK certificate rejected as invalid or expired");
-        rp_ak_cert_rejected[*current_thread_index] = true;
-        attestation_results[*current_thread_index] = false;
-        goto cleanup;
-    }
-
-    if (coap_pdu_get_code(received) == COAP_RESPONSE_CODE_FORBIDDEN) {
-        /* Verifier rejected our qualification specifically (see verifier.c's
-         * coap_appraise_handler, Step 3a item 1b) -- either we never
-         * qualified with it, or a grant we thought was still valid (per our
-         * own local cache, rp_qualified_until) has expired on its end.
-         * Either way, the message text says which; log it, then signal the
-         * caller to invalidate the local cache, redo /qualify +
-         * /qualify/submit, and retry -- same one-retry pattern as the AK
-         * certificate case above. */
-        size_t forbidden_data_len = 0;
-        const uint8_t* forbidden_data = NULL;
-        size_t forbidden_data_offset = 0;
-        size_t forbidden_data_total_len = 0;
-        if (coap_get_data_large(received, &forbidden_data_len,
-                    &forbidden_data, &forbidden_data_offset,
-                    &forbidden_data_total_len) != 0) {
-            charra_log_info("[" LOG_NAME "] Verifier n° %d (port %u): %.*s",
-                    *current_thread_index + 1,
-                    verifiers[*current_thread_index].port_number,
-                    (int)forbidden_data_len, (const char*)forbidden_data);
-            int n = (int)forbidden_data_len <
-                                    (int)sizeof(
-                                            rejection_reason[0]) - 1
-                            ? (int)forbidden_data_len
-                            : (int)sizeof(rejection_reason[0]) - 1;
-            snprintf(rejection_reason[*current_thread_index],
-                    sizeof(rejection_reason[*current_thread_index]), "%.*s",
-                    n, (const char*)forbidden_data);
-        } else {
-            charra_log_info("[" LOG_NAME "] Verifier n° %d (port %u) "
-                            "rejected our qualification.",
-                    *current_thread_index + 1,
-                    verifiers[*current_thread_index].port_number);
-            snprintf(rejection_reason[*current_thread_index],
-                    sizeof(rejection_reason[*current_thread_index]),
-                    "qualification rejected");
-        }
-        rp_qualification_rejected[*current_thread_index] = true;
-        attestation_results[*current_thread_index] = false;
-        goto cleanup;
-    }
-
-    if (coap_pdu_get_code(received) ==
-            COAP_RESPONSE_CODE_PRECONDITION_FAILED) {
-        /* The ATTESTER's AK certificate, issued by this Verifier, is
-         * invalid or expired (Step 3b item 1) -- not RP's own identity and
-         * not the evidence. Re-run /certify_ak_of_attester for this
-         * Verifier and resubmit once, the same shape as the 4.01 path. */
-        charra_log_info("[" LOG_NAME "] Verifier n° %d (port %u) rejected the "
-                        "Attester's AK certificate as invalid or expired.",
-                *current_thread_index + 1,
-                verifiers[*current_thread_index].port_number);
-        snprintf(rejection_reason[*current_thread_index],
-                sizeof(rejection_reason[*current_thread_index]),
-                "Attester AK certificate rejected as invalid or expired");
-        attester_ak_cert_rejected[*current_thread_index] = true;
-        attestation_results[*current_thread_index] = false;
-        goto cleanup;
-    }
-
-    if (coap_pdu_get_code(received) == COAP_RESPONSE_CODE_BAD_REQUEST) {
-        /* The Verifier rejected the request before appraising it at all
-         * (malformed payload, unparseable evidence, or a Verifier-side
-         * error). It answers 4.00 with no body -- the specifics are in its
-         * own log, deliberately not on the wire -- so record that it DID
-         * answer. Without this the empty body would look like no response
-         * and the summary would call a responding Verifier unreachable.
-         * Not retried: a request it could not parse will not parse on a
-         * second identical attempt. */
-        charra_log_error("[" LOG_NAME "] Verifier n\u00b0 %d (port %u) "
-                         "rejected the request before appraisal (4.00); see "
-                         "that Verifier's log for the reason.",
-                *current_thread_index + 1,
-                verifiers[*current_thread_index].port_number);
-        snprintf(rejection_reason[*current_thread_index],
-                sizeof(rejection_reason[*current_thread_index]),
-                "rejected before appraisal (4.00) -- see Verifier log");
-        attestation_results[*current_thread_index] = false;
-        goto cleanup;
-    }
-
     int coap_r = 0;
     size_t data_len = 0;
     const uint8_t* data = NULL;
@@ -1220,24 +1117,10 @@ void* get_attestation_results_thread(void *arg) {
     coap_session_set_ack_timeout(coap_session_verifier_appraisal, coap_timeout_v);
     coap_session_set_app_data(coap_session_verifier_appraisal, &current_thread_index);
 
-    /* Build and marshal the RP evidence message (Quote_r bound to this
-     * Verifier's nonce, the RP public key, log_r, the nonce the RP sent to
-     * the Attester, and the Attester's evidence minus its raw event log),
-     * send it, and wait for the Verifier's response. Retried once if the
-     * Verifier's only complaint was our AK certificate being invalid or
-     * expired (see coap_verifier_handler_appraisal and verifier.c's Step 3a
-     * item 1): re-provision via /certify_ak and try again with a fresh
-     * certificate, rather than just recording a failed vote a blind retry
-     * could never fix. Retried the same way if the complaint was instead
-     * our qualification being missing or expired (Step 3a item 1b): forget
-     * the local cache and redo /qualify + /qualify/submit. The two never
-     * overlap in one response (coap_appraise_handler checks the AK
-     * certificate first and returns immediately on failure, before ever
-     * reaching the qualification check), so at most one of
-     * rp_ak_cert_rejected/rp_qualification_rejected is ever true here. Not
-     * retried for any other kind of failure. */
+    /* One attempt: the Verifier's answer is a vote, not an
+     * instruction to retry. */
     long total_appraisal_wait_ms = 0;
-    for (int attempt = 0; attempt < 2; ++attempt) {
+    {
         charra_free_if_not_null(res_buf);
         res_buf = NULL;
         res_buf_len = 0;
@@ -1310,67 +1193,6 @@ void* get_attestation_results_thread(void *arg) {
         total_appraisal_wait_ms += (long)elapsed_ms_v;
         verifier_latency_ms[current_thread_index] = total_appraisal_wait_ms;
 
-        bool rejected = rp_ak_cert_rejected[current_thread_index] ||
-                        rp_qualification_rejected[current_thread_index] ||
-                        attester_ak_cert_rejected[current_thread_index];
-        if (!rejected || attempt == 1) {
-            break;
-        }
-
-        if (rp_ak_cert_rejected[current_thread_index]) {
-            charra_log_info("[" LOG_NAME "] Re-provisioning RP AK "
-                            "certificate after rejection by Verifier n\u00b0 "
-                            "%d (reason: %s) ...",
-                    current_thread_index + 1,
-                    rejection_reason[current_thread_index]);
-            invalidate_cached_rp_ak_certificate(current_thread_index);
-            CHARRA_RC reprovision_rc =
-                    ensure_rp_ak_certificate(current_thread_index);
-
-            if (reprovision_rc != CHARRA_RC_SUCCESS) {
-                charra_log_error(
-                        "[" LOG_NAME "] Could not re-provision RP AK "
-                        "certificate; giving up on Verifier n\u00b0 %d.",
-                        current_thread_index + 1);
-                break;
-            }
-        } else if (attester_ak_cert_rejected[current_thread_index]) {
-            charra_log_info("[" LOG_NAME "] Re-provisioning the Attester's AK "
-                            "certificate after rejection by Verifier n\u00b0 "
-                            "%d (reason: %s) ...",
-                    current_thread_index + 1,
-                    rejection_reason[current_thread_index]);
-            invalidate_cached_attester_ak_certificate(current_thread_index);
-            CHARRA_RC recertify_rc =
-                    ensure_attester_identity_certified_by_verifier(
-                            current_thread_index);
-
-            if (recertify_rc != CHARRA_RC_SUCCESS) {
-                charra_log_error(
-                        "[" LOG_NAME "] Could not re-provision the Attester's "
-                        "AK certificate; giving up on Verifier n\u00b0 %d.",
-                        current_thread_index + 1);
-                break;
-            }
-        } else {
-            charra_log_info("[" LOG_NAME "] Re-qualifying with Verifier "
-                            "n\u00b0 %d after rejection (reason: %s) ...",
-                    current_thread_index + 1,
-                    rejection_reason[current_thread_index]);
-            invalidate_cached_rp_qualification();
-            /* Margin 0: the cache was just invalidated above, so this must
-             * qualify now regardless of any renewal-window policy. */
-            CHARRA_RC requalify_rc = rp_perform_qualification_handshake_once(
-                    rp_num_verifiers_this_cycle, 0);
-
-            if (requalify_rc != CHARRA_RC_SUCCESS) {
-                charra_log_error(
-                        "[" LOG_NAME "] Could not re-qualify; giving up on "
-                        "Verifier n\u00b0 %d.",
-                        current_thread_index + 1);
-                break;
-            }
-        }
     }
 
     result = attestation_rc;

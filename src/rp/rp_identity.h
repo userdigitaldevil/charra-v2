@@ -25,10 +25,6 @@ CHARRA_RC ensure_rp_ak_keypair(void);
  */
 CHARRA_RC ensure_rp_ak_certificate(int verifier_index);
 
-/** @brief Drop the cached certificate for one Verifier (memory and disk) so
- * the next ensure_rp_ak_certificate() genuinely re-provisions. Used after
- * that Verifier rejects the certificate as invalid or expired. */
-void invalidate_cached_rp_ak_certificate(int verifier_index);
 
 /** @brief One /certify_ak round trip; req->kind selects CHALLENGE or
  * CONFIRM. Serialised on rp_ak_reprovision_mutex, which guards the shared

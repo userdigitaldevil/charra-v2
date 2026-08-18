@@ -36,11 +36,6 @@ CHARRA_RC ensure_attester_identity_provisioned(void);
  */
 CHARRA_RC ensure_attester_identity_certified_by_verifier(int verifier_index);
 
-/** @brief Drop the cached Attester AK certificate for one Verifier (memory
- * and disk) so the next ensure_attester_identity_certified_by_verifier()
- * genuinely re-runs the relay. Used when that Verifier rejects the
- * certificate as invalid or expired (4.12). */
-void invalidate_cached_attester_ak_certificate(int verifier_index);
 
 /**
  * @brief Send RP's Step 2a verdict to the Attester (/attest_result).

@@ -53,7 +53,7 @@
  * A mismatch is self-correcting rather than fatal, which is why this is a
  * flag on both sides instead of a wire-format change: if the RP over-
  * estimates, the Verifier rejects the next `/appraise` with "qualification
- * expired" and RP's existing retry path (see rp_qualification_rejected)
+ * expired" (the Verifier records this; RP simply votes on the result)
  * re-qualifies and resubmits; if it under-estimates, it merely re-qualifies
  * earlier than it had to.
  */

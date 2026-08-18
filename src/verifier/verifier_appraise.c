@@ -773,8 +773,12 @@ void coap_appraise_handler(struct coap_resource_t* resource,
 #undef LOG_REASON
     }
 
+    /* One uniform answer: pass or fail. The Verifier's decision is a vote,
+     * not a work order -- it does not tell the RP which remedy to attempt,
+     * and the RP does not retry on its say-so. Which checks failed, and
+     * why, is in this Verifier's own log (the reason list above); the wire
+     * carries only the verdict. */
     const char* message;
-    coap_pdu_code_t response_code = COAP_RESPONSE_CODE_CONTENT;
     /* print attestation result */
     charra_log_info("[" LOG_NAME "] +----------------------------+");
     charra_log_info("[" LOG_NAME "]   RP identity: %s...",
@@ -784,66 +788,27 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         attestation_rc = CHARRA_RC_SUCCESS;
         message = "Attestation successful!\0";
         charra_log_info("[" LOG_NAME "] |   ATTESTATION SUCCESSFUL   |");
-    } else if (!attestation_result_ekak_rp) {
-        /* Distinct from any other appraisal failure: RP's OWN AK
-         * certificate (Step 3a item 1) failed to chain-verify, or chained
-         * fine but is expired/revoked (charra_ak_state_check_serial_valid()).
-         * Signalled with 4.01 Unauthorized -- the same code /certify_ak
-         * itself already uses for a bad EK certificate -- so RP can tell
-         * "go redo /certify_ak and retry" apart from "your evidence itself
-         * didn't check out," which a blind retry can never fix. */
-        attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
-        message = "RP AK certificate invalid or expired!\0";
-        response_code = COAP_RESPONSE_CODE_UNAUTHORIZED;
-        charra_log_info("[" LOG_NAME "] |  RP AK CERTIFICATE REJECTED  |");
-    } else if (!attestation_result_qualified) {
-        /* Also distinct: the RP's AK certificate itself is fine, but this
-         * specific identity hasn't passed /qualify + /qualify/submit
-         * against THIS Verifier recently (see charra_qualification_
-         * state.h). Deliberately 4.03 Forbidden, not 4.01 -- RP's retry
-         * logic treats 4.01 as "go redo /certify_ak", which would be the
-         * wrong reaction here; the fix is redoing /qualify, not AK
-         * reprovisioning. Same response code either way (both mean "not
-         * currently qualified, go fix that"), but the message text tells
-         * RP which case it is -- "expired" specifically means it WAS
-         * qualified and should just redo /qualify, not that something is
-         * fundamentally wrong with its identity. */
-        attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
-        response_code = COAP_RESPONSE_CODE_FORBIDDEN;
-        if (qualification_record_found) {
-            message = "RP qualification expired!\0";
-            charra_log_info("[" LOG_NAME "] |  RP QUALIFICATION EXPIRED  |");
-        } else {
-            message = "RP not qualified!\0";
-            charra_log_info("[" LOG_NAME "] |     RP NOT QUALIFIED       |");
-        }
-    } else if (!attestation_result_ekak) {
-        /* Third distinct signal, and the Step 3b counterpart of the 4.01
-         * above: RP's own identity is fine, but the ATTESTER's AK
-         * certificate -- the one this Verifier issued and RP forwards --
-         * is empty, unverifiable, expired or revoked. Without its own code
-         * this folded into the generic failure below, which RP cannot act
-         * on: it would resend the same dead certificate every cycle
-         * forever, since nothing would ever invalidate its cache. 4.12
-         * Precondition Failed, distinct from 4.01 (redo /certify_ak for
-         * RP) and 4.03 (redo /qualify), tells RP to redo
-         * /certify_ak_of_attester for THIS Verifier and retry once.
-         * Every other Step 3b check still ran and is logged above; only
-         * the response code is specialised. */
-        attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
-        message = "Attester AK certificate invalid or expired!\0";
-        response_code = COAP_RESPONSE_CODE_PRECONDITION_FAILED;
-        charra_log_info(
-                "[" LOG_NAME "] | ATTESTER AK CERT REJECTED  |");
     } else {
+        /* Banner names the first failing check, so a log skimmer sees the
+         * headline cause; the full list is logged above either way. */
         attestation_rc = CHARRA_RC_VERIFICATION_FAILED;
         message = "Attestation failed!    \0";
-        charra_log_info("[" LOG_NAME "] |     ATTESTATION FAILED     |");
+        if (!attestation_result_ekak_rp) {
+            charra_log_info("[" LOG_NAME "] | RP AK CERTIFICATE REJECTED |");
+        } else if (!attestation_result_qualified) {
+            charra_log_info(qualification_record_found
+                            ? "[" LOG_NAME "] |  RP QUALIFICATION EXPIRED  |"
+                            : "[" LOG_NAME "] |     RP NOT QUALIFIED       |");
+        } else if (!attestation_result_ekak) {
+            charra_log_info("[" LOG_NAME "] | ATTESTER AK CERT REJECTED  |");
+        } else {
+            charra_log_info("[" LOG_NAME "] |     ATTESTATION FAILED     |");
+        }
     }
     charra_log_info("[" LOG_NAME "] +----------------------------+");
 
     verdict_reached = true;
-    coap_pdu_set_code(response, response_code);
+    coap_pdu_set_code(response, COAP_RESPONSE_CODE_CONTENT);
     
     end_appraise = clock();
     appraise_duration = ((double) (end_appraise - start_appraise)) / CLOCKS_PER_SEC;
@@ -874,7 +839,13 @@ cleanup:
          * 4.00 status and nothing more. */
         charra_log_error("[" LOG_NAME "] Voting NO (no appraisal). Reason: %s",
                 why);
-        coap_pdu_set_code(response, COAP_RESPONSE_CODE_BAD_REQUEST);
+        /* Same shape as any other NO: the RP sees a failed vote, not a
+         * distinct status it would have to interpret. */
+        static const char failed_msg[] = "Attestation failed!    ";
+        coap_pdu_set_code(response, COAP_RESPONSE_CODE_CONTENT);
+        coap_add_data_large_response(resource, session, request, response,
+                query, COAP_MEDIATYPE_APPLICATION_OCTET_STREAM, -1, 0,
+                strlen(failed_msg), (const uint8_t*)failed_msg, NULL, NULL);
     }
 
     /* close duration log file -- every path through this function reaches

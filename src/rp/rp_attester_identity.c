@@ -579,23 +579,6 @@ static CHARRA_RC ensure_attester_identity_fetched(void) {
     return CHARRA_RC_SUCCESS;
 }
 
-/** @brief See rp_attester_identity.h. */
-void invalidate_cached_attester_ak_certificate(int verifier_index) {
-    char cert_path[112] = {0};
-    snprintf(cert_path, sizeof(cert_path),
-            "state/relying-party/attester-ak-certificates/"
-            "attester-ak-certificate-verifier-%u.der",
-            verifiers[verifier_index].port_number);
-    if (remove(cert_path) != 0 && errno != ENOENT) {
-        charra_log_warn("[" LOG_NAME "] Could not remove '%s': %s.", cert_path,
-                strerror(errno));
-    }
-    charra_free_if_not_null(attester_ak_cert_by_verifier_der[verifier_index]);
-    attester_ak_cert_by_verifier_der[verifier_index] = NULL;
-    attester_ak_cert_by_verifier_der_len[verifier_index] = 0;
-    attester_ak_cert_by_verifier_ready[verifier_index] = false;
-}
-
 CHARRA_RC ensure_attester_identity_certified_by_verifier(
         int verifier_index) {
     if (attester_ak_cert_by_verifier_ready[verifier_index]) {

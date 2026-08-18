@@ -178,19 +178,6 @@ error:
     return result;
 }
 
-void invalidate_cached_rp_ak_certificate(int verifier_index) {
-    char cert_path[96] = {0};
-    snprintf(cert_path, sizeof(cert_path),
-            "state/relying-party/ak-certificates/rp-ak-certificate-%u.der",
-            verifiers[verifier_index].port_number);
-    remove(cert_path);
-    charra_free_if_not_null(rp_ak_cert_der[verifier_index]);
-    rp_ak_cert_der[verifier_index] = NULL;
-    rp_ak_cert_der_len[verifier_index] = 0;
-    rp_ak_cert_ready[verifier_index] = false;
-    rp_ak_cert_was_cached[verifier_index] = false;
-}
-
 CHARRA_RC ensure_rp_ak_keypair(void) {
     pthread_mutex_lock(&rp_tpm_mutex);
     if (rp_ak_keypair_ready) {

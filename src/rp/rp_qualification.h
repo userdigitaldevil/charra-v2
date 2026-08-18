@@ -29,8 +29,5 @@
 CHARRA_RC rp_perform_qualification_handshake_once(
         int num_verifiers, time_t refresh_margin_seconds);
 
-/** @brief Forget the cached grant (in memory and on disk) so the next
- * handshake genuinely re-qualifies. Used after a Verifier rejects us. */
-void invalidate_cached_rp_qualification(void);
 
 #endif /* CHARRA_RP_QUALIFICATION_CLIENT_H */

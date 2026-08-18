@@ -144,11 +144,6 @@ static void rp_qualification_cache_save(time_t expires_at) {
     fclose(f);
 }
 
-void invalidate_cached_rp_qualification(void) {
-    remove(rp_qualification_cache_path);
-    rp_qualified_until = 0;
-}
-
 CHARRA_RC rp_perform_qualification_handshake_once(
         int num_verifiers, time_t refresh_margin_seconds) {
     /* AK certificate readiness is orthogonal to the qualification cache

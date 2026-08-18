@@ -73,16 +73,6 @@ bool processing_trust_manager_response = false;
  * way for the same reason. */
 int verifier_list[MAX_VERIFIERS];
 bool attestation_results[MAX_VERIFIERS];
-/* Set by coap_verifier_handler_appraisal() when a Verifier's /appraise
- * response is specifically "your AK certificate is invalid or expired"
- * (4.01 Unauthorized), as opposed to any other appraisal failure --
- * distinguishes "go redo /certify_ak and retry" from a plain failed vote. */
-bool rp_ak_cert_rejected[MAX_VERIFIERS];
-/* Set when a Verifier answers /appraise with 4.12 Precondition Failed: the
- * ATTESTER's AK certificate (the one that Verifier issued) is invalid or
- * expired. Distinct from rp_ak_cert_rejected above, which is about RP's own
- * certificate -- the two need opposite fixes. */
-bool attester_ak_cert_rejected[MAX_VERIFIERS];
 /* Summary-report only: was_cached (cert reused vs. freshly /certify_ak'd),
  * appraisal round-trip latency, and rejection reason text. */
 bool rp_ak_cert_was_cached[MAX_VERIFIERS];
@@ -287,15 +277,6 @@ time_t rp_qualified_until = 0;
  * results_thread()'s arg), so the retry-on-rejection path reads this
  * instead of a parameter. */
 int rp_num_verifiers_this_cycle = 0;
-/* Set by coap_verifier_handler_appraisal() when a Verifier's /appraise
- * response is 4.03 Forbidden specifically because our qualification is
- * missing or expired (as opposed to 4.01 Unauthorized for a bad AK
- * certificate, see rp_ak_cert_rejected) -- signals
- * get_attestation_results_thread()'s retry loop to invalidate the cache
- * above, redo the handshake, and resubmit once. Still per-Verifier: it's
- * whichever Verifier's /appraise response we're reacting to, even though
- * the underlying cache it invalidates is now global. */
-bool rp_qualification_rejected[MAX_VERIFIERS];
 /* Guards every TPM connection RP opens (provisioning and, later, each
  * Quote_r signing operation): the TPM simulator this dev environment uses
  * accepts only one client connection at a time, and every other binary
