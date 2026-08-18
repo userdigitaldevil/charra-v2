@@ -71,12 +71,6 @@ static inline bool charra_cert_needs_renewal(time_t expires_at) {
     return expires_at <= time(NULL) + rp_ak_renew_margin_s;
 }
 
-/** @brief Absolute expiry of a parsed certificate, derived from its
- * days-until-expiry so the whole codebase agrees on one calculation. */
-static inline time_t charra_cert_expiry_time(const mbedtls_x509_crt* cert) {
-    return charra_crypto_x509_expiry_time(cert);
-}
-
 /* --- daemon-mode config (see parse_rp_command_line()) -------------------
  * RP's default mode is a long-running loop: attest, renew qualification if
  * it is close to expiring, sleep, repeat -- until SIGINT. `--benchmark`
@@ -220,8 +214,6 @@ extern bool processing_certify_ak_of_attester_deliver_response;
 extern char* attester_ak_cert_rp_cache_path;
 extern char* rp_ca_key_path;
 extern char* manufacturer_root_cert_path;
-extern const char* attester_ak_cert_not_before_utc;
-extern const char* attester_ak_cert_not_after_utc;
 
 
 /* --- RP's own identity -------------------------------------------------- */
@@ -271,7 +263,6 @@ extern bool processing_appraisal_response[MAX_VERIFIERS];
 extern bool processing_attestation_response;
 extern bool processing_nonce_response[MAX_VERIFIERS];
 extern bool processing_trust_manager_response;
-extern char rejection_reason[MAX_VERIFIERS][128];
 extern int rp_num_verifiers_this_cycle;
 extern char trust_manager_host[16];
 extern unsigned int trust_manager_port;

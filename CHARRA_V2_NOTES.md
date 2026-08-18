@@ -1995,7 +1995,7 @@ A batch of logging and diagnostics improvements, in one commit:
   entries it had, not just the pass/fail result.
 - **Per-run summary report**: `get_attestation_results()` now prints a
   `+------------ Run Summary --------------+` block after every run — one
-  line per Verifier (`PASS`/`FAIL`, `AK cached`/`fresh`, latency in ms,
+  line per Verifier (`PASS`/`FAIL`, `AK cached`/`issued`, latency in ms,
   reason), plus the `log_r` redaction byte counts.
 
 ### `/certify_ak` is now a two-leg handshake: the requester must echo the secret back

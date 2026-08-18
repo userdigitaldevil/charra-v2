@@ -1,39 +1,21 @@
-#include <arpa/inet.h>
 #include <coap3/coap.h>
-#include <errno.h>
-#include <getopt.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/stat.h>
-#include <tss2/tss2_tctildr.h>
 #include <tss2/tss2_tpm2_types.h>
-#include <unistd.h>
 #include <pthread.h>
-#include <math.h>
 
 #include "common/charra_log.h"
 #include "common/charra_macro.h"
-#include "core/charra_ak_state.h"
 #include "core/charra_dto.h"
-#include "core/charra_event_log.h"
-#include "core/charra_key_mgr.h"
-#include "core/charra_marshaling.h"
-#include "core/charra_rim_mgr.h"
-#include "core/charra_identity_key_mgr.h"
-#include "core/charra_rp_qualification.h"
 #include "core/charra_sdk.h"
-#include "util/charra_util.h"
-#include "util/cli_util.h"
 #include "util/coap_util.h"
 #include "util/crypto_util.h"
 #include "util/io_util.h"
-#include "util/tpm2_util.h"
 #include "rp/rp_attestation.h"
 #include "rp/rp_attester_identity.h"
-#include "rp/rp_coap.h"
 #include "rp/rp_identity.h"
 #include "rp/rp_config.h"
 #include "rp/rp_evidence.h"
@@ -71,11 +53,10 @@ bool processing_trust_manager_response = false;
  * way for the same reason. */
 int verifier_list[MAX_VERIFIERS];
 bool attestation_results[MAX_VERIFIERS];
-/* Summary-report only: was_cached (cert reused vs. freshly /certify_ak'd),
- * appraisal round-trip latency, and rejection reason text. */
+/* Summary-report only: was_cached (cert reused vs. freshly /certify_ak'd)
+ * and appraisal round-trip latency. */
 bool rp_ak_cert_was_cached[MAX_VERIFIERS];
 long verifier_latency_ms[MAX_VERIFIERS];
-char rejection_reason[MAX_VERIFIERS][128];
 verifier_info verifiers[MAX_VERIFIERS];
 /* Was 6000 -- 1000x too large: this feeds libcoap's ack_timeout (seconds),
  * so a stray retransmission could take tens of real seconds to resolve. */
@@ -511,7 +492,10 @@ static CHARRA_RC run_one_attestation_cycle(
 /* --- main --------------------------------------------------------------- */
 
 int main(int argc, char** argv) {
-    CHARRA_RC result = EXIT_FAILURE;
+    /* Process exit status, not a CHARRA_RC: the two enums overlap only by
+     * accident (CHARRA_RC_SUCCESS and EXIT_SUCCESS are both 0) and mixing
+     * them made benchmark mode return a CHARRA_RC as its exit code. */
+    int result = EXIT_SUCCESS;
 
     signal(SIGINT, handle_sigint);
     /* Same handler for SIGTERM: `timeout`, `docker stop` and systemd all
@@ -585,9 +569,8 @@ int main(int argc, char** argv) {
             {
                 char label[32] = {0};
                 snprintf(label, sizeof(label), "warm-up (onboarding)");
-                result = run_one_attestation_cycle(
-                        num_verifiers, label, &onboarding);
-                if (result != CHARRA_RC_SUCCESS) {
+                if (run_one_attestation_cycle(num_verifiers, label,
+                            &onboarding) != CHARRA_RC_SUCCESS) {
                     result = EXIT_FAILURE;
                     break;
                 }
@@ -598,9 +581,8 @@ int main(int argc, char** argv) {
                 snprintf(label, sizeof(label), "run %d/%d", run + 1, NUM_RUNS);
 
                 rp_cycle_timing timing = {0};
-                result = run_one_attestation_cycle(
-                        num_verifiers, label, &timing);
-                if (result != CHARRA_RC_SUCCESS) {
+                if (run_one_attestation_cycle(num_verifiers, label, &timing) !=
+                        CHARRA_RC_SUCCESS) {
                     result = EXIT_FAILURE;
                     break;
                 }
@@ -609,7 +591,6 @@ int main(int argc, char** argv) {
                 appraisal_durations[run] = timing.appraisal;
                 total_attestation_durations[run] =
                         timing.verifiers + timing.evidence + timing.appraisal;
-                result = CHARRA_RC_SUCCESS;
             }
 
             if (result == EXIT_FAILURE) {
@@ -690,10 +671,6 @@ int main(int argc, char** argv) {
                              "retrying after the usual interval.",
                     cycle);
         }
-        if (quit) {
-            break;
-        }
-
         if (quit) {
             break;
         }

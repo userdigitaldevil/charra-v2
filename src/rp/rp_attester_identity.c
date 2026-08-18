@@ -150,10 +150,10 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
                 long days_left =
                         charra_crypto_x509_days_until_expiry(&cached_cert);
                 if (!charra_cert_needs_renewal(
-                            charra_cert_expiry_time(&cached_cert))) {
+                            charra_crypto_x509_expiry_time(&cached_cert))) {
                     cache_usable = true;
                     attester_ak_cert_rp_expires_at =
-                            charra_cert_expiry_time(&cached_cert);
+                            charra_crypto_x509_expiry_time(&cached_cert);
                     charra_log_info("[" LOG_NAME "] Attester identity already "
                                     "provisioned (cached, RP-issued "
                                     "certificate expires in %ld day(s)).",
@@ -724,10 +724,10 @@ CHARRA_RC ensure_attester_identity_certified_by_verifier(
             long days_left =
                     charra_crypto_x509_days_until_expiry(&cached_cert);
             if (!charra_cert_needs_renewal(
-                        charra_cert_expiry_time(&cached_cert))) {
+                        charra_crypto_x509_expiry_time(&cached_cert))) {
                 cache_usable = true;
                 attester_ak_cert_by_verifier_expires_at[verifier_index] =
-                        charra_cert_expiry_time(&cached_cert);
+                        charra_crypto_x509_expiry_time(&cached_cert);
                 charra_log_info("[" LOG_NAME "] Reloading previously issued "
                                 "Attester AK certificate for Verifier %s:%u "
                                 "(cached, expires in %ld day(s)).",
@@ -929,7 +929,7 @@ CHARRA_RC ensure_attester_identity_certified_by_verifier(
                     verifier_cert_response.ak_certificate,
                     verifier_cert_response.ak_certificate_len) == 0) {
             attester_ak_cert_by_verifier_expires_at[verifier_index] =
-                    charra_cert_expiry_time(&issued);
+                    charra_crypto_x509_expiry_time(&issued);
         }
         mbedtls_x509_crt_free(&issued);
     }

@@ -331,7 +331,7 @@ CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers) {
 
     charra_log_info("[" LOG_NAME "]  +------------ Interaction with the Trust Manager --------------+");
 
-    CHARRA_RC result = EXIT_FAILURE;
+    CHARRA_RC result = CHARRA_RC_ERROR;
 
     coap_context_t* coap_context = NULL;
     coap_session_t* coap_session = NULL;
@@ -496,7 +496,7 @@ CHARRA_RC get_evidence() {
 
     charra_log_info("[" LOG_NAME "]  +------------ Interaction with the Attester --------------+");
 
-    CHARRA_RC result = EXIT_FAILURE;
+    CHARRA_RC result = CHARRA_RC_ERROR;
 
     coap_context_t* coap_context = NULL;
     coap_session_t* coap_session = NULL;
@@ -728,8 +728,11 @@ cleanup:
 }
 
 void* get_attestation_results_thread(void *arg) {
-
-    CHARRA_RC result = EXIT_FAILURE;
+    /* Assigned on every failure path purely so the value is visible in a
+     * debugger; the thread's own outcome reaches the caller through
+     * attestation_results[]/verifier_latency_ms[], not through a return
+     * value, since pthread_join() here always discards it. */
+    CHARRA_RC result CHARRA_UNUSED = CHARRA_RC_ERROR;
 
     int current_thread_index = *(int*)arg;
     verifier_info verifier_info = verifiers[current_thread_index];
@@ -745,7 +748,6 @@ void* get_attestation_results_thread(void *arg) {
      * without this reset an early failure would silently keep a stale PASS
      * from a previous run and get counted toward the vote. Fail closed. */
     attestation_results[current_thread_index] = false;
-    rejection_reason[current_thread_index][0] = '\0';
     verifier_latency_ms[current_thread_index] = -1;
 
      /* set varaibles here such that they are valid in case of an 'goto cleanup'
@@ -1139,7 +1141,7 @@ void* get_attestation_results_thread(void *arg) {
         if (build_rc != CHARRA_RC_SUCCESS) {
             charra_log_error(
                     "[" LOG_NAME "] Error building RP evidence message.");
-            goto error;
+            goto cleanup;
         }
         charra_log_info("[" LOG_NAME "] Sending %u bytes of RP evidence to "
                         "Verifier n\u00b0 %d.",
@@ -1195,10 +1197,6 @@ void* get_attestation_results_thread(void *arg) {
 
     }
 
-    result = attestation_rc;
-error:
-    result = EXIT_FAILURE;
-
 cleanup:
     /* free CoAP memory */
     charra_free_if_not_null_ex(coap_options, coap_delete_optlist);
@@ -1246,7 +1244,7 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
         return CHARRA_RC_ERROR;
     }
 
-    CHARRA_RC result = EXIT_FAILURE;
+    CHARRA_RC result = CHARRA_RC_ERROR;
 
     charra_log_info("[" LOG_NAME "] Forwarding (redacted) evidence to the verifiers.");
     charra_log_info("[" LOG_NAME "]  +------------ Interaction with the Verifiers --------------+");
@@ -1258,7 +1256,7 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
         indexes[i] = i;
         if (pthread_create(&threads[i], NULL, get_attestation_results_thread, &indexes[i]) != 0) {
             charra_log_error("[" LOG_NAME"] Error creating thread");
-            goto error;
+            goto done;
         } else {
             charra_log_info("[" LOG_NAME "] Forwarding evidence to Verifier n° %d (port %u) ...", i+1, verifiers[i].port_number);
         }
@@ -1337,8 +1335,6 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
         const char* reason;
         if (attestation_results[i]) {
             reason = "OK";
-        } else if (rejection_reason[i][0] != '\0') {
-            reason = rejection_reason[i];
         } else if (verifier_latency_ms[i] < 0) {
             /* Never completed an /appraise round trip, so the Verifier
              * never judged anything -- still a NO, but "appraisal failed"
@@ -1358,14 +1354,18 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
                         "%s",
                 i + 1, verifiers[i].ip_address, verifiers[i].port_number,
                 attestation_results[i] ? "PASS" : "FAIL",
-                rp_ak_cert_was_cached[i] ? "cached" : "fresh",
+                /* "issued", not "fresh": freshness is a RATS term of art
+                 * for replay resistance (see the nonce checks above), and
+                 * this column is about certificate provenance -- reused from
+                 * cache, or issued by /certify_ak this cycle. */
+                rp_ak_cert_was_cached[i] ? "cached" : "issued",
                 latency_str, reason);
     }
 
     result = CHARRA_RC_SUCCESS;
 
-
-error:
+    /* Common exit, not an error-only one -- the success path falls in here. */
+done:
     charra_rp_release_evidence();
     return result;
 

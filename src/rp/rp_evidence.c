@@ -363,10 +363,6 @@ CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
     ev.ak_certificate_rp_len = rp_ak_cert_der_len[verifier_index];
     ev.ak_certificate_rp = rp_ak_cert_der[verifier_index];
 
-    /* ak_certificate (Attester's) intentionally left empty -- see
-     * msg_rp_evidence_dto's docstring in charra_dto.h: the Attester has no
-     * /certify_ak client yet, this is a known, documented gap. */
-
     /* the nonce the RP itself sent to the Attester */
     ev.attester_nonce_len = (uint32_t)last_request.nonce_len;
     memcpy(ev.attester_nonce, last_request.nonce, last_request.nonce_len);

@@ -23,9 +23,12 @@
  * error occurs, or verifier_response_timeout is exceeded.
  *
  * Factors out the create-context/create-session/build-and-send-PDU/wait-
- * for-response/tear-down sequence every one-shot RP-as-client exchange in
- * this file repeats (ensure_rp_ak_certificate()'s /certify_ak call,
- * rp_perform_qualification_handshake_once()'s /qualify and /qualify/submit).
+ * for-response/tear-down sequence every one-shot RP-as-client exchange
+ * repeats: rp_certify_ak_exchange() in rp_identity.c, and
+ * rp_perform_qualification_handshake_once()'s /qualify and /qualify_submit
+ * in rp_qualification.c. The exchanges that need per-session app data
+ * (/get_verifiers, /nonce, /appraise) still open their own contexts by hand
+ * in rp_attestation.c -- this helper has no way to pass it through.
  * response_handler is expected to record the exchange's actual content-
  * level result (parsed data, or a parse failure) in its own dedicated
  * global, the same way coap_certify_ak_response_handler() does for

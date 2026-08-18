@@ -228,7 +228,6 @@ CHARRA_RC ensure_rp_ak_keypair(void) {
         TPM2B_PRIVATE ak_private = {0};
         uint8_t* ek_cert_der = NULL;
         size_t ek_cert_der_len = 0;
-        bool ek_cert_der_from_read_file = false;
 
         TSS2_RC tss_r = 0;
         if ((tss_r = Tss2_TctiLdr_Initialize(
@@ -274,7 +273,6 @@ CHARRA_RC ensure_rp_ak_keypair(void) {
             }
             ek_cert_der = (uint8_t*)buf;
             ek_cert_der_len = buf_len;
-            ek_cert_der_from_read_file = true;
         } else {
             char* manufacturer_root_der = NULL;
             size_t manufacturer_root_der_len = 0;
@@ -355,11 +353,7 @@ CHARRA_RC ensure_rp_ak_keypair(void) {
             }
         }
         Esys_Free(ek_public);
-        if (ek_cert_der_from_read_file) {
-            free(ek_cert_der);
-        } else {
-            charra_free_if_not_null(ek_cert_der);
-        }
+        charra_free_if_not_null(ek_cert_der);
 
         /* --- create the AK, persist its blobs -------------------------- */
         TPM2B_PUBLIC* ak_public_p = NULL;
@@ -423,6 +417,11 @@ CHARRA_RC ensure_rp_ak_keypair(void) {
 }
 
 CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
+    /* Cleared up front, not only set on the cache-hit paths: leaving a stale
+     * true here made the run summary report "cached" forever once the first
+     * cache hit had happened, including on cycles that re-issued. */
+    rp_ak_cert_was_cached[verifier_index] = false;
+
     if (rp_ak_cert_ready[verifier_index] &&
             !charra_cert_needs_renewal(rp_ak_cert_expires_at[verifier_index])) {
         /* No work happens on this path, so it's "cached" for the summary. */
@@ -489,10 +488,10 @@ CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
             long days_left =
                     charra_crypto_x509_days_until_expiry(&cached_cert);
             if (!charra_cert_needs_renewal(
-                        charra_cert_expiry_time(&cached_cert))) {
+                        charra_crypto_x509_expiry_time(&cached_cert))) {
                 cache_usable = true;
                 rp_ak_cert_expires_at[verifier_index] =
-                        charra_cert_expiry_time(&cached_cert);
+                        charra_crypto_x509_expiry_time(&cached_cert);
                 charra_log_info("[" LOG_NAME "] Reloading previously issued "
                                 "AK certificate for this Verifier (cached, "
                                 "expires in %ld day(s)).",
@@ -719,30 +718,25 @@ CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
      * cached one's: leaving it at 0 would mark this certificate as needing
      * renewal on the very next call, costing one pointless /certify_ak per
      * Verifier per process. */
-    {
-        mbedtls_x509_crt issued;
-        mbedtls_x509_crt_init(&issued);
-        rp_ak_cert_expires_at[verifier_index] = 0;
-        if (mbedtls_x509_crt_parse(&issued, cert_der, cert_der_len) == 0) {
-            rp_ak_cert_expires_at[verifier_index] =
-                    charra_cert_expiry_time(&issued);
-        }
-        mbedtls_x509_crt_free(&issued);
-    }
+    rp_ak_cert_expires_at[verifier_index] = 0;
     rp_ak_cert_ready[verifier_index] = true;
 
-    mbedtls_x509_crt new_cert;
-    mbedtls_x509_crt_init(&new_cert);
-    if (mbedtls_x509_crt_parse(&new_cert, cert_der, cert_der_len) == 0) {
+    /* One parse for both the expiry and the log line. Leaving expires_at at 0
+     * would mark this certificate as due for renewal on the very next call,
+     * costing a pointless /certify_ak per Verifier per process. */
+    mbedtls_x509_crt issued;
+    mbedtls_x509_crt_init(&issued);
+    if (mbedtls_x509_crt_parse(&issued, cert_der, cert_der_len) == 0) {
+        rp_ak_cert_expires_at[verifier_index] = charra_crypto_x509_expiry_time(&issued);
         charra_log_info("[" LOG_NAME "] RP AK certified by this Verifier "
                         "(freshly provisioned, %u-byte certificate, expires "
                         "in %ld day(s)).",
-                cert_der_len, charra_crypto_x509_days_until_expiry(&new_cert));
+                cert_der_len, charra_crypto_x509_days_until_expiry(&issued));
     } else {
         charra_log_info("[" LOG_NAME "] RP AK certified by this Verifier "
                         "(freshly provisioned, %u-byte certificate).",
                 cert_der_len);
     }
-    mbedtls_x509_crt_free(&new_cert);
+    mbedtls_x509_crt_free(&issued);
     return CHARRA_RC_SUCCESS;
 }

@@ -144,6 +144,28 @@ static void rp_qualification_cache_save(time_t expires_at) {
     fclose(f);
 }
 
+/**
+ * @brief Is a grant still valid past renew_deadline, consulting the on-disk
+ * cache if the in-memory value says it is not?
+ *
+ * Re-reads the wall clock on every call rather than trusting a once-computed
+ * flag, so a process whose run straddles the expiry moment still notices.
+ * Without this whole cache RP re-qualified on every attestation cycle
+ * regardless of how much of the previous grant was left.
+ */
+static bool rp_qualification_still_valid(time_t renew_deadline, time_t now) {
+    if (rp_qualified_until <= renew_deadline) {
+        rp_qualified_until = rp_qualification_cache_load();
+    }
+    if (rp_qualified_until <= renew_deadline) {
+        return false;
+    }
+    charra_log_info("[" LOG_NAME "] Cached qualification still valid for %ld "
+                    "more second(s), skipping /qualify.",
+            (long)(rp_qualified_until - now));
+    return true;
+}
+
 CHARRA_RC rp_perform_qualification_handshake_once(
         int num_verifiers, time_t refresh_margin_seconds) {
     /* AK certificate readiness is orthogonal to the qualification cache
@@ -161,20 +183,12 @@ CHARRA_RC rp_perform_qualification_handshake_once(
      * without it, RP re-qualified unconditionally on every single
      * attestation cycle regardless of how much of a previous grant was
      * left. See CHARRA_V2_NOTES.md. */
-    time_t now = time(NULL);
     /* Compared against now+margin rather than now: with margin 0 this is
      * exactly "renew only once expired"; with a margin it renews while the
      * grant is still valid, which is what lets daemon mode do the renewal
      * in its idle window instead of inside an attestation. */
-    time_t renew_deadline = now + refresh_margin_seconds;
-    if (rp_qualified_until <= renew_deadline) {
-        rp_qualified_until = rp_qualification_cache_load();
-    }
-    if (rp_qualified_until > renew_deadline) {
-        charra_log_info(
-                "[" LOG_NAME "] Cached qualification still valid for %ld "
-                "more second(s), skipping /qualify.",
-                (long)(rp_qualified_until - now));
+    time_t now = time(NULL);
+    if (rp_qualification_still_valid(now + refresh_margin_seconds, now)) {
         return CHARRA_RC_SUCCESS;
     }
 
@@ -188,6 +202,17 @@ CHARRA_RC rp_perform_qualification_handshake_once(
      * for why this still matters even though the handshake itself now
      * runs once per cycle. */
     pthread_mutex_lock(&rp_qualification_mutex);
+
+    /* Re-checked under the lock, which is what actually makes the
+     * "first thread re-qualifies, the rest short-circuit" behaviour true.
+     * The check above the lock is only a fast path: two threads can both
+     * pass it, and without this second look both would run the full
+     * handshake, the second one discarding a grant it had just renewed. */
+    now = time(NULL);
+    if (rp_qualification_still_valid(now + refresh_margin_seconds, now)) {
+        pthread_mutex_unlock(&rp_qualification_mutex);
+        return CHARRA_RC_SUCCESS;
+    }
 
     /* Try each Verifier in order, stopping at the first one reachable at
      * the network level for /qualify -- a transport failure moves on to
