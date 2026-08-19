@@ -318,12 +318,12 @@ cleanup:
     return COAP_RESPONSE_OK;
 }
 
-CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers) {
+CHARRA_RC get_verifiers(int* requested_ids, int num_verifiers) {
     if (num_verifiers > MAX_VERIFIERS) {
         charra_log_error(
                 "[" LOG_NAME "] Requested %d verifier(s), but this process "
                 "only has room for %d (MAX_VERIFIERS) -- refusing to "
-                "overflow verifier_list/verifiers/attestation_results.",
+                "overflow requested_ids/verifiers/attestation_results.",
                 num_verifiers, MAX_VERIFIERS);
         return CHARRA_RC_BAD_ARGUMENT;
     }
@@ -338,7 +338,7 @@ CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers) {
     msg_get_verifiers_request_dto req = {0};
     req.verifier_ids_len = (uint32_t)num_verifiers;
     for (int i = 0; i < num_verifiers; ++i) {
-        req.verifier_ids[i] = verifier_list[i];
+        req.verifier_ids[i] = requested_ids[i];
     }
 
     uint8_t* req_buf = NULL;

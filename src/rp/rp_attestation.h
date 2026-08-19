@@ -18,7 +18,7 @@
 
 /** @brief Resolve verifier_list[0..num_verifiers) to endpoints in
  * verifiers[], via the Trust Manager. */
-CHARRA_RC get_verifiers(int* verifier_list, int num_verifiers);
+CHARRA_RC get_verifiers(int* requested_ids, int num_verifiers);
 
 /** @brief Fetch the Attester's evidence and appraise it locally (Step 2a).
  * Also reports the verdict back to the Attester. */

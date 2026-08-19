@@ -186,6 +186,10 @@ CHARRA_RC charra_unmarshal_attestation_request(
         const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
         msg_attestation_request_dto* attestation_request) {
     msg_attestation_request_dto req = {0};
+    /* Declared here, initialized to NULL, so the cleanup below can free it
+     * on every 'goto cbor_parse_error' -- including ones that precede the
+     * allocation. Mirrors charra_unmarshal_attestation_response(). */
+    uint8_t* event_log_path = NULL;
 
     QCBORError cborerr = QCBOR_SUCCESS;
     UsefulBufC marshaled_data_buf = {marshaled_data, marshaled_data_len};
@@ -276,7 +280,7 @@ CHARRA_RC charra_unmarshal_attestation_request(
         goto cbor_parse_error;
     req.event_log_path_len = item.val.string.len;
     if (req.event_log_path_len != 0) {
-        uint8_t* event_log_path = (uint8_t*)malloc(req.event_log_path_len);
+        event_log_path = (uint8_t*)malloc(req.event_log_path_len);
         if (event_log_path == NULL) {
             goto cbor_parse_error;
         } else {
@@ -303,6 +307,9 @@ CHARRA_RC charra_unmarshal_attestation_request(
 cbor_parse_error:
     charra_log_error("CBOR parser: %s", qcbor_err_to_str(cborerr));
     charra_log_info("CBOR parser: skipping parsing.");
+
+    /* clean up */
+    charra_free_if_not_null(event_log_path);
 
     return CHARRA_RC_MARSHALING_ERROR;
 }

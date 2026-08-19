@@ -531,7 +531,9 @@ CHARRA_RC charra_coap_server_run(coap_context_t* context, const char* log_name,
 
 void charra_coap_server_stop(
         coap_context_t* context, coap_endpoint_t* endpoint) {
-    charra_free_and_null_ex(endpoint, coap_free_endpoint);
-    charra_free_and_null_ex(context, coap_free_context);
+    /* _if_not_null_: either may be NULL when start() failed part-way, and
+     * relying on libcoap to tolerate a NULL free is not worth the bet. */
+    charra_free_if_not_null_ex(endpoint, coap_free_endpoint);
+    charra_free_if_not_null_ex(context, coap_free_context);
     coap_cleanup();
 }

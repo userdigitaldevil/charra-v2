@@ -288,8 +288,9 @@ CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
      * Quote_r at all, so there is nothing to send. A missing AK
      * *certificate* is not a reason to stay silent: send the evidence with
      * the field empty and let the Verifier apply Step 3a item 1 and record
-     * its own decision. Its 4.01 also drives RP's re-provision-and-retry,
-     * which returning here would skip. */
+     * its own decision -- a Verifier that cannot validate the certificate
+     * votes NO, which is the whole signal, and staying silent would instead
+     * look like an unreachable RP. */
     if (!rp_ak_keypair_ready) {
         charra_log_error("[" LOG_NAME "] No AK keypair; cannot sign Quote_r.");
         return CHARRA_RC_ERROR;

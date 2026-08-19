@@ -599,7 +599,9 @@ static CHARRA_RC load_hash_list(
     }
     fclose(f);
 
-    qsort(hashes, count, TPM2_SHA256_DIGEST_SIZE, compare_hashes);
+    if (count > 0) {
+        qsort(hashes, count, TPM2_SHA256_DIGEST_SIZE, compare_hashes);
+    }
 
     *hashes_out = hashes;
     *count_out = count;

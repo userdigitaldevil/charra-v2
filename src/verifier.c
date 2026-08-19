@@ -26,9 +26,6 @@ static bool quit = false;
 
 /* logging */
 #define LOG_NAME "verifier"
-static uint8_t tpm_pcr_selection[TPM2_MAX_PCRS] = {0, 1, 2, 3, 4, 5, 6, 7, 10};
-static uint32_t tpm_pcr_selection_len = 9;
-char* reference_pcr_file_path = "reference-pcrs.txt";
 coap_log_t coap_log_level = LOG_INFO;
 // #define LOG_LEVEL_CBOR LOG_DEBUG
 charra_log_t charra_log_level = CHARRA_LOG_INFO;
@@ -36,9 +33,6 @@ charra_log_t charra_log_level = CHARRA_LOG_INFO;
 /* config */
 static const char LISTEN_ADDRESS[] = "0.0.0.0";
 static unsigned int port = 31415;
-bool use_ima_event_log = false;
-char* ima_event_log_path =
-        "/sys/kernel/security/ima/binary_runtime_measurements";
 
 // for DTLS-PSK
 bool use_dtls_psk = false;
@@ -152,7 +146,7 @@ int main(int argc, char** argv) {
 
     /* initialize structures to pass to the CLI parser */
     /* clang-format off */
-    cli_config cli_config = {
+    cli_config cli_args = {
         .caller = VERIFIER,
         .common_config = {
             .charra_log_level = &charra_log_level,
@@ -174,13 +168,6 @@ int main(int argc, char** argv) {
             .dtls_psk_hint = &dtls_psk_hint,
         },
         .verifier_config = {
-            // .dst_host = dst_host,
-            // .timeout = &attestation_response_timeout,
-            .reference_pcr_file_path = &reference_pcr_file_path,
-            .tpm_pcr_selection = tpm_pcr_selection,
-            .tpm_pcr_selection_len = &tpm_pcr_selection_len,
-            .use_ima_event_log = &use_ima_event_log,
-            .ima_event_log_path = &ima_event_log_path,
             .dtls_psk_identity = &dtls_psk_identity,
             .qualification_validity_seconds =
                     &qualification_validity_seconds,
@@ -190,7 +177,7 @@ int main(int argc, char** argv) {
 
     /* clang-format on */
     /* parse CLI arguments */
-    if ((result = parse_command_line_arguments(argc, argv, &cli_config)) != 0) {
+    if ((result = parse_command_line_arguments(argc, argv, &cli_args)) != 0) {
         // 1 means help message is displayed, -1 means error
         return (result == 1) ? EXIT_SUCCESS : EXIT_FAILURE;
     }

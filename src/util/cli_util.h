@@ -59,6 +59,10 @@ typedef struct {
  */
 typedef struct {
     char* dst_host;
+    /* Retained only so verifier_old.c still compiles: the current Verifier
+     * dropped the options that fed these (--timeout, --pcr-file,
+     * --pcr-selection, --ima, --ip), which it parsed but never acted on.
+     * Nothing in cli_util.c reads them any more. */
     uint16_t* timeout;
     char** reference_pcr_file_path;
     uint8_t* tpm_pcr_selection;

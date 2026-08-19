@@ -93,6 +93,11 @@ CHARRA_RC charra_io_read_file(const char* filename, char** const file_content,
 
     /* get file size */
     ssize_t file_size = -1;
+    /* Declared before the first 'goto error' rather than at its first use:
+     * jumping over a declaration does not run its initializer, so the
+     * cleanup at error: would otherwise test and free an indeterminate
+     * pointer. */
+    char* file_buffer = NULL;
     {
         /* go to end of file */
         if (fseek(fp, 0L, SEEK_END) != 0) {
@@ -114,7 +119,6 @@ CHARRA_RC charra_io_read_file(const char* filename, char** const file_content,
     }
 
     /* allocate memory */
-    char* file_buffer = NULL;
     if ((file_buffer = malloc(file_size * sizeof(*file_buffer))) == NULL) {
         r = CHARRA_RC_ERROR;
         goto error;

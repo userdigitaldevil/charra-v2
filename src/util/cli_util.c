@@ -34,9 +34,6 @@ static const struct option verifier_options[] = {
         {"verbose", no_argument, 0, 'v'},
         {"log-level", required_argument, 0, 'l'},
         {"coap-log-level", required_argument, 0, 'c'},
-        {"timeout", required_argument, 0, 't'},
-        {"pcr-file", required_argument, 0, 'f'},
-        {"pcr-selection", required_argument, 0, 's'},
         {"psk", no_argument, 0, 'p'}, {"key", required_argument, 0, 'k'},
         {"identity", required_argument, 0, 'i'}, {"rpk", no_argument, 0, 'r'},
         {"help", no_argument, 0, '0'},
@@ -44,8 +41,7 @@ static const struct option verifier_options[] = {
         {"public-key", required_argument, 0, '2'},
         {"peer-public-key", required_argument, 0, '3'},
         {"verify-peer", required_argument, 0, '4'},
-        {"ip", required_argument, 0, 'a'}, {"port", required_argument, 0, 'b'},
-        {"ima", optional_argument, 0, 'm'},
+        {"port", required_argument, 0, 'b'},
         {"qualification-validity", required_argument, 0, '5'},
         {"ak-validity", required_argument, 0, '6'}, {0}};
 
@@ -76,6 +72,25 @@ const char* charra_cli_default_tag(int identifier) {
     return charra_cli_flag_was_given(identifier) ? "" : " (default)";
 }
 
+/* strdup() plus the allocation check every call site below was missing.
+ * The sites this replaces sized their buffer with strlen(), then strcpy()'d
+ * strlen() + 1 bytes into it, overrunning it by the terminator. */
+static char* charra_cli_dup_arg(
+        const char* log_name, const char* option_name, const char* value) {
+    if (value == NULL) {
+        charra_log_error("[%s] Missing value for '%s'.", log_name, option_name);
+        return NULL;
+    }
+    char* copy = malloc(strlen(value) + 1);
+    if (copy == NULL) {
+        charra_log_error("[%s] Out of memory while parsing '%s'.", log_name,
+                option_name);
+        return NULL;
+    }
+    strcpy(copy, value);
+    return copy;
+}
+
 int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
     cli_parser_caller caller = variables->caller;
     char* log_name;
@@ -87,7 +102,7 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
     for (;;) {
         int index = -1;
         int identifier = getopt_long(argc, argv,
-                ((caller == VERIFIER) ? "vl:c:t:f:s:pk:i:r" : "vl:c:pk:h:r"),
+                ((caller == VERIFIER) ? "vl:c:pk:i:r" : "vl:c:pk:h:r"),
                 ((caller == VERIFIER) ? verifier_options : attester_options),
                 &index);
 
@@ -113,8 +128,6 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
                    "LEVEL. Available are: DEBUG, INFO, NOTICE, WARNING, ERR, "
                    "CRIT, ALERT, EMERG, CIPHERS. Default is INFO.\n");
             if (caller == VERIFIER) {
-                printf("     --ip=IP:                    Connect to IP instead "
-                       "of doing the attestation on localhost.\n");
                 printf("     --port=PORT:                Connect to PORT "
                        "instead of default port %u.\n",
                         *(variables->common_config.port));
@@ -128,36 +141,6 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
                        "issuance. Default %ld.\n",
                         (long)*(variables->verifier_config
                                         .ak_cert_validity_seconds));
-                // printf(" -t, --timeout=SECONDS:          Wait up to SECONDS "
-                //        "for the attestation answer. Default is %d seconds.\n",
-                //         *(variables->verifier_config.timeout));
-                printf(" -f, --pcr-file=PATH:            Read reference PCRs "
-                       "from PATH. Default path is '%s'\n",
-                        *(variables->verifier_config.reference_pcr_file_path));
-                printf(" -s, --pcr-selection=X1[,X2...]: Specifies which PCRs "
-                       "to check on the attester. Each X references one PCR. "
-                       "PCR numbers shall be ordered from smallest to biggest, "
-                       "comma-seperated\n");
-                printf("                                 and without "
-                       "whitespace. By default these PCRs are checked: ");
-                for (uint32_t i = 0;
-                        i < *variables->verifier_config.tpm_pcr_selection_len;
-                        i++) {
-                    printf("%d",
-                            variables->verifier_config.tpm_pcr_selection[i]);
-                    if (i != *variables->verifier_config.tpm_pcr_selection_len -
-                                     1) {
-                        printf(", ");
-                    }
-                }
-
-                printf("\n");
-                printf("     --ima[=PATH]:               Request the attester "
-                       "to include an IMA event log in the attestation "
-                       "response. By default IMA requests the file\n");
-                printf("                                 '%s'. Alternatives "
-                       "can be passed.\n",
-                        *(variables->verifier_config.ima_event_log_path));
                 printf("DTLS-PSK Options:\n");
                 printf(" -p, --psk:                      Enable DTLS protocol "
                        "with PSK. By default the key '%s' and identity '%s' "
@@ -271,9 +254,10 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
             continue;
         } else if (identifier == 'k') {  // DTLS PSK key
             *variables->common_config.use_dtls_psk = true;
-            uint32_t length = strlen(optarg);
-            char* key = malloc(length * sizeof(char));
-            strcpy(key, optarg);
+            char* key = charra_cli_dup_arg(log_name, "--key", optarg);
+            if (key == NULL) {
+                return -1;
+            }
             *(variables->common_config.dtls_psk_key) = key;
             continue;
         } else if (identifier == 'r') {  // use DTLS RPK
@@ -281,8 +265,10 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
             continue;
         } else if (identifier == '1') {  // DTLS RPK private key
             *variables->common_config.use_dtls_rpk = true;
-            char* path = malloc(strlen(optarg));
-            strcpy(path, optarg);
+            char* path = charra_cli_dup_arg(log_name, "--private-key", optarg);
+            if (path == NULL) {
+                return -1;
+            }
             if (charra_io_file_exists(path) == CHARRA_RC_SUCCESS) {
                 *(variables->common_config.dtls_rpk_private_key_path) = path;
                 continue;
@@ -294,8 +280,10 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
             }
         } else if (identifier == '2') {
             *variables->common_config.use_dtls_rpk = true;
-            char* path = malloc(strlen(optarg));
-            strcpy(path, optarg);
+            char* path = charra_cli_dup_arg(log_name, "--public-key", optarg);
+            if (path == NULL) {
+                return -1;
+            }
             if (charra_io_file_exists(path) == CHARRA_RC_SUCCESS) {
                 *(variables->common_config.dtls_rpk_public_key_path) = path;
                 continue;
@@ -307,8 +295,10 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
             }
         } else if (identifier == '3') {
             *variables->common_config.use_dtls_rpk = true;
-            char* path = malloc(strlen(optarg));
-            strcpy(path, optarg);
+            char* path = charra_cli_dup_arg(log_name, "--peer-public-key", optarg);
+            if (path == NULL) {
+                return -1;
+            }
             if (charra_io_file_exists(path) == CHARRA_RC_SUCCESS) {
                 *(variables->common_config.dtls_rpk_peer_public_key_path) =
                         path;
@@ -363,107 +353,21 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
             }
             *(variables->verifier_config.qualification_validity_seconds) =
                     (time_t)value;
-        } else if (caller == VERIFIER && identifier == 'a') {  // set IP address
-            // int argument_length = strlen(optarg);
-            // if (argument_length > 15) {
-            //     charra_log_error(
-            //             "[%s] Error while parsing '--ip': Input too long "
-            //             "for IPv4 address",
-            //             log_name);
-            //     return -1;
-            // }
-            // strncpy(variables->verifier_config.dst_host, optarg, 16);
-            continue;
-        } else if (caller == VERIFIER && identifier == 't') {
-            // char* end;
-            // *(variables->verifier_config.timeout) =
-            //         (uint16_t)strtoul(optarg, &end, 10);
-            // if (*(variables->verifier_config.timeout) == 0 || end == optarg) {
-            //     charra_log_error("[%s] Error while parsing '--port': Port "
-            //                      "could not be parsed",
-            //             log_name);
-            //     return -1;
-            // }
-            continue;
-        } else if (caller == VERIFIER && identifier == 'f') {
-            uint32_t length = strlen(optarg);
-            char* path = malloc(length * sizeof(char));
-            strcpy(path, optarg);
-            if (charra_io_file_exists(path) == CHARRA_RC_SUCCESS) {
-                *(variables->verifier_config.reference_pcr_file_path) = path;
-                continue;
-            } else {
-                charra_log_error(
-                        "[%s] Reference PCR file ''%s' does not exist.",
-                        log_name, path);
-                return -1;
-            }
-        } else if (caller == VERIFIER && identifier == 's') {
-            uint32_t length = strlen(optarg);
-            uint8_t* tpm_pcr_selection =
-                    variables->verifier_config.tpm_pcr_selection;
-            uint32_t* tpm_pcr_selection_len =
-                    variables->verifier_config.tpm_pcr_selection_len;
-            for (uint32_t i = 0; i < *tpm_pcr_selection_len; i++) {
-                /*
-                 * overwrite static config with zeros in case CLI config uses
-                 * less PCRs
-                 */
-                tpm_pcr_selection[i] = 0;
-            }
-            *tpm_pcr_selection_len = 0;
-            char* number_start = optarg;
-            int last_number = -1;
-            do {
-                char* end = NULL;
-                errno = 0;
-                uint32_t number = strtoul(number_start, &end, 10);
-                if (end == number_start || errno != 0) {
-                    charra_log_error("[%s] PCR selection could not be parsed, "
-                                     "parse error at '%s'",
-                            log_name, number_start);
-                    return -1;
-                } else if (number >= TPM2_MAX_PCRS) {
-                    charra_log_error(
-                            "[%s] One PCR from the PCR selection was parsed as "
-                            "%d, but the TPM2 only has PCRs up to %d.",
-                            log_name, number, TPM2_MAX_PCRS - 1);
-                    return -1;
-                } else if ((int)number <= last_number) {
-                    charra_log_error(
-                            "[%s] PCR selection was detected to not be ordered "
-                            "from smallest to biggest. Last parsed number %d "
-                            "is bigger or equal to current number %d.",
-                            log_name, last_number, number);
-                    return -1;
-                }
-                number_start = end + 1;
-                tpm_pcr_selection[*tpm_pcr_selection_len] = number;
-                (*tpm_pcr_selection_len)++;
-                last_number = number;
-            } while (number_start < optarg + length);
-            continue;
         } else if (caller == VERIFIER && identifier == 'i') {
             *variables->common_config.use_dtls_psk = true;
-            uint32_t length = strlen(optarg);
-            char* identity = malloc(length * sizeof(char));
-            strcpy(identity, optarg);
+            char* identity =
+                    charra_cli_dup_arg(log_name, "--identity", optarg);
+            if (identity == NULL) {
+                return -1;
+            }
             *(variables->verifier_config.dtls_psk_identity) = identity;
             continue;
-        } else if (caller == VERIFIER &&
-                   identifier == 'm') {  // enable request for IMA event log
-            *(variables->verifier_config.use_ima_event_log) = true;
-            if (optarg != NULL) {
-                *(variables->verifier_config.ima_event_log_path) =
-                        malloc(strlen(optarg) + 1);
-                strncpy(*(variables->verifier_config.ima_event_log_path),
-                        optarg, strlen(optarg));
-            }
-        } else if (caller == ATTESTER && identifier == 'n') {
+        } else if (caller == ATTESTER && identifier == 'h') {
             *variables->common_config.use_dtls_psk = true;
-            uint32_t length = strlen(optarg);
-            char* hint = malloc(length * sizeof(char));
-            strcpy(hint, optarg);
+            char* hint = charra_cli_dup_arg(log_name, "--hint", optarg);
+            if (hint == NULL) {
+                return -1;
+            }
             *(variables->attester_config.dtls_psk_hint) = hint;
             continue;
         } else {

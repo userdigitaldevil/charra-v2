@@ -68,10 +68,6 @@ charra_log_t charra_log_level = CHARRA_LOG_INFO;
 /* config */
 static const char LISTEN_ADDRESS[] = "0.0.0.0";
 static unsigned int port = 5683;  // default port 5683
-#define CBOR_ENCODER_BUFFER_LENGTH 20480       // 20 KiB should be sufficient
-bool use_ima_event_log = false;
-char* ima_event_log_path =
-        "/sys/kernel/security/ima/binary_runtime_measurements";
 bool use_dtls_psk = false;
 char* dtls_psk_key = "Charra DTLS Key";
 char* dtls_psk_hint = "Charra Attester";
@@ -110,7 +106,7 @@ int main(int argc, char** argv) {
 
     /* initialize structures to pass to the CLI parser */
     /* clang-format off */
-    cli_config cli_config = {
+    cli_config cli_args = {
         .caller = ATTESTER,
         .common_config = {
             .charra_log_level = &charra_log_level,
@@ -135,7 +131,7 @@ int main(int argc, char** argv) {
     /* clang-format on */
 
     /* parse CLI arguments */
-    if ((result = parse_command_line_arguments(argc, argv, &cli_config)) != 0) {
+    if ((result = parse_command_line_arguments(argc, argv, &cli_args)) != 0) {
         // 1 means help message is displayed, -1 means error
         return (result == 1) ? EXIT_SUCCESS : EXIT_FAILURE;
     }
@@ -145,8 +141,8 @@ int main(int argc, char** argv) {
     coap_set_log_level(coap_log_level);
 
     charra_log_info("[" LOG_NAME "] Effective configuration: port=%d "
-                    "ima_event_log='%s' ima_test_log='%s'",
-            port, ima_event_log_path, ima_test_log_path);
+                    "ima_test_log='%s'",
+            port, ima_test_log_path);
 
     charra_log_debug("[" LOG_NAME "] Attester Configuration:");
 

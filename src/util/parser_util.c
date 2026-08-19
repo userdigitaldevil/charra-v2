@@ -53,9 +53,9 @@ CHARRA_RC parse_pcr_value(char* start, char* eol, uint8_t* pcr_value) {
         memcpy(byte_as_string, hex_index, 2);
         byte_as_string[2] = '\0';
         errno = 0;
-        char* eol = NULL;
-        uint32_t hex_value = strtoul(byte_as_string, &eol, 16);
-        if (eol == byte_as_string || errno != 0 || hex_value > 255) {
+        char* parse_end = NULL;
+        uint32_t hex_value = strtoul(byte_as_string, &parse_end, 16);
+        if (parse_end == byte_as_string || errno != 0 || hex_value > 255) {
             return CHARRA_RC_ERROR;
         }
         pcr_value[digest_index] = (uint8_t)hex_value;
