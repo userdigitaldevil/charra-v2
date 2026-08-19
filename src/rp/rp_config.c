@@ -8,6 +8,8 @@
 
 #include <errno.h>
 #include <getopt.h>
+
+#include "../util/cli_util.h"
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,7 +29,7 @@ void rp_interruptible_sleep(unsigned int seconds) {
 }
 
 /* Identifiers for options with no short letter. Outside ASCII so they can
- * never collide with a typeable short flag, but inside rp_flag_given's range
+ * never collide with a typeable short flag, but inside cli_util's flag range
  * so "(default)" tagging still works. -t/-T were the obvious short forms and
  * were rejected: two timeouts differing only by letter case is a footgun. */
 #define RP_OPT_VERIFIER_TIMEOUT 128
@@ -52,31 +54,6 @@ static const struct option rp_long_options[] = {{"help", no_argument, 0, '0'},
  * getopt identifier. Only used to tell "you chose this" from "this is the
  * built-in default" when logging the configuration -- parsing itself does
  * not consult it. */
-static bool rp_flag_given[UCHAR_MAX + 1] = {false};
-
-/** " (default)" for a setting left untouched, "" for one the user chose. */
-static const char* rp_default_tag(int identifier) {
-    return rp_flag_given[(unsigned char)identifier] ? "" : " (default)";
-}
-
-/** Parses a positive integer option argument; returns false (and logs) on
- * anything non-numeric, negative, or out of [min, max]. */
-static bool rp_parse_uint_arg(
-        const char* arg, const char* name, long min, long max, long* out) {
-    char* end = NULL;
-    errno = 0;
-    long value = strtol(arg, &end, 10);
-    if (errno != 0 || end == arg || *end != '\0' || value < min ||
-            value > max) {
-        charra_log_error("[" LOG_NAME "] Invalid --%s value '%s' (expected an "
-                         "integer in [%ld, %ld]).",
-                name, arg, min, max);
-        return false;
-    }
-    *out = value;
-    return true;
-}
-
 /**
  * @brief Parses RP's own command line.
  *
@@ -104,7 +81,7 @@ int parse_rp_command_line(int argc, char** argv) {
          * fails validation below aborts the run anyway, so marking it here
          * first is harmless. */
         if (identifier >= 0 && identifier <= UCHAR_MAX) {
-            rp_flag_given[(unsigned char)identifier] = true;
+            charra_cli_flag_mark_given(identifier);
         }
 
         long value = 0;
@@ -179,14 +156,15 @@ int parse_rp_command_line(int argc, char** argv) {
             rp_benchmark_mode = true;
             break;
         case 'I':
-            if (!rp_parse_uint_arg(optarg, "interval", 1, 86400, &value)) {
+            if (!charra_cli_parse_uint_arg(
+                        LOG_NAME, "--interval", optarg, 1, 86400, &value)) {
                 return -1;
             }
             rp_attestation_interval_s = (unsigned int)value;
             break;
         case 'Q':
-            if (!rp_parse_uint_arg(optarg, "qualify-renew-margin", 0, 86400,
-                        &value)) {
+            if (!charra_cli_parse_uint_arg(LOG_NAME,
+                        "--qualify-renew-margin", optarg, 0, 86400, &value)) {
                 return -1;
             }
             rp_qualify_renew_margin_s = (unsigned int)value;
@@ -195,49 +173,50 @@ int parse_rp_command_line(int argc, char** argv) {
             /* Upper bound is a year: a margin beyond that exceeds any
              * plausible certificate lifetime, which would mean renewing on
              * every cycle forever. */
-            if (!rp_parse_uint_arg(optarg, "ak-renew-margin", 0,
-                        365L * 24 * 60 * 60, &value)) {
+            if (!charra_cli_parse_uint_arg(LOG_NAME, "--ak-renew-margin",
+                        optarg, 0, 365L * 24 * 60 * 60, &value)) {
                 return -1;
             }
             rp_ak_renew_margin_s = (time_t)value;
             break;
         case 'n':
-            if (!rp_parse_uint_arg(
-                        optarg, "verifiers", 1, MAX_VERIFIERS, &value)) {
+            if (!charra_cli_parse_uint_arg(LOG_NAME, "--verifiers", optarg, 1,
+                        MAX_VERIFIERS, &value)) {
                 return -1;
             }
             rp_num_verifiers = (int)value;
             break;
         case RP_OPT_VERIFIER_TIMEOUT:
-            if (!rp_parse_uint_arg(
-                        optarg, "verifier-timeout", 1, 3600, &value)) {
+            if (!charra_cli_parse_uint_arg(LOG_NAME, "--verifier-timeout",
+                        optarg, 1, 3600, &value)) {
                 return -1;
             }
             verifier_response_timeout = (uint16_t)value;
             break;
         case RP_OPT_ATTESTER_TIMEOUT:
-            if (!rp_parse_uint_arg(
-                        optarg, "attester-timeout", 1, 3600, &value)) {
+            if (!charra_cli_parse_uint_arg(LOG_NAME, "--attester-timeout",
+                        optarg, 1, 3600, &value)) {
                 return -1;
             }
             attester_response_timeout = (uint16_t)value;
             break;
         case 'D':
-            if (!rp_parse_uint_arg(optarg, "duration", 1, LONG_MAX,
-                        &value)) {
+            if (!charra_cli_parse_uint_arg(
+                        LOG_NAME, "--duration", optarg, 1, LONG_MAX, &value)) {
                 return -1;
             }
             rp_duration_s = (unsigned int)value;
             break;
         case 'C':
-            if (!rp_parse_uint_arg(optarg, "cycles", 1, LONG_MAX,
-                        &value)) {
+            if (!charra_cli_parse_uint_arg(
+                        LOG_NAME, "--cycles", optarg, 1, LONG_MAX, &value)) {
                 return -1;
             }
             rp_max_cycles = (unsigned long)value;
             break;
         case 'A':
-            if (!rp_parse_uint_arg(optarg, "attester-ak-validity", 1, LONG_MAX,
+            if (!charra_cli_parse_uint_arg(LOG_NAME,
+                        "--attester-ak-validity", optarg, 1, LONG_MAX,
                         &value)) {
                 return -1;
             }
@@ -273,7 +252,7 @@ static const char* rp_limit_str(
 /** Warns about a flag that was given but does not apply to this mode --
  * silently ignoring it is how a flag comes to look like it works. */
 static void rp_warn_if_ignored(int identifier, const char* flag_name) {
-    if (rp_flag_given[(unsigned char)identifier]) {
+    if (charra_cli_flag_was_given(identifier)) {
         charra_log_warn("[" LOG_NAME "]   --%s was given but has NO EFFECT in "
                         "benchmark mode.",
                 flag_name);
@@ -316,35 +295,38 @@ void rp_log_effective_configuration(void) {
         rp_warn_if_ignored('C', "cycles");
     } else {
         charra_log_info("[" LOG_NAME "]   %-22s %d%s", "--verifiers",
-                rp_num_verifiers, rp_default_tag('n'));
+                rp_num_verifiers, charra_cli_default_tag('n'));
         charra_log_info("[" LOG_NAME "]   %-22s %us%s", "--interval",
-                rp_attestation_interval_s, rp_default_tag('I'));
+                rp_attestation_interval_s, charra_cli_default_tag('I'));
         charra_log_info("[" LOG_NAME "]   %-22s %s%s", "--duration",
                 rp_limit_str(rp_duration_s, buf_duration, sizeof(buf_duration),
                         "s"),
-                rp_default_tag('D'));
+                charra_cli_default_tag('D'));
         charra_log_info("[" LOG_NAME "]   %-22s %s%s", "--cycles",
                 rp_limit_str(rp_max_cycles, buf_cycles, sizeof(buf_cycles), ""),
-                rp_default_tag('C'));
+                charra_cli_default_tag('C'));
     }
 
     /* Renewal margins and log level apply to both modes. */
     charra_log_info("[" LOG_NAME "]   %-22s %us%s", "--qualify-renew-margin",
-            rp_qualify_renew_margin_s, rp_default_tag('Q'));
+            rp_qualify_renew_margin_s, charra_cli_default_tag('Q'));
     charra_log_info("[" LOG_NAME "]   %-22s %lds%s", "--ak-renew-margin",
-            (long)rp_ak_renew_margin_s, rp_default_tag('R'));
+            (long)rp_ak_renew_margin_s, charra_cli_default_tag('R'));
     charra_log_info("[" LOG_NAME "]   %-22s %lds%s", "--attester-ak-validity",
-            (long)attester_ak_cert_validity_seconds, rp_default_tag('A'));
+            (long)attester_ak_cert_validity_seconds,
+            charra_cli_default_tag('A'));
     charra_log_info("[" LOG_NAME "]   %-22s %s%s", "--log-level",
             charra_log_level_to_str(charra_log_level),
-            (rp_flag_given['l'] || rp_flag_given['v']) ? "" : " (default)");
+            (charra_cli_flag_was_given('l') || charra_cli_flag_was_given('v'))
+                            ? ""
+                            : " (default)");
 
     charra_log_info("[" LOG_NAME "]   %-22s %us%s", "--verifier-timeout",
             verifier_response_timeout,
-            rp_default_tag(RP_OPT_VERIFIER_TIMEOUT));
+            charra_cli_default_tag(RP_OPT_VERIFIER_TIMEOUT));
     charra_log_info("[" LOG_NAME "]   %-22s %us%s", "--attester-timeout",
             attester_response_timeout,
-            rp_default_tag(RP_OPT_ATTESTER_TIMEOUT));
+            charra_cli_default_tag(RP_OPT_ATTESTER_TIMEOUT));
 
     /* Compiled-in, no flag -- listed so the log still explains a policy
      * rejection without the reader having to guess the values. */

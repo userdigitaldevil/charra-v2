@@ -114,7 +114,29 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables);
 bool charra_cli_flag_was_given(int identifier);
 
 /**
+ * @brief Record that an option appeared on the command line.
+ *
+ * For parsers outside this module -- rp_config.c has its own getopt loop but
+ * reports its effective configuration the same way, so it shares the
+ * bookkeeping rather than keeping a second copy of it.
+ */
+void charra_cli_flag_mark_given(int identifier);
+
+/**
  * @brief " (default)" when the option was not given, "" when it was --
  * intended to be appended directly to a logged value.
  */
 const char* charra_cli_default_tag(int identifier);
+
+/**
+ * @brief Parses an integer option argument, rejecting anything non-numeric,
+ * anything with trailing characters, and anything outside [min, max].
+ *
+ * Logs the reason itself, naming the option, so callers only branch on the
+ * result.
+ *
+ * @param option_name as the user typed it, including the dashes.
+ * @return false if the argument is unusable; *out is untouched then.
+ */
+bool charra_cli_parse_uint_arg(const char* log_name, const char* option_name,
+        const char* arg, long min, long max, long* out);

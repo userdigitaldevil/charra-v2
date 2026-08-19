@@ -68,8 +68,35 @@ bool charra_cli_flag_was_given(int identifier) {
            cli_flag_given[(unsigned char)identifier];
 }
 
+void charra_cli_flag_mark_given(int identifier) {
+    if (identifier >= 0 && identifier <= UCHAR_MAX) {
+        cli_flag_given[(unsigned char)identifier] = true;
+    }
+}
+
 const char* charra_cli_default_tag(int identifier) {
     return charra_cli_flag_was_given(identifier) ? "" : " (default)";
+}
+
+bool charra_cli_parse_uint_arg(const char* log_name, const char* option_name,
+        const char* arg, long min, long max, long* out) {
+    if (arg == NULL) {
+        charra_log_error(
+                "[%s] Missing value for '%s'.", log_name, option_name);
+        return false;
+    }
+    char* end = NULL;
+    errno = 0;
+    long value = strtol(arg, &end, 10);
+    if (errno != 0 || end == arg || *end != '\0' || value < min ||
+            value > max) {
+        charra_log_error("[%s] Invalid %s value '%s' (expected an integer in "
+                         "[%ld, %ld]).",
+                log_name, option_name, arg, min, max);
+        return false;
+    }
+    *out = value;
+    return true;
 }
 
 /* strdup() plus the allocation check every call site below was missing.
@@ -112,7 +139,7 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
         /* Recorded before the dispatch below so one line covers every
          * option, rather than a statement in each branch. */
         if (identifier >= 0 && identifier <= UCHAR_MAX) {
-            cli_flag_given[(unsigned char)identifier] = true;
+            charra_cli_flag_mark_given(identifier);
         }
         if (identifier == '0' || identifier == '?') {
             // print help message
@@ -238,16 +265,12 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
             }
             continue;
         } else if (identifier == 'b') {  // port
-            char* end;
-            *(variables->common_config.port) =
-                    (unsigned int)strtoul(optarg, &end, 10);
-            if (*(variables->common_config.port) == 0 || end == optarg) {
-                charra_log_error(
-                        "[%s] Error while parsing '--port': Port could not be "
-                        "parsed",
-                        log_name);
+            long value = 0;
+            if (!charra_cli_parse_uint_arg(
+                        log_name, "--port", optarg, 1, 65535, &value)) {
                 return -1;
             }
+            *(variables->common_config.port) = (unsigned int)value;
             continue;
         } else if (identifier == 'p') {  // use DTLS PSK
             *variables->common_config.use_dtls_psk = true;
@@ -327,28 +350,19 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
 
         if (caller == VERIFIER && identifier == '6') {
             // set AK certificate lifetime
-            char* end = NULL;
-            errno = 0;
-            long value = strtol(optarg, &end, 10);
-            if (errno != 0 || end == optarg || *end != '\0' ||
-                    value <= 0) {
-                charra_log_error("[%s] Invalid --ak-validity '%s' "
-                                 "(expected a positive integer).",
-                        log_name, optarg);
+            long value = 0;
+            if (!charra_cli_parse_uint_arg(log_name, "--ak-validity", optarg, 1,
+                        LONG_MAX, &value)) {
                 return -1;
             }
             *(variables->verifier_config.ak_cert_validity_seconds) =
                     (time_t)value;
         } else if (caller == VERIFIER && identifier == '5') {
             // set qualification validity window
-            char* end = NULL;
-            errno = 0;
-            long value = strtol(optarg, &end, 10);
-            if (errno != 0 || end == optarg || *end != '\0' ||
-                    value <= 0) {
-                charra_log_error("[%s] Invalid --qualification-validity "
-                                 "'%s' (expected a positive integer).",
-                        log_name, optarg);
+            long value = 0;
+            if (!charra_cli_parse_uint_arg(log_name,
+                        "--qualification-validity", optarg, 1, LONG_MAX,
+                        &value)) {
                 return -1;
             }
             *(variables->verifier_config.qualification_validity_seconds) =
