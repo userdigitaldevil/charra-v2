@@ -406,6 +406,12 @@ CHARRA_RC get_evidence(void) {
     }
 
     charra_log_info("[" LOG_NAME "] Sending attestation request.");
+    /* Reset before the exchange, not after: coap_attester_handler() is the
+     * only thing that writes a verdict here, it does not run at all on a
+     * timeout, and coap_verifier_handler_appraisal() writes this same
+     * global later in the cycle -- so without this a previous round's value
+     * could be read as this round's verdict. Fail-closed initial value. */
+    attestation_rc = CHARRA_RC_ERROR;
     result = rp_coap_exchange(&(rp_coap_request){
             .host = attester_host, .port = attester_port,
             .uri_path = "attest",
@@ -426,6 +432,19 @@ CHARRA_RC get_evidence(void) {
     } else if (result == CHARRA_RC_SUCCESS &&
                attestation_rc == CHARRA_RC_SUCCESS) {
         rp_send_attestation_result(true, "Step 2a local verification passed");
+    }
+
+    /* A failed appraisal is a failed CYCLE, not just a failed round trip.
+     * result carries only the CoAP outcome; the Step 2a verdict lives in
+     * attestation_rc, and run_one_attestation_cycle() aborts on any
+     * non-success return. Folding the verdict in here is what actually
+     * makes Step 2a the hard stop CHARRA_V2_NOTES.md and the automaton
+     * both describe -- without it the RP went on to redact evidence it had
+     * just rejected, qualify, and submit it to every Verifier, none of
+     * which can re-run the three log-content checks that failed (they are
+     * checked here and nowhere else; see verifier_appraise.c). */
+    if (result == CHARRA_RC_SUCCESS && attestation_rc != CHARRA_RC_SUCCESS) {
+        result = attestation_rc;
     }
 
     return result;
