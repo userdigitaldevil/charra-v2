@@ -149,105 +149,27 @@ int main(int argc, char** argv) {
             port, ima_event_log_path, ima_test_log_path);
 
     charra_log_debug("[" LOG_NAME "] Attester Configuration:");
-    charra_log_debug("[" LOG_NAME "]     Used local port: %d", port);
-    charra_log_debug("[" LOG_NAME "]     DTLS-PSK enabled: %s",
-            (use_dtls_psk == true) ? "true" : "false");
-    if (use_dtls_psk) {
-        charra_log_debug(
-                "[" LOG_NAME "]         Pre-shared key: '%s'", dtls_psk_key);
-        charra_log_debug("[" LOG_NAME "]         Hint: '%s'", dtls_psk_hint);
-    }
-    charra_log_debug("[" LOG_NAME "]     DTLS-RPK enabled: %s",
-            (use_dtls_rpk == true) ? "true" : "false");
-    if (use_dtls_rpk) {
-        charra_log_debug("[" LOG_NAME "]         Private key path: '%s'",
-                dtls_rpk_private_key_path);
-        charra_log_debug("[" LOG_NAME "]         Public key path: '%s'",
-                dtls_rpk_public_key_path);
-        charra_log_debug("[" LOG_NAME "]         Peers' public key path: '%s'",
-                dtls_rpk_peer_public_key_path);
-    }
 
-    /* set varaibles here such that they are valid in case of an 'goto error' */
+    charra_coap_server_config server_config = {
+        .log_name = LOG_NAME,
+        .listen_address = LISTEN_ADDRESS,
+        .port = port,
+        .use_dtls_psk = use_dtls_psk,
+        .dtls_psk_key = dtls_psk_key,
+        .dtls_psk_hint = dtls_psk_hint,
+        .use_dtls_rpk = use_dtls_rpk,
+        .dtls_rpk_private_key_path = dtls_rpk_private_key_path,
+        .dtls_rpk_public_key_path = dtls_rpk_public_key_path,
+        .dtls_rpk_peer_public_key_path = dtls_rpk_peer_public_key_path,
+        .dtls_rpk_verify_peer_public_key = dtls_rpk_verify_peer_public_key,
+    };
+    charra_coap_server_log_config(&server_config);
+
     coap_context_t* coap_context = NULL;
     coap_endpoint_t* coap_endpoint = NULL;
-
-    if (use_dtls_psk && use_dtls_rpk) {
-        charra_log_error(
-                "[" LOG_NAME "] Configuration enables both DTSL with PSK "
-                "and DTSL with PKI. Aborting!");
+    if (charra_coap_server_start(&server_config, &coap_context,
+                &coap_endpoint) != CHARRA_RC_SUCCESS) {
         goto error;
-    }
-
-    if (use_dtls_psk || use_dtls_rpk) {
-        // print TLS version when in debug mode
-        coap_show_tls_version(LOG_DEBUG);
-    }
-
-    if ((use_dtls_psk || use_dtls_rpk) && !coap_dtls_is_supported()) {
-        charra_log_error("[" LOG_NAME "] CoAP does not support DTLS but the "
-                         "configuration enables DTLS. Aborting!");
-        goto error;
-    }
-
-    charra_log_info("[" LOG_NAME "] Initializing CoAP in block-wise mode.");
-    if ((coap_context = charra_coap_new_context(true)) == NULL) {
-        charra_log_error("[" LOG_NAME "] Cannot create CoAP context.");
-        goto error;
-    }
-
-    if (use_dtls_psk) {
-        charra_log_info(
-                "[" LOG_NAME "] Creating CoAP server endpoint using DTLS-PSK.");
-        if (!coap_context_set_psk(coap_context, dtls_psk_hint,
-                    (uint8_t*)dtls_psk_key, strlen(dtls_psk_key))) {
-            charra_log_error("[" LOG_NAME
-                             "] Error while configuring CoAP to use DTLS-PSK.");
-            goto error;
-        }
-
-        if ((coap_endpoint = charra_coap_new_endpoint(coap_context,
-                     LISTEN_ADDRESS, port, COAP_PROTO_DTLS)) == NULL) {
-            charra_log_error("[" LOG_NAME "] Cannot create CoAP server "
-                             "endpoint based on DTLS-PSK.\n");
-            goto error;
-        }
-    } else if (use_dtls_rpk) {
-        charra_log_info(
-                "[" LOG_NAME "] Creating CoAP server endpoint using DTLS-RPK.");
-        coap_dtls_pki_t dtls_pki = {0};
-
-        CHARRA_RC rc = charra_coap_setup_dtls_pki_for_rpk(&dtls_pki,
-                dtls_rpk_private_key_path, dtls_rpk_public_key_path,
-                dtls_rpk_peer_public_key_path, dtls_rpk_verify_peer_public_key);
-        if (rc != CHARRA_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME
-                             "] Error while setting up DTLS-RPK structure.");
-            goto error;
-        }
-
-        if (!coap_context_set_pki(coap_context, &dtls_pki)) {
-            charra_log_error("[" LOG_NAME
-                             "] Error while configuring CoAP to use DTLS-RPK.");
-            goto error;
-        }
-
-        if ((coap_endpoint = charra_coap_new_endpoint(coap_context,
-                     LISTEN_ADDRESS, port, COAP_PROTO_DTLS)) == NULL) {
-            charra_log_error("[" LOG_NAME "] Cannot create CoAP server "
-                             "endpoint based on DTLS-RPK.\n");
-            goto error;
-        }
-    } else {
-        charra_log_info(
-                "[" LOG_NAME "] Creating CoAP server endpoint using UDP.");
-        if ((coap_endpoint = charra_coap_new_endpoint(coap_context,
-                     LISTEN_ADDRESS, port, COAP_PROTO_UDP)) == NULL) {
-            charra_log_error(
-                    "[" LOG_NAME
-                    "] Cannot create CoAP server endpoint based on UDP.\n");
-            goto error;
-        }
     }
 
     /* Attester's own runtime state (TPM identity, delivered AK
@@ -267,15 +189,9 @@ int main(int argc, char** argv) {
             "certify_ak_of_attester", coap_certify_ak_of_attester_handler);
     charra_coap_add_resource(coap_context, COAP_REQUEST_FETCH, "attest_result",
             coap_attest_result_handler);
-    /* enter main loop */
-    charra_log_debug("[" LOG_NAME "] Entering main loop.");
-    while (!quit) {
-        /* process CoAP I/O */
-        if (coap_io_process(coap_context, COAP_IO_WAIT) == -1) {
-            charra_log_error(
-                    "[" LOG_NAME "] Error during CoAP I/O processing.");
-            goto error;
-        }
+    if (charra_coap_server_run(coap_context, LOG_NAME, &quit) !=
+            CHARRA_RC_SUCCESS) {
+        goto error;
     }
 
     result = EXIT_SUCCESS;
@@ -285,10 +201,7 @@ error:
     result = EXIT_FAILURE;
 
 finish:
-    /* free CoAP memory */
-    charra_free_and_null_ex(coap_endpoint, coap_free_endpoint);
-    charra_free_and_null_ex(coap_context, coap_free_context);
-    coap_cleanup();
+    charra_coap_server_stop(coap_context, coap_endpoint);
 
     return result;
 }

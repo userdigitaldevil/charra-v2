@@ -382,3 +382,156 @@ void charra_coap_log_peer_address(const char* log_name,
     charra_log_info(
             "[%s] %s: request from %s.", log_name, endpoint_name, addr_buf);
 }
+
+/* --- server lifecycle ---------------------------------------------------- */
+
+void charra_coap_server_log_config(const charra_coap_server_config* config) {
+    charra_log_debug("[%s]     Used local port: %d", config->log_name,
+            config->port);
+    charra_log_debug("[%s]     DTLS-PSK enabled: %s", config->log_name,
+            config->use_dtls_psk ? "true" : "false");
+    if (config->use_dtls_psk) {
+        charra_log_debug("[%s]         Pre-shared key: '%s'",
+                config->log_name, config->dtls_psk_key);
+        charra_log_debug(
+                "[%s]         Hint: '%s'", config->log_name,
+                config->dtls_psk_hint);
+    }
+    charra_log_debug("[%s]     DTLS-RPK enabled: %s", config->log_name,
+            config->use_dtls_rpk ? "true" : "false");
+    if (config->use_dtls_rpk) {
+        charra_log_debug("[%s]         Private key path: '%s'",
+                config->log_name, config->dtls_rpk_private_key_path);
+        charra_log_debug("[%s]         Public key path: '%s'",
+                config->log_name, config->dtls_rpk_public_key_path);
+        charra_log_debug("[%s]         Peers' public key path: '%s'",
+                config->log_name, config->dtls_rpk_peer_public_key_path);
+    }
+}
+
+CHARRA_RC charra_coap_server_start(const charra_coap_server_config* config,
+        coap_context_t** context_out, coap_endpoint_t** endpoint_out) {
+    if (config == NULL || context_out == NULL || endpoint_out == NULL) {
+        return CHARRA_RC_BAD_ARGUMENT;
+    }
+    *context_out = NULL;
+    *endpoint_out = NULL;
+
+    if (config->use_dtls_psk && config->use_dtls_rpk) {
+        charra_log_error("[%s] Configuration enables both DTSL with PSK and "
+                         "DTSL with PKI. Aborting!",
+                config->log_name);
+        return CHARRA_RC_ERROR;
+    }
+    if (config->use_dtls_psk || config->use_dtls_rpk) {
+        coap_show_tls_version(LOG_DEBUG); /* debug builds only */
+        if (!coap_dtls_is_supported()) {
+            charra_log_error("[%s] CoAP does not support DTLS but the "
+                             "configuration enables DTLS. Aborting!",
+                    config->log_name);
+            return CHARRA_RC_ERROR;
+        }
+    }
+
+    charra_log_info(
+            "[%s] Initializing CoAP in block-wise mode.", config->log_name);
+    coap_context_t* context = charra_coap_new_context(true);
+    if (context == NULL) {
+        charra_log_error("[%s] Cannot create CoAP context.", config->log_name);
+        return CHARRA_RC_ERROR;
+    }
+
+    coap_endpoint_t* endpoint = NULL;
+    if (config->use_dtls_psk) {
+        charra_log_info("[%s] Creating CoAP server endpoint using DTLS-PSK.",
+                config->log_name);
+        if (!coap_context_set_psk(context, config->dtls_psk_hint,
+                    (const uint8_t*)config->dtls_psk_key,
+                    strlen(config->dtls_psk_key))) {
+            charra_log_error(
+                    "[%s] Error while configuring CoAP to use DTLS-PSK.",
+                    config->log_name);
+            goto error;
+        }
+        endpoint = charra_coap_new_endpoint(context, config->listen_address,
+                config->port, COAP_PROTO_DTLS);
+        if (endpoint == NULL) {
+            charra_log_error("[%s] Cannot create CoAP server endpoint based "
+                             "on DTLS-PSK.",
+                    config->log_name);
+            goto error;
+        }
+    } else if (config->use_dtls_rpk) {
+        charra_log_info("[%s] Creating CoAP server endpoint using DTLS-RPK.",
+                config->log_name);
+        coap_dtls_pki_t dtls_pki = {0};
+        if (charra_coap_setup_dtls_pki_for_rpk(&dtls_pki,
+                    config->dtls_rpk_private_key_path,
+                    config->dtls_rpk_public_key_path,
+                    config->dtls_rpk_peer_public_key_path,
+                    config->dtls_rpk_verify_peer_public_key) !=
+                CHARRA_RC_SUCCESS) {
+            charra_log_error("[%s] Error while setting up DTLS-RPK structure.",
+                    config->log_name);
+            goto error;
+        }
+        if (!coap_context_set_pki(context, &dtls_pki)) {
+            charra_log_error(
+                    "[%s] Error while configuring CoAP to use DTLS-RPK.",
+                    config->log_name);
+            goto error;
+        }
+        endpoint = charra_coap_new_endpoint(context, config->listen_address,
+                config->port, COAP_PROTO_DTLS);
+        if (endpoint == NULL) {
+            charra_log_error("[%s] Cannot create CoAP server endpoint based "
+                             "on DTLS-RPK.",
+                    config->log_name);
+            goto error;
+        }
+    } else {
+        charra_log_info("[%s] Creating CoAP server endpoint using UDP.",
+                config->log_name);
+        endpoint = charra_coap_new_endpoint(context, config->listen_address,
+                config->port, COAP_PROTO_UDP);
+        if (endpoint == NULL) {
+            charra_log_error(
+                    "[%s] Cannot create CoAP server endpoint based on UDP.",
+                    config->log_name);
+            goto error;
+        }
+    }
+
+    *context_out = context;
+    *endpoint_out = endpoint;
+    return CHARRA_RC_SUCCESS;
+
+error:
+    /* The endpoint is owned by the context once created, so freeing the
+     * context is the whole cleanup. */
+    coap_free_context(context);
+    return CHARRA_RC_ERROR;
+}
+
+CHARRA_RC charra_coap_server_run(coap_context_t* context, const char* log_name,
+        const volatile bool* quit) {
+    if (context == NULL || log_name == NULL || quit == NULL) {
+        return CHARRA_RC_BAD_ARGUMENT;
+    }
+    charra_log_debug("[%s] Entering main loop.", log_name);
+    while (!*quit) {
+        if (coap_io_process(context, COAP_IO_WAIT) == -1) {
+            charra_log_error(
+                    "[%s] Error during CoAP I/O processing.", log_name);
+            return CHARRA_RC_ERROR;
+        }
+    }
+    return CHARRA_RC_SUCCESS;
+}
+
+void charra_coap_server_stop(
+        coap_context_t* context, coap_endpoint_t* endpoint) {
+    charra_free_and_null_ex(endpoint, coap_free_endpoint);
+    charra_free_and_null_ex(context, coap_free_context);
+    coap_cleanup();
+}

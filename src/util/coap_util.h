@@ -216,4 +216,60 @@ const char* charra_coap_method_to_str(const coap_request_t method);
 void charra_coap_log_peer_address(const char* log_name,
         const char* endpoint_name, struct coap_session_t* session);
 
+/* --- server lifecycle ---------------------------------------------------- */
+
+/**
+ * @brief What the Attester, Verifier and Trust Manager configure identically
+ * when they stand up their CoAP server.
+ *
+ * The three differ only in which resources they register and what state they
+ * keep -- the transport bring-up below was 101 contiguous identical lines in
+ * two of them.
+ */
+typedef struct {
+    /** Tag for this server's log lines, e.g. "attester". */
+    const char* log_name;
+    const char* listen_address;
+    unsigned int port;
+
+    /** DTLS-PSK. Mutually exclusive with RPK; both set is rejected. */
+    bool use_dtls_psk;
+    const char* dtls_psk_key;
+    const char* dtls_psk_hint;
+
+    /** DTLS-RPK (raw public keys). */
+    bool use_dtls_rpk;
+    /* Non-const to match charra_coap_setup_dtls_pki_for_rpk()'s signature. */
+    char* dtls_rpk_private_key_path;
+    char* dtls_rpk_public_key_path;
+    char* dtls_rpk_peer_public_key_path;
+    bool dtls_rpk_verify_peer_public_key;
+} charra_coap_server_config;
+
+/** @brief Logs the effective DTLS settings at DEBUG level. */
+void charra_coap_server_log_config(const charra_coap_server_config* config);
+
+/**
+ * @brief Create the CoAP context and listening endpoint for one server.
+ *
+ * Rejects PSK and RPK enabled together, and DTLS requested from a libcoap
+ * built without it. On failure both out-params are NULL and there is
+ * nothing to free.
+ */
+CHARRA_RC charra_coap_server_start(const charra_coap_server_config* config,
+        coap_context_t** context_out, coap_endpoint_t** endpoint_out);
+
+/**
+ * @brief Process CoAP I/O until *quit turns true, or an I/O error occurs.
+ *
+ * quit is read through a volatile pointer because it is set from a signal
+ * handler.
+ */
+CHARRA_RC charra_coap_server_run(coap_context_t* context, const char* log_name,
+        const volatile bool* quit);
+
+/** @brief Frees the endpoint and context, then shuts libcoap down. */
+void charra_coap_server_stop(
+        coap_context_t* context, coap_endpoint_t* endpoint);
+
 #endif /* COAP_UTIL_H */

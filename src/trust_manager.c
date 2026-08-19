@@ -53,16 +53,13 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
     charra_log_info(
             "[" LOG_NAME "] Effective configuration: port=%d", port);
 
-    charra_log_info("[" LOG_NAME "] Initializing CoAP in block-wise mode.");
-    if ((coap_context = charra_coap_new_context(true)) == NULL) {
-        charra_log_error("[" LOG_NAME "] Cannot create CoAP context.");
-        goto error;
-    }
-
-    charra_log_info("[" LOG_NAME "] Creating CoAP server endpoint using UDP.");
-    if ((coap_endpoint = charra_coap_new_endpoint(coap_context,
-                    LISTEN_ADDRESS, port, COAP_PROTO_UDP)) == NULL) {
-        charra_log_error("[" LOG_NAME"] Cannot create CoAP server endpoint based on UDP.\n");
+    charra_coap_server_config server_config = {
+        .log_name = LOG_NAME,
+        .listen_address = LISTEN_ADDRESS,
+        .port = port,
+    };
+    if (charra_coap_server_start(&server_config, &coap_context,
+                &coap_endpoint) != CHARRA_RC_SUCCESS) {
         goto error;
     }
 
@@ -71,15 +68,9 @@ int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
     charra_coap_add_resource(
             coap_context, COAP_REQUEST_FETCH, "get_verifiers", coap_handler);
 
-    /* enter main loop */
-    charra_log_info("[" LOG_NAME "] Entering main loop.");
-    while (!quit) {
-        /* process CoAP I/O */
-        if (coap_io_process(coap_context, COAP_IO_WAIT) == -1) {
-            charra_log_error(
-                    "[" LOG_NAME "] Error during CoAP I/O processing.");
-            goto error;
-        }
+    if (charra_coap_server_run(coap_context, LOG_NAME, &quit) !=
+            CHARRA_RC_SUCCESS) {
+        goto error;
     }
 
     goto finish;
@@ -88,10 +79,7 @@ error:
     result = EXIT_FAILURE;
 
 finish:
-    /* free CoAP memory */
-    charra_free_and_null_ex(coap_endpoint, coap_free_endpoint);
-    charra_free_and_null_ex(coap_context, coap_free_context);
-    coap_cleanup();
+    charra_coap_server_stop(coap_context, coap_endpoint);
 
     return result;
 }
