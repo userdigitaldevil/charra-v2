@@ -231,6 +231,32 @@ bool charra_coap_get_payload(const struct coap_pdu_t* pdu,
         const char* log_name, const char* context, const uint8_t** data_out,
         size_t* data_len_out, size_t* data_total_len_out);
 
+/**
+ * @brief The DTLS settings a role is configured with, one instance per
+ * program.
+ *
+ * The values differ per role -- key paths, identity, hint -- but the set of
+ * settings does not, so it is declared once here rather than as three
+ * parallel lists of globals.
+ *
+ * Not every field applies to every role: psk_identity is client-side and
+ * psk_hint server-side, and a client talking to more than one kind of peer
+ * (the RP does) keeps its per-peer key paths separately instead of in
+ * rpk_peer_public_key_path.
+ */
+typedef struct {
+    bool use_psk;
+    char* psk_key;
+    char* psk_identity;
+    char* psk_hint;
+
+    bool use_rpk;
+    char* rpk_private_key_path;
+    char* rpk_public_key_path;
+    char* rpk_peer_public_key_path;
+    bool rpk_verify_peer_public_key;
+} charra_dtls_config;
+
 /* --- server lifecycle ---------------------------------------------------- */
 
 /**

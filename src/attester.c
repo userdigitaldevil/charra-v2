@@ -67,21 +67,20 @@ charra_log_t charra_log_level = CHARRA_LOG_INFO;
 /* config */
 static const char LISTEN_ADDRESS[] = "0.0.0.0";
 static unsigned int port = 5683;  // default port 5683
-bool use_dtls_psk = false;
-char* dtls_psk_key = "Charra DTLS Key";
-char* dtls_psk_hint = "Charra Attester";
+charra_dtls_config dtls_config = {
+        .psk_key = "Charra DTLS Key",
+        .psk_hint = "Charra Attester",
+        .rpk_private_key_path = "keys/attester.der",
+        .rpk_public_key_path = "keys/attester.pub.der",
+        .rpk_peer_public_key_path = "keys/relying_party.pub.der",
+        .rpk_verify_peer_public_key = true,
+};
 /* ASCII IMA measurement log replayed into the TPM's PCRs before the first
  * TPM Quote, so that PCR 10 reflects a non-trivial measurement history
  * instead of staying all-zero. */
 char* ima_test_log_path = "ima_test_logs.txt";
 // TODO(any): Allocate memory for CBOR buffer with malloc() as logs can be huge.
 
-// for DTLS-RPK
-bool use_dtls_rpk = false;
-char* dtls_rpk_private_key_path = "keys/attester.der";
-char* dtls_rpk_public_key_path = "keys/attester.pub.der";
-char* dtls_rpk_peer_public_key_path = "keys/relying_party.pub.der";
-bool dtls_rpk_verify_peer_public_key = true;
 
 /**
  * @brief SIGINT handler: set quit to 1 for graceful termination.
@@ -111,20 +110,20 @@ int main(int argc, char** argv) {
             .charra_log_level = &charra_log_level,
             .coap_log_level = &coap_log_level,
             .port = &port,
-            .use_dtls_psk = &use_dtls_psk,
-            .dtls_psk_key = &dtls_psk_key,
-            .use_dtls_rpk = &use_dtls_rpk,
+            .use_dtls_psk = &dtls_config.use_psk,
+            .dtls_psk_key = &dtls_config.psk_key,
+            .use_dtls_rpk = &dtls_config.use_rpk,
             .dtls_rpk_private_key_path =
-                    &dtls_rpk_private_key_path,
+                    &dtls_config.rpk_private_key_path,
             .dtls_rpk_public_key_path =
-                    &dtls_rpk_public_key_path,
+                    &dtls_config.rpk_public_key_path,
             .dtls_rpk_peer_public_key_path =
-                    &dtls_rpk_peer_public_key_path,
+                    &dtls_config.rpk_peer_public_key_path,
             .dtls_rpk_verify_peer_public_key =
-                    &dtls_rpk_verify_peer_public_key,
+                    &dtls_config.rpk_verify_peer_public_key,
         },
         .attester_config = {
-            .dtls_psk_hint = &dtls_psk_hint,
+            .dtls_psk_hint = &dtls_config.psk_hint,
         },
     };
     /* clang-format on */
@@ -149,14 +148,14 @@ int main(int argc, char** argv) {
         .log_name = LOG_NAME,
         .listen_address = LISTEN_ADDRESS,
         .port = port,
-        .use_dtls_psk = use_dtls_psk,
-        .dtls_psk_key = dtls_psk_key,
-        .dtls_psk_hint = dtls_psk_hint,
-        .use_dtls_rpk = use_dtls_rpk,
-        .dtls_rpk_private_key_path = dtls_rpk_private_key_path,
-        .dtls_rpk_public_key_path = dtls_rpk_public_key_path,
-        .dtls_rpk_peer_public_key_path = dtls_rpk_peer_public_key_path,
-        .dtls_rpk_verify_peer_public_key = dtls_rpk_verify_peer_public_key,
+        .use_dtls_psk = dtls_config.use_psk,
+        .dtls_psk_key = dtls_config.psk_key,
+        .dtls_psk_hint = dtls_config.psk_hint,
+        .use_dtls_rpk = dtls_config.use_rpk,
+        .dtls_rpk_private_key_path = dtls_config.rpk_private_key_path,
+        .dtls_rpk_public_key_path = dtls_config.rpk_public_key_path,
+        .dtls_rpk_peer_public_key_path = dtls_config.rpk_peer_public_key_path,
+        .dtls_rpk_verify_peer_public_key = dtls_config.rpk_verify_peer_public_key,
     };
     charra_coap_server_log_config(&server_config);
 

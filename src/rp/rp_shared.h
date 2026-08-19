@@ -29,6 +29,7 @@
 #include <tss2/tss2_esys.h>
 
 #include "../core/charra_dto.h"
+#include "../util/coap_util.h"
 #include "../util/crypto_util.h"
 
 /* verifiers config */
@@ -246,13 +247,9 @@ extern const bool USE_TPM_FOR_RANDOM_NONCE_GENERATION;
 extern CHARRA_RC attestation_rc;
 extern bool attestation_results[MAX_VERIFIERS];
 extern uint16_t attester_response_timeout;
-extern char* dtls_psk_identity;
-extern char* dtls_psk_key;
+extern charra_dtls_config dtls_config;
 extern char* dtls_rpk_attester_public_key_path;
-extern char* dtls_rpk_private_key_path;
-extern char* dtls_rpk_public_key_path;
 extern char* dtls_rpk_verifier_public_key_path;
-extern bool dtls_rpk_verify_peer_public_key;
 extern char* ima_event_log_path;
 extern char* ima_test_log_path;
 /* Per-Verifier, not shared: five threads run these exchanges
@@ -267,8 +264,6 @@ extern int rp_num_verifiers_this_cycle;
 extern char trust_manager_host[16];
 extern unsigned int trust_manager_port;
 extern uint16_t trust_manager_response_timeout;
-extern bool use_dtls_psk;
-extern bool use_dtls_rpk;
 extern bool use_ima_event_log;
 extern bool use_ima_test_log;
 extern long verifier_latency_ms[MAX_VERIFIERS];

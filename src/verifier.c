@@ -33,18 +33,15 @@ charra_log_t charra_log_level = CHARRA_LOG_INFO;
 static const char LISTEN_ADDRESS[] = "0.0.0.0";
 static unsigned int port = 31415;
 
-// for DTLS-PSK
-bool use_dtls_psk = false;
-char* dtls_psk_key = "Charra DTLS Key";
-char* dtls_psk_identity = "Charra Verifier";
-char* dtls_psk_hint = "Charra Attester";
-
-// for DTLS-RPK
-bool use_dtls_rpk = false;
-char* dtls_rpk_private_key_path = "keys/verifier.der";
-char* dtls_rpk_public_key_path = "keys/verifier.pub.der";
-char* dtls_rpk_peer_public_key_path = "keys/relying_party.pub.der";
-bool dtls_rpk_verify_peer_public_key = true;
+charra_dtls_config dtls_config = {
+        .psk_key = "Charra DTLS Key",
+        .psk_identity = "Charra Verifier",
+        .psk_hint = "Charra Attester",
+        .rpk_private_key_path = "keys/verifier.der",
+        .rpk_public_key_path = "keys/verifier.pub.der",
+        .rpk_peer_public_key_path = "keys/relying_party.pub.der",
+        .rpk_verify_peer_public_key = true,
+};
 
 /* config for /certify_ak (Verifier acting as Privacy CA) -- see
  * keys/gen-ak-pki.sh / keys/README.md for what these test-only files are */
@@ -151,23 +148,23 @@ int main(int argc, char** argv) {
             .charra_log_level = &charra_log_level,
             .coap_log_level = &coap_log_level,
             .port = &port,
-            .use_dtls_psk = &use_dtls_psk,
-            .dtls_psk_key = &dtls_psk_key,
-            .use_dtls_rpk = &use_dtls_rpk,
+            .use_dtls_psk = &dtls_config.use_psk,
+            .dtls_psk_key = &dtls_config.psk_key,
+            .use_dtls_rpk = &dtls_config.use_rpk,
             .dtls_rpk_private_key_path =
-                    &dtls_rpk_private_key_path,
+                    &dtls_config.rpk_private_key_path,
             .dtls_rpk_public_key_path =
-                    &dtls_rpk_public_key_path,
+                    &dtls_config.rpk_public_key_path,
             .dtls_rpk_peer_public_key_path =
-                    &dtls_rpk_peer_public_key_path,
+                    &dtls_config.rpk_peer_public_key_path,
             .dtls_rpk_verify_peer_public_key =
-                    &dtls_rpk_verify_peer_public_key,
+                    &dtls_config.rpk_verify_peer_public_key,
         },
         .attester_config = {
-            .dtls_psk_hint = &dtls_psk_hint,
+            .dtls_psk_hint = &dtls_config.psk_hint,
         },
         .verifier_config = {
-            .dtls_psk_identity = &dtls_psk_identity,
+            .dtls_psk_identity = &dtls_config.psk_identity,
             .qualification_validity_seconds =
                     &qualification_validity_seconds,
             .ak_cert_validity_seconds = &ak_cert_validity_seconds,
@@ -268,8 +265,8 @@ int main(int argc, char** argv) {
                     ? ""
                     : " (default)");
     charra_log_info("[" LOG_NAME "]   %-26s %s%s", "DTLS",
-            use_dtls_psk ? "PSK" : (use_dtls_rpk ? "RPK" : "off (plain UDP)"),
-            (use_dtls_psk || use_dtls_rpk) ? "" : " (default)");
+            dtls_config.use_psk ? "PSK" : (dtls_config.use_rpk ? "RPK" : "off (plain UDP)"),
+            (dtls_config.use_psk || dtls_config.use_rpk) ? "" : " (default)");
 
     /* Warn rather than ignore: these four are parsed and validated but no
      * code reads them, so passing one and seeing nothing happen is exactly
@@ -314,14 +311,14 @@ int main(int argc, char** argv) {
         .log_name = LOG_NAME,
         .listen_address = LISTEN_ADDRESS,
         .port = port,
-        .use_dtls_psk = use_dtls_psk,
-        .dtls_psk_key = dtls_psk_key,
-        .dtls_psk_hint = dtls_psk_hint,
-        .use_dtls_rpk = use_dtls_rpk,
-        .dtls_rpk_private_key_path = dtls_rpk_private_key_path,
-        .dtls_rpk_public_key_path = dtls_rpk_public_key_path,
-        .dtls_rpk_peer_public_key_path = dtls_rpk_peer_public_key_path,
-        .dtls_rpk_verify_peer_public_key = dtls_rpk_verify_peer_public_key,
+        .use_dtls_psk = dtls_config.use_psk,
+        .dtls_psk_key = dtls_config.psk_key,
+        .dtls_psk_hint = dtls_config.psk_hint,
+        .use_dtls_rpk = dtls_config.use_rpk,
+        .dtls_rpk_private_key_path = dtls_config.rpk_private_key_path,
+        .dtls_rpk_public_key_path = dtls_config.rpk_public_key_path,
+        .dtls_rpk_peer_public_key_path = dtls_config.rpk_peer_public_key_path,
+        .dtls_rpk_verify_peer_public_key = dtls_config.rpk_verify_peer_public_key,
     };
     charra_coap_server_log_config(&server_config);
 

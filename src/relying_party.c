@@ -300,16 +300,19 @@ bool processing_nonce_response[MAX_VERIFIERS] = {false};
 char attester_host[16] = "127.0.0.1";      // 15 characters for IPv4 plus \0
 unsigned int attester_port = 5683;         // default port
 
-/* DTLS-PSK config */ 
-bool use_dtls_psk = false;
-char* dtls_psk_key = "Charra DTLS Key";
-char* dtls_psk_identity = "Charra Relying Party";
+/* No CLI reaches these yet -- relying_party has no --psk/--rpk options, so
+ * use_psk/use_rpk stay false and rp_coap.c always opens plain UDP. The
+ * plumbing below and in rp_coap.c is complete; only the options are missing. */
+charra_dtls_config dtls_config = {
+        .psk_key = "Charra DTLS Key",
+        .psk_identity = "Charra Relying Party",
+        .rpk_private_key_path = "keys/relying_party.der",
+        .rpk_public_key_path = "keys/relying_party.pub.der",
+        .rpk_verify_peer_public_key = true,
+};
 
-/* DTLS-RPK config */ 
-bool use_dtls_rpk = false;
-char* dtls_rpk_private_key_path = "keys/relying_party.der";
-char* dtls_rpk_public_key_path = "keys/relying_party.pub.der";
-bool dtls_rpk_verify_peer_public_key = true;
+/* Per-peer, not per-role: the RP is a client to two different servers, so
+ * it names both rather than filling in rpk_peer_public_key_path. */
 char* dtls_rpk_attester_public_key_path = "keys/attester.pub.der";
 char* dtls_rpk_verifier_public_key_path = "keys/verifier.pub.der";
 

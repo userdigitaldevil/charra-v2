@@ -24,29 +24,29 @@
  */
 static coap_session_t* rp_coap_open_session(coap_context_t* context,
         const char* host, unsigned int port,
-        const char* dtls_rpk_peer_public_key_path) {
-    if (use_dtls_psk && use_dtls_rpk) {
+        const char* peer_public_key_path) {
+    if (dtls_config.use_psk && dtls_config.use_rpk) {
         charra_log_error("[" LOG_NAME "] Both DTLS-PSK and DTLS-RPK are "
                          "enabled; refusing to guess which to use.");
         return NULL;
     }
-    if (use_dtls_psk && !coap_dtls_is_supported()) {
+    if (dtls_config.use_psk && !coap_dtls_is_supported()) {
         charra_log_error("[" LOG_NAME "] DTLS is enabled but this libcoap "
                          "build does not support it.");
         return NULL;
     }
 
-    if (use_dtls_psk) {
+    if (dtls_config.use_psk) {
         return charra_coap_new_client_session_psk(context, host, port,
-                COAP_PROTO_DTLS, dtls_psk_identity, (uint8_t*)dtls_psk_key,
-                strlen(dtls_psk_key));
+                COAP_PROTO_DTLS, dtls_config.psk_identity, (uint8_t*)dtls_config.psk_key,
+                strlen(dtls_config.psk_key));
     }
-    if (use_dtls_rpk && dtls_rpk_peer_public_key_path != NULL) {
+    if (dtls_config.use_rpk && peer_public_key_path != NULL) {
         coap_dtls_pki_t dtls_pki = {0};
         if (charra_coap_setup_dtls_pki_for_rpk(&dtls_pki,
-                    dtls_rpk_private_key_path, dtls_rpk_public_key_path,
-                    (char*)dtls_rpk_peer_public_key_path,
-                    dtls_rpk_verify_peer_public_key) != CHARRA_RC_SUCCESS) {
+                    dtls_config.rpk_private_key_path, dtls_config.rpk_public_key_path,
+                    (char*)peer_public_key_path,
+                    dtls_config.rpk_verify_peer_public_key) != CHARRA_RC_SUCCESS) {
             charra_log_error(
                     "[" LOG_NAME "] Could not set up the DTLS-RPK structure.");
             return NULL;
