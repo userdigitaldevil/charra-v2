@@ -31,6 +31,7 @@
 #include "rp_coap.h"
 #include "rp_identity.h"
 #include "rp_shared.h"
+#include "rp_stats.h"
 
 #define LOG_NAME "relying party"
 
@@ -213,6 +214,14 @@ CHARRA_RC rp_perform_qualification_handshake_once(int num_verifiers) {
      * be the same everywhere. */
     for (int verifier_index = 0; verifier_index < num_verifiers;
             ++verifier_index) {
+        /* Per candidate, not once for the loop: a Verifier that turns out
+         * unreachable costs nothing and the next candidate restarts the
+         * measurement, so the recorded figure is one Verifier's exam.
+         * Includes the AK_r_byV round below when that has to run too --
+         * /qualify_submit cannot be answered without it. */
+        struct timespec flow_start, flow_end;
+        clock_gettime(CLOCK_MONOTONIC, &flow_start);
+
         CHARRA_RC keypair_and_cert_rc =
                 ensure_rp_ak_certificate(verifier_index);
         if (keypair_and_cert_rc != CHARRA_RC_SUCCESS) {
@@ -374,6 +383,11 @@ CHARRA_RC rp_perform_qualification_handshake_once(int num_verifiers) {
                     "second(s) from now, as granted by this Verifier); "
                     "shared with every other Verifier.",
                     (long)expires_at, (long)(expires_at - time(NULL)));
+            clock_gettime(CLOCK_MONOTONIC, &flow_end);
+            rp_stats_record_provisioning(RP_FLOW_QUALIFICATION,
+                    verifier->port_number,
+                    (flow_end.tv_sec - flow_start.tv_sec) +
+                            (flow_end.tv_nsec - flow_start.tv_nsec) / 1e9);
             result = CHARRA_RC_SUCCESS;
         } else {
             charra_log_error(

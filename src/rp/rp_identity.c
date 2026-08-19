@@ -26,6 +26,7 @@
 #include "../util/io_util.h"
 #include "rp_coap.h"
 #include "rp_shared.h"
+#include "rp_stats.h"
 
 #define LOG_NAME "relying party"
 
@@ -465,6 +466,12 @@ CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
         rp_ak_cert_ready[verifier_index] = false;
     }
 
+    /* Timed from here, past every cache short-circuit, so the figure is the
+     * cost of an actual issuance round rather than of a skipped check. Only
+     * a successful round is recorded -- see rp_stats.h. */
+    struct timespec flow_start, flow_end;
+    clock_gettime(CLOCK_MONOTONIC, &flow_start);
+
     CHARRA_RC result = ensure_rp_ak_keypair();
     if (result != CHARRA_RC_SUCCESS) {
         return result;
@@ -590,6 +597,11 @@ CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
         charra_free_if_not_null(cert_der);
         return result;
     }
+
+    clock_gettime(CLOCK_MONOTONIC, &flow_end);
+    rp_stats_record_provisioning(RP_FLOW_RP_AK_BY_VERIFIER, verifiers[verifier_index].port_number,
+            (flow_end.tv_sec - flow_start.tv_sec) +
+                    (flow_end.tv_nsec - flow_start.tv_nsec) / 1e9);
 
     rp_ak_cert_der[verifier_index] = cert_der;
     rp_ak_cert_der_len[verifier_index] = cert_der_len;

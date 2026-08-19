@@ -56,6 +56,8 @@ NVChip
 timings_attester.txt
 timings_verifier.txt
 timings_RP_multi_verifiers.txt
+timings_provisioning.txt
+provisioning_timing_analysis.png
 durations_verifier-*.txt
 
 # VSCode

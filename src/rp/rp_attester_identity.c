@@ -34,6 +34,7 @@
 #include "rp_coap.h"
 #include "rp_identity.h"
 #include "rp_shared.h"
+#include "rp_stats.h"
 
 #define LOG_NAME "relying party"
 
@@ -151,6 +152,12 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
 
     charra_log_info("[" LOG_NAME "]  +------------ Attester Identity "
                     "Provisioning --------------+");
+
+    /* Timed from here, past every cache short-circuit, so the figure is the
+     * cost of an actual issuance round rather than of a skipped check. Only
+     * a successful round is recorded -- see rp_stats.h. */
+    struct timespec flow_start, flow_end;
+    clock_gettime(CLOCK_MONOTONIC, &flow_start);
 
     CHARRA_RC result = CHARRA_RC_ERROR;
 
@@ -538,6 +545,11 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
     }
     charra_log_info("[" LOG_NAME "] RP-CA leg delivered to the Attester.");
 
+    clock_gettime(CLOCK_MONOTONIC, &flow_end);
+    rp_stats_record_provisioning(RP_FLOW_ATTESTER_AK_BY_RP, 0,
+            (flow_end.tv_sec - flow_start.tv_sec) +
+                    (flow_end.tv_nsec - flow_start.tv_nsec) / 1e9);
+
     /* Cache now, mirroring ensure_rp_ak_certificate(): only once we
      * genuinely trust the bytes (RP signed them itself, and delivery to
      * the Attester just succeeded). File presence is what gates skipping
@@ -733,6 +745,12 @@ CHARRA_RC ensure_attester_identity_certified_by_verifier(
                     "Certification (Verifier %s:%u) --------------+",
             verifier_host, verifier_port);
 
+    /* Timed from here, past every cache short-circuit, so the figure is the
+     * cost of an actual issuance round rather than of a skipped check. Only
+     * a successful round is recorded -- see rp_stats.h. */
+    struct timespec flow_start, flow_end;
+    clock_gettime(CLOCK_MONOTONIC, &flow_start);
+
     pthread_mutex_lock(&attester_identity_relay_mutex);
 
     msg_certify_ak_request_dto verifier_req = {0};
@@ -895,6 +913,11 @@ CHARRA_RC ensure_attester_identity_certified_by_verifier(
         charra_free_if_not_null(verifier_cert_response.ak_certificate);
         return result;
     }
+
+    clock_gettime(CLOCK_MONOTONIC, &flow_end);
+    rp_stats_record_provisioning(RP_FLOW_ATTESTER_AK_BY_VERIFIER, verifier_port,
+            (flow_end.tv_sec - flow_start.tv_sec) +
+                    (flow_end.tv_nsec - flow_start.tv_nsec) / 1e9);
 
     attester_ak_cert_by_verifier_der[verifier_index] =
             verifier_cert_response.ak_certificate;
