@@ -11,7 +11,8 @@
 #include <string.h>
 #include <time.h>
 
-#include <tss2/tss2_tctildr.h>
+/* tss2_tpm2_types only: TPM2B_PUBLIC / TPMT_SIGNATURE are still the wire
+ * shapes of Quote_a's fields. No TCTI, no ESAPI -- appraisal opens no TPM. */
 #include <tss2/tss2_tpm2_types.h>
 
 #include "../common/charra_log.h"
@@ -37,7 +38,6 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                                 const struct coap_string_t* query,
                                 struct coap_pdu_t* response) {
     int coap_r = 0;
-    TSS2_RC tss_r = 0;
     CHARRA_RC charra_r = CHARRA_RC_ERROR;
     /* Set by any exit that jumps to cleanup BEFORE a verdict is reached, so
      * those still tell the RP why rather than closing silently -- an
@@ -47,12 +47,6 @@ void coap_appraise_handler(struct coap_resource_t* resource,
 
     charra_coap_log_peer_address(LOG_NAME, "/appraise", session);
 
-    ESYS_TR sig_key_handle = ESYS_TR_NONE;
-    TPMT_TK_VERIFIED* validation = NULL;
-    /* Declared here (rather than at first use) and NULLed so every earlier
-     * 'goto cleanup' leaves cleanup able to check them safely. */
-    ESYS_CONTEXT* esys_ctx = NULL;
-    TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
     /* Trust anchor for Step 3a/3b item 1 (EK_r/AK_r, EK_a/AK_a) -- both AK
      * certificates are checked against the Verifier's own CA, since the
      * Verifier is the sole issuer via /certify_ak. */
@@ -159,28 +153,11 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     /* --- verify TPM Quote --- */
     charra_log_info("[" LOG_NAME "] Starting verification.");
 
-    clock_t start_init, end_init;
-    double init_duration;
-    start_init = clock();
-    /* initialize ESAPI */
-    if ((tss_r = Tss2_TctiLdr_Initialize(getenv("CHARRA_TCTI"), &tcti_ctx)) !=
-            TSS2_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Tss2_TctiLdr_Initialize.");
-        early_fail_reason =
-                "Verifier-side error: could not initialise the TPM TCTI";
-        goto cleanup;
-    }
-    if ((tss_r = Esys_Initialize(&esys_ctx, tcti_ctx, NULL)) !=
-            TSS2_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Esys_Initialize.");
-        early_fail_reason = "Verifier-side error: could not initialise ESAPI";
-        goto cleanup;
-    }
-    end_init = clock();
-    init_duration = ((double) (end_init - start_init)) / CLOCKS_PER_SEC;
-    fprintf(p_file, "init took %f seconds to execute \n", init_duration);
-    charra_log_info("[" LOG_NAME "] Timing: TPM init took %f second(s).",
-            init_duration);
+    /* No TPM is opened here. Every check in Steps 3a and 3b is public-key
+     * math over data the RP sent, so mbedTLS does all of it -- see the
+     * Quote_a signature check below. Keeping a TCTI open would have made a
+     * Verifier that can answer perfectly well in software vote NO whenever
+     * the (single-client) TPM simulator was busy or down. */
 
     /* Trust anchor for the EK/AK checks below. The EK certificate itself was
      * validated once during /certify_ak, so only the AK certificate that
@@ -483,7 +460,6 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     /* Why Step 3b item 1 failed, for the reason list at the verdict. */
     const char* ekak_att_why = "not verified";
     bool attestation_result_signature = false;
-    bool attestation_result_signature_mbedtls = false;
     bool attestation_result_nonce = false;
 
     /* Step 3b runs whatever Step 3a decided. Its three checks read only
@@ -588,31 +564,16 @@ void coap_appraise_handler(struct coap_resource_t* resource,
 
         /* Step 3b item 2: verify Quote_a signature */
         TPM2B_PUBLIC* tpm2_public_key = (TPM2B_PUBLIC*)res.tpm2_public_key;
-        charra_log_info("[" LOG_NAME "] Loading TPM key.");
-        if ((charra_r = charra_load_external_public_key(esys_ctx,
-                     tpm2_public_key, &sig_key_handle)) != CHARRA_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] Loading external public key failed.");
-            early_fail_reason = "the Attester's public key could not be loaded "
-                                "into the TPM (Step 3b item 2)";
-            goto cleanup;
-        }
-        charra_log_info("[" LOG_NAME "] External public key loaded.");
-
-        charra_log_info("[" LOG_NAME "] Preparing TPM Quote verification.");
-        TPM2B_ATTEST attest = {0};
-        attest.size = res.attestation_data_len;
-        memcpy(attest.attestationData, res.attestation_data,
-                res.attestation_data_len);
         TPMT_SIGNATURE signature = {0};
         memcpy(&signature, res.tpm2_signature, res.tpm2_signature_len);
 
-        attestation_result_signature =
-                charra_verify_tpm2_quote_signature_with_tpm_logged(esys_ctx,
-                        sig_key_handle, &attest, &signature, &validation);
+        /* Verifying an RSA-PSS signature needs only the public key, so this
+         * runs in software -- the same choice, for the same reason, that
+         * charra_rp_appraise_evidence() makes for its own Quote_a check. */
+        charra_log_info("[" LOG_NAME "] Verifying Quote_a signature ...");
         if (!charra_crypto_verify_quote_signature_mbedtls(tpm2_public_key,
                     res.attestation_data, res.attestation_data_len,
-                    &signature, &attestation_result_signature_mbedtls)) {
+                    &signature, &attestation_result_signature)) {
             early_fail_reason = "Quote_a signature (Step 3b item 2): could not "
                                 "be checked -- the Attester's public key is "
                                 "unusable";
@@ -678,7 +639,6 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     /* Order matches Step 3a then Step 3b, RP's evidence before Attester's. */
     bool attestation_result = step_3a_passed && attestation_result_ekak &&
                               attestation_result_signature &&
-                              attestation_result_signature_mbedtls &&
                               attestation_result_nonce;
 
     char ek_fingerprint_rp_hex_result[17] = {0};
@@ -725,8 +685,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
             LOG_REASON("Attester AK certificate (Step 3b item 1): %s",
                     ekak_att_why);
         }
-        if (!attestation_result_signature ||
-                !attestation_result_signature_mbedtls) {
+        if (!attestation_result_signature) {
             LOG_REASON("Quote_a signature (Step 3b item 2): MISMATCH -- not a "
                        "valid signature by the Attester's AK");
         }
@@ -773,7 +732,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     end_appraise = clock();
     appraise_duration = ((double) (end_appraise - start_appraise)) / CLOCKS_PER_SEC;
     fprintf(p_file, "appraising took %f seconds to execute \n", appraise_duration);
-    double total_measured = unmarshal_duration + init_duration + verify_nonce_duration + verify_signature_duration;
+    double total_measured = unmarshal_duration + verify_nonce_duration + verify_signature_duration;
     fprintf(p_file, "total measured %f  \n", total_measured);
     charra_log_info(
             "[" LOG_NAME "] Timing: total /appraise handling took %f "
@@ -810,31 +769,11 @@ cleanup:
         fclose(p_file);
     }
 
-    /* flush handles */
-    if (sig_key_handle != ESYS_TR_NONE) {
-        if (Esys_FlushContext(esys_ctx, sig_key_handle) != TSS2_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] TSS cleanup sig_key_handle failed.");
-        }
-    }
     /* log_r, ak_certificate_* and rp's own AK cert are NOT freed here:
      * charra_unmarshal_rp_evidence() points them straight into the CoAP
      * request buffer (the borrowed-pointer convention msg_rp_evidence_dto
      * uses throughout, see charra_dto.h) rather than heap-allocating a
      * copy -- freeing them would free memory this handler never owned. */
-
-    /* free ESAPI objects */
-    if (validation != NULL) {
-        Esys_Free(validation);
-    }
-
-    /* finalize ESAPI & TCTI */
-    if (esys_ctx != NULL) {
-        Esys_Finalize(&esys_ctx);
-    }
-    if (tcti_ctx != NULL) {
-        Tss2_TctiLdr_Finalize(&tcti_ctx);
-    }
 
     charra_io_free_file_buffer(&verifier_ca_cert_der);
 }
