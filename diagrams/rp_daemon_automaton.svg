@@ -66,12 +66,12 @@
 </g>
 <g id="clust5" class="cluster">
 <title>cluster_idle</title>
-<path fill="#f0fdf4" stroke="#22c55e" d="M647.89,-97C647.89,-97 1583.89,-97 1583.89,-97 1589.89,-97 1595.89,-103 1595.89,-109 1595.89,-109 1595.89,-771.44 1595.89,-771.44 1595.89,-777.44 1589.89,-783.44 1583.89,-783.44 1583.89,-783.44 647.89,-783.44 647.89,-783.44 641.89,-783.44 635.89,-777.44 635.89,-771.44 635.89,-771.44 635.89,-109 635.89,-109 635.89,-103 641.89,-97 647.89,-97"/>
-<text xml:space="preserve" text-anchor="start" x="643.89" y="-767.14" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="14.00">4 · Idle window</text>
-<text xml:space="preserve" text-anchor="start" x="740.64" y="-767.14" font-family="Helvetica,sans-Serif" font-size="14.00"> — the wait between one attestation cycle and the next.</text>
-<text xml:space="preserve" text-anchor="start" x="643.89" y="-755.99" font-family="Helvetica,sans-Serif" font-size="11.00">The RP has no attestation work here, so instead of sleeping straight through the gap,</text>
-<text xml:space="preserve" text-anchor="start" x="643.89" y="-744.99" font-family="Helvetica,sans-Serif" font-size="11.00">it spends it renewing whatever is about to expire. Each renewal fires on its own credential&#39;s</text>
-<text xml:space="preserve" text-anchor="start" x="643.89" y="-733.99" font-family="Helvetica,sans-Serif" font-size="11.00">deadline, not on the loop cadence — that is what decouples the renew margins from &#45;&#45;interval.</text>
+<path fill="#f0fdf4" stroke="#22c55e" d="M653.89,-97C653.89,-97 1583.89,-97 1583.89,-97 1589.89,-97 1595.89,-103 1595.89,-109 1595.89,-109 1595.89,-771.44 1595.89,-771.44 1595.89,-777.44 1589.89,-783.44 1583.89,-783.44 1583.89,-783.44 653.89,-783.44 653.89,-783.44 647.89,-783.44 641.89,-777.44 641.89,-771.44 641.89,-771.44 641.89,-109 641.89,-109 641.89,-103 647.89,-97 653.89,-97"/>
+<text xml:space="preserve" text-anchor="start" x="649.89" y="-767.14" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="14.00">4 · Idle window</text>
+<text xml:space="preserve" text-anchor="start" x="746.64" y="-767.14" font-family="Helvetica,sans-Serif" font-size="14.00"> — the wait between one attestation cycle and the next.</text>
+<text xml:space="preserve" text-anchor="start" x="649.89" y="-755.99" font-family="Helvetica,sans-Serif" font-size="11.00">The RP has no attestation work here, so instead of sleeping straight through the gap,</text>
+<text xml:space="preserve" text-anchor="start" x="649.89" y="-744.99" font-family="Helvetica,sans-Serif" font-size="11.00">it spends it renewing whatever is about to expire. Each renewal fires on its own credential&#39;s</text>
+<text xml:space="preserve" text-anchor="start" x="649.89" y="-733.99" font-family="Helvetica,sans-Serif" font-size="11.00">deadline, not on the loop cadence — that is what decouples the renew margins from &#45;&#45;interval.</text>
 </g>
 <g id="clust7" class="cluster">
 <title>cluster_shut</title>
@@ -1230,65 +1230,65 @@
 <!-- RENEW -->
 <g id="node55" class="node">
 <title>RENEW</title>
-<path fill="#dcfce7" stroke="#166534" stroke-width="1.2" d="M1185.28,-515.24C1185.28,-515.24 896.5,-515.24 896.5,-515.24 890.5,-515.24 884.5,-509.24 884.5,-503.24 884.5,-503.24 884.5,-420.16 884.5,-420.16 884.5,-414.16 890.5,-408.16 896.5,-408.16 896.5,-408.16 1185.28,-408.16 1185.28,-408.16 1191.28,-408.16 1197.28,-414.16 1197.28,-420.16 1197.28,-420.16 1197.28,-503.24 1197.28,-503.24 1197.28,-509.24 1191.28,-515.24 1185.28,-515.24"/>
-<text xml:space="preserve" text-anchor="start" x="893.14" y="-501.7" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="10.00">RP renews whatever is close to expiring</text>
-<text xml:space="preserve" text-anchor="start" x="893.14" y="-491.7" font-family="Helvetica,sans-Serif" font-size="10.00">· its qualification, at &#45;&#45;qualify&#45;renew&#45;margin</text>
-<text xml:space="preserve" text-anchor="start" x="893.14" y="-481.7" font-family="Helvetica,sans-Serif" font-size="10.00">  </text>
-<text xml:space="preserve" text-anchor="start" x="899.14" y="-481.7" font-family="Helvetica,sans-Serif" font-size="9.00">skipped entirely when that margin is 0 — re&#45;qualifying then falls back</text>
-<text xml:space="preserve" text-anchor="start" x="893.14" y="-472.65" font-family="Helvetica,sans-Serif" font-size="9.00">  inside the next attestation, which is what the margin exists to avoid</text>
-<text xml:space="preserve" text-anchor="start" x="893.14" y="-462.7" font-family="Helvetica,sans-Serif" font-size="10.00">· its own AK_r certificate from each Verifier</text>
-<text xml:space="preserve" text-anchor="start" x="893.14" y="-452.7" font-family="Helvetica,sans-Serif" font-size="10.00">· the Attester&#39;s AK_a certificate from each Verifier</text>
-<text xml:space="preserve" text-anchor="start" x="893.14" y="-442.7" font-family="Helvetica,sans-Serif" font-size="10.00">· the Attester&#39;s AK_a certificate </text>
-<text xml:space="preserve" text-anchor="start" x="1031.89" y="-442.7" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="10.00">the RP itself minted</text>
-<text xml:space="preserve" text-anchor="start" x="1124.14" y="-442.7" font-family="Helvetica,sans-Serif" font-size="10.00"> (Phase 1)</text>
-<text xml:space="preserve" text-anchor="start" x="893.14" y="-432.7" font-family="Helvetica,sans-Serif" font-size="10.00">  the last three at &#45;&#45;ak&#45;renew&#45;margin</text>
-<text xml:space="preserve" text-anchor="start" x="893.14" y="-423.65" font-family="Helvetica,sans-Serif" font-size="9.00">each call re&#45;checks its own cache first, so a pass with nothing due is free.</text>
-<text xml:space="preserve" text-anchor="start" x="893.14" y="-414.65" font-family="Helvetica,sans-Serif" font-size="9.00">Same endpoints the cycle uses, reached from the idle window.</text>
+<path fill="#dcfce7" stroke="#166534" stroke-width="1.2" d="M1188.28,-515.24C1188.28,-515.24 899.5,-515.24 899.5,-515.24 893.5,-515.24 887.5,-509.24 887.5,-503.24 887.5,-503.24 887.5,-420.16 887.5,-420.16 887.5,-414.16 893.5,-408.16 899.5,-408.16 899.5,-408.16 1188.28,-408.16 1188.28,-408.16 1194.28,-408.16 1200.28,-414.16 1200.28,-420.16 1200.28,-420.16 1200.28,-503.24 1200.28,-503.24 1200.28,-509.24 1194.28,-515.24 1188.28,-515.24"/>
+<text xml:space="preserve" text-anchor="start" x="896.14" y="-501.7" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="10.00">RP renews whatever is close to expiring</text>
+<text xml:space="preserve" text-anchor="start" x="896.14" y="-491.7" font-family="Helvetica,sans-Serif" font-size="10.00">· its qualification, at &#45;&#45;qualify&#45;renew&#45;margin</text>
+<text xml:space="preserve" text-anchor="start" x="896.14" y="-481.7" font-family="Helvetica,sans-Serif" font-size="10.00">  </text>
+<text xml:space="preserve" text-anchor="start" x="902.14" y="-481.7" font-family="Helvetica,sans-Serif" font-size="9.00">skipped entirely when that margin is 0 — re&#45;qualifying then falls back</text>
+<text xml:space="preserve" text-anchor="start" x="896.14" y="-472.65" font-family="Helvetica,sans-Serif" font-size="9.00">  inside the next attestation, which is what the margin exists to avoid</text>
+<text xml:space="preserve" text-anchor="start" x="896.14" y="-462.7" font-family="Helvetica,sans-Serif" font-size="10.00">· its own AK_r certificate from each Verifier</text>
+<text xml:space="preserve" text-anchor="start" x="896.14" y="-452.7" font-family="Helvetica,sans-Serif" font-size="10.00">· the Attester&#39;s AK_a certificate from each Verifier</text>
+<text xml:space="preserve" text-anchor="start" x="896.14" y="-442.7" font-family="Helvetica,sans-Serif" font-size="10.00">· the Attester&#39;s AK_a certificate </text>
+<text xml:space="preserve" text-anchor="start" x="1034.89" y="-442.7" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="10.00">the RP itself minted</text>
+<text xml:space="preserve" text-anchor="start" x="1127.14" y="-442.7" font-family="Helvetica,sans-Serif" font-size="10.00"> (Phase 1)</text>
+<text xml:space="preserve" text-anchor="start" x="896.14" y="-432.7" font-family="Helvetica,sans-Serif" font-size="10.00">  the last three at &#45;&#45;ak&#45;renew&#45;margin</text>
+<text xml:space="preserve" text-anchor="start" x="896.14" y="-423.65" font-family="Helvetica,sans-Serif" font-size="9.00">each call re&#45;checks its own cache first, so a pass with nothing due is free.</text>
+<text xml:space="preserve" text-anchor="start" x="896.14" y="-414.65" font-family="Helvetica,sans-Serif" font-size="9.00">Same endpoints the cycle uses, reached from the idle window.</text>
 </g>
 <!-- WAKE -->
 <g id="node56" class="node">
 <title>WAKE</title>
-<path fill="#dcfce7" stroke="#166534" stroke-width="1.2" d="M923.53,-299.62C923.53,-299.62 714.25,-299.62 714.25,-299.62 708.25,-299.62 702.25,-293.62 702.25,-287.62 702.25,-287.62 702.25,-275.62 702.25,-275.62 702.25,-269.62 708.25,-263.62 714.25,-263.62 714.25,-263.62 923.53,-263.62 923.53,-263.62 929.53,-263.62 935.53,-269.62 935.53,-275.62 935.53,-275.62 935.53,-287.62 935.53,-287.62 935.53,-293.62 929.53,-299.62 923.53,-299.62"/>
-<text xml:space="preserve" text-anchor="start" x="710.89" y="-283.12" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="10.00">RP sleeps only until the next renewal falls due</text>
-<text xml:space="preserve" text-anchor="start" x="710.89" y="-273.12" font-family="Helvetica,sans-Serif" font-size="10.00">wake = min(idle_until, next renewal deadline)</text>
+<path fill="#dcfce7" stroke="#166534" stroke-width="1.2" d="M929.53,-299.62C929.53,-299.62 720.25,-299.62 720.25,-299.62 714.25,-299.62 708.25,-293.62 708.25,-287.62 708.25,-287.62 708.25,-275.62 708.25,-275.62 708.25,-269.62 714.25,-263.62 720.25,-263.62 720.25,-263.62 929.53,-263.62 929.53,-263.62 935.53,-263.62 941.53,-269.62 941.53,-275.62 941.53,-275.62 941.53,-287.62 941.53,-287.62 941.53,-293.62 935.53,-299.62 929.53,-299.62"/>
+<text xml:space="preserve" text-anchor="start" x="716.89" y="-283.12" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="10.00">RP sleeps only until the next renewal falls due</text>
+<text xml:space="preserve" text-anchor="start" x="716.89" y="-273.12" font-family="Helvetica,sans-Serif" font-size="10.00">wake = min(idle_until, next renewal deadline)</text>
 </g>
 <!-- RENEW&#45;&gt;WAKE -->
 <g id="edge49" class="edge">
 <title>RENEW&#45;&gt;WAKE</title>
-<path fill="none" stroke="#334155" d="M910.01,-407.67C910.01,-407.67 910.01,-311.68 910.01,-311.68"/>
-<polygon fill="#334155" stroke="#334155" points="913.52,-311.68 910.02,-301.68 906.52,-311.68 913.52,-311.68"/>
+<path fill="none" stroke="#334155" d="M914.51,-407.67C914.51,-407.67 914.51,-311.68 914.51,-311.68"/>
+<polygon fill="#334155" stroke="#334155" points="918.02,-311.68 914.52,-301.68 911.02,-311.68 918.02,-311.68"/>
 </g>
 <!-- SLEEP -->
 <g id="node57" class="node">
 <title>SLEEP</title>
-<path fill="#dcfce7" stroke="#166534" stroke-width="1.2" d="M974.9,-155.08C974.9,-155.08 662.88,-155.08 662.88,-155.08 656.88,-155.08 650.88,-149.08 650.88,-143.08 650.88,-143.08 650.88,-117 650.88,-117 650.88,-111 656.88,-105 662.88,-105 662.88,-105 974.9,-105 974.9,-105 980.9,-105 986.9,-111 986.9,-117 986.9,-117 986.9,-143.08 986.9,-143.08 986.9,-149.08 980.9,-155.08 974.9,-155.08"/>
-<text xml:space="preserve" text-anchor="start" x="659.51" y="-141.54" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="10.00">RP sleeps until </text>
-<text xml:space="preserve" text-anchor="start" x="733.76" y="-141.54" font-family="Courier,monospace" font-weight="bold" font-size="10.00">wake</text>
-<text xml:space="preserve" text-anchor="start" x="757.76" y="-141.54" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="10.00">, in 1&#45;second slices</text>
-<text xml:space="preserve" text-anchor="start" x="659.51" y="-131.54" font-family="Helvetica,sans-Serif" font-size="10.00">nothing is polled or awaited here — the slicing exists only so that a</text>
-<text xml:space="preserve" text-anchor="start" x="659.51" y="-121.54" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="10.00">Ctrl&#45;C / SIGINT / SIGTERM</text>
-<text xml:space="preserve" text-anchor="start" x="784.76" y="-121.54" font-family="Helvetica,sans-Serif" font-size="10.00"> is acted on within a second, instead of after</text>
-<text xml:space="preserve" text-anchor="start" x="659.51" y="-111.54" font-family="Helvetica,sans-Serif" font-size="10.00">the whole (possibly minutes&#45;long) sleep has run its course</text>
+<path fill="#dcfce7" stroke="#166534" stroke-width="1.2" d="M980.9,-155.08C980.9,-155.08 668.88,-155.08 668.88,-155.08 662.88,-155.08 656.88,-149.08 656.88,-143.08 656.88,-143.08 656.88,-117 656.88,-117 656.88,-111 662.88,-105 668.88,-105 668.88,-105 980.9,-105 980.9,-105 986.9,-105 992.9,-111 992.9,-117 992.9,-117 992.9,-143.08 992.9,-143.08 992.9,-149.08 986.9,-155.08 980.9,-155.08"/>
+<text xml:space="preserve" text-anchor="start" x="665.51" y="-141.54" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="10.00">RP sleeps until </text>
+<text xml:space="preserve" text-anchor="start" x="739.76" y="-141.54" font-family="Courier,monospace" font-weight="bold" font-size="10.00">wake</text>
+<text xml:space="preserve" text-anchor="start" x="763.76" y="-141.54" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="10.00">, in 1&#45;second slices</text>
+<text xml:space="preserve" text-anchor="start" x="665.51" y="-131.54" font-family="Helvetica,sans-Serif" font-size="10.00">nothing is polled or awaited here — the slicing exists only so that a</text>
+<text xml:space="preserve" text-anchor="start" x="665.51" y="-121.54" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="10.00">Ctrl&#45;C / SIGINT / SIGTERM</text>
+<text xml:space="preserve" text-anchor="start" x="790.76" y="-121.54" font-family="Helvetica,sans-Serif" font-size="10.00"> is acted on within a second, instead of after</text>
+<text xml:space="preserve" text-anchor="start" x="665.51" y="-111.54" font-family="Helvetica,sans-Serif" font-size="10.00">the whole (possibly minutes&#45;long) sleep has run its course</text>
 </g>
 <!-- WAKE&#45;&gt;SLEEP -->
 <g id="edge50" class="edge">
 <title>WAKE&#45;&gt;SLEEP</title>
-<path fill="none" stroke="#334155" d="M818.89,-263.03C818.89,-263.03 818.89,-167.13 818.89,-167.13"/>
-<polygon fill="#334155" stroke="#334155" points="822.39,-167.13 818.89,-157.13 815.39,-167.13 822.39,-167.13"/>
+<path fill="none" stroke="#334155" d="M824.89,-263.03C824.89,-263.03 824.89,-167.13 824.89,-167.13"/>
+<polygon fill="#334155" stroke="#334155" points="828.39,-167.13 824.89,-157.13 821.39,-167.13 828.39,-167.13"/>
 </g>
 <!-- SLEEP&#45;&gt;IDLEQ -->
 <g id="edge51" class="edge">
 <title>SLEEP&#45;&gt;IDLEQ</title>
-<path fill="none" stroke="#334155" d="M987.23,-152C1161.68,-152 1409.1,-152 1409.1,-152 1409.1,-152 1409.1,-559.63 1409.1,-559.63"/>
-<polygon fill="#334155" stroke="#334155" points="1405.6,-559.63 1409.1,-569.63 1412.6,-559.63 1405.6,-559.63"/>
-<text xml:space="preserve" text-anchor="middle" x="1389.23" y="-153.2" font-family="Helvetica,sans-Serif" font-size="9.00">re&#45;test</text>
+<path fill="none" stroke="#334155" d="M993.14,-152C1165.78,-152 1409.28,-152 1409.28,-152 1409.28,-152 1409.28,-559.63 1409.28,-559.63"/>
+<polygon fill="#334155" stroke="#334155" points="1405.79,-559.63 1409.29,-569.63 1412.79,-559.63 1405.79,-559.63"/>
+<text xml:space="preserve" text-anchor="middle" x="1392.28" y="-153.2" font-family="Helvetica,sans-Serif" font-size="9.00">re&#45;test</text>
 </g>
 <!-- IDLEQ&#45;&gt;RENEW -->
 <g id="edge48" class="edge">
 <title>IDLEQ&#45;&gt;RENEW</title>
-<path fill="none" stroke="#334155" d="M1345.86,-589.19C1345.86,-564.8 1345.86,-507 1345.86,-507 1345.86,-507 1209.35,-507 1209.35,-507"/>
-<polygon fill="#334155" stroke="#334155" points="1209.35,-503.5 1199.35,-507 1209.35,-510.5 1209.35,-503.5"/>
-<text xml:space="preserve" text-anchor="middle" x="1285.32" y="-508.2" font-family="Helvetica,sans-Serif" font-size="9.00">no · still napping</text>
+<path fill="none" stroke="#334155" d="M1346.04,-589.19C1346.04,-564.8 1346.04,-507 1346.04,-507 1346.04,-507 1212.23,-507 1212.23,-507"/>
+<polygon fill="#334155" stroke="#334155" points="1212.23,-503.5 1202.23,-507 1212.23,-510.5 1212.23,-503.5"/>
+<text xml:space="preserve" text-anchor="middle" x="1286.86" y="-508.2" font-family="Helvetica,sans-Serif" font-size="9.00">no · still napping</text>
 </g>
 <!-- IDLESIG -->
 <g id="node59" class="node">
@@ -1321,44 +1321,44 @@
 <!-- IDLEEX -->
 <g id="node60" class="node">
 <title>IDLEEX</title>
-<polygon fill="#f8fafc" stroke="#64748b" stroke-width="1.2" points="1375.9,-363.16 991.87,-363.16 991.87,-200.08 1381.9,-200.08 1381.9,-357.16 1375.9,-363.16"/>
-<polyline fill="none" stroke="#64748b" stroke-width="1.2" points="1375.9,-363.16 1375.9,-357.16"/>
-<polyline fill="none" stroke="#64748b" stroke-width="1.2" points="1381.9,-357.16 1375.9,-357.16"/>
-<text xml:space="preserve" text-anchor="start" x="1000.51" y="-350.57" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="9.00">Worked example — a 60 s nap, with </text>
-<text xml:space="preserve" text-anchor="start" x="1153.51" y="-350.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">&#45;&#45;ak&#45;renew&#45;margin 45</text>
-<text xml:space="preserve" text-anchor="start" x="1000.51" y="-341.57" font-family="Helvetica,sans-Serif" font-size="9.00">a credential is renewed a full margin BEFORE it expires, so its wake time is</text>
-<text xml:space="preserve" text-anchor="start" x="1000.51" y="-332.57" font-family="Courier,monospace" font-size="9.00">expiry − 45 s</text>
-<text xml:space="preserve" text-anchor="start" x="1068.76" y="-332.57" font-family="Helvetica,sans-Serif" font-size="9.00"> — that subtraction is what each line below is doing</text>
-<text xml:space="preserve" text-anchor="start" x="1000.51" y="-323.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=0 </text>
-<text xml:space="preserve" text-anchor="start" x="1021.51" y="-323.57" font-family="Courier,monospace" font-size="9.00">  nap starts, must still end at t=60</text>
-<text xml:space="preserve" text-anchor="start" x="1000.51" y="-314.57" font-family="Courier,monospace" font-size="9.00">        nothing due yet. Soonest expiry is a cert at </text>
-<text xml:space="preserve" text-anchor="start" x="1278.76" y="-314.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=55</text>
-<text xml:space="preserve" text-anchor="start" x="1299.76" y="-314.57" font-family="Courier,monospace" font-size="9.00">,</text>
-<text xml:space="preserve" text-anchor="start" x="1000.51" y="-305.57" font-family="Courier,monospace" font-size="9.00">        so it must be renewed at 55−45 = </text>
-<text xml:space="preserve" text-anchor="start" x="1215.76" y="-305.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=10</text>
-<text xml:space="preserve" text-anchor="start" x="1236.76" y="-305.57" font-family="Courier,monospace" font-size="9.00">         → sleep 10 s</text>
-<text xml:space="preserve" text-anchor="start" x="1000.51" y="-296.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=10</text>
-<text xml:space="preserve" text-anchor="start" x="1021.51" y="-296.57" font-family="Courier,monospace" font-size="9.00">  renew that one. Soonest expiry is now </text>
-<text xml:space="preserve" text-anchor="start" x="1231.51" y="-296.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=80</text>
-<text xml:space="preserve" text-anchor="start" x="1252.51" y="-296.57" font-family="Courier,monospace" font-size="9.00">,</text>
-<text xml:space="preserve" text-anchor="start" x="1000.51" y="-287.57" font-family="Courier,monospace" font-size="9.00">        so renew at 80−45 = </text>
-<text xml:space="preserve" text-anchor="start" x="1147.51" y="-287.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=35</text>
-<text xml:space="preserve" text-anchor="start" x="1168.51" y="-287.57" font-family="Courier,monospace" font-size="9.00">                 → sleep 25 s</text>
-<text xml:space="preserve" text-anchor="start" x="1000.51" y="-278.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=35</text>
-<text xml:space="preserve" text-anchor="start" x="1021.51" y="-278.57" font-family="Courier,monospace" font-size="9.00">  renew that one. Soonest expiry is now </text>
-<text xml:space="preserve" text-anchor="start" x="1231.51" y="-278.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=170</text>
-<text xml:space="preserve" text-anchor="start" x="1257.76" y="-278.57" font-family="Courier,monospace" font-size="9.00">,</text>
-<text xml:space="preserve" text-anchor="start" x="1000.51" y="-269.57" font-family="Courier,monospace" font-size="9.00">        so renew at 170−45 = t=125 — after the nap ends → sleep to t=60</text>
-<text xml:space="preserve" text-anchor="start" x="1000.51" y="-260.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=60</text>
-<text xml:space="preserve" text-anchor="start" x="1021.51" y="-260.57" font-family="Courier,monospace" font-size="9.00">  nap over → next attestation cycle</text>
-<text xml:space="preserve" text-anchor="start" x="1000.51" y="-251.57" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="9.00">One nap, three sleeps.</text>
-<text xml:space="preserve" text-anchor="start" x="1095.76" y="-251.57" font-family="Helvetica,sans-Serif" font-size="9.00"> Every wake renews only what is actually due, then</text>
-<text xml:space="preserve" text-anchor="start" x="1000.51" y="-242.57" font-family="Helvetica,sans-Serif" font-size="9.00">re&#45;derives the next wake from the soonest expiry still outstanding — so the RP</text>
-<text xml:space="preserve" text-anchor="start" x="1000.51" y="-233.57" font-family="Helvetica,sans-Serif" font-size="9.00">wakes when a credential needs it, never on a fixed tick.</text>
-<text xml:space="preserve" text-anchor="start" x="1000.51" y="-224.57" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="9.00">wake = min(end of nap, soonest expiry − margin)</text>
-<text xml:space="preserve" text-anchor="start" x="1206.76" y="-224.57" font-family="Helvetica,sans-Serif" font-size="9.00"> keeps both promises at once:</text>
-<text xml:space="preserve" text-anchor="start" x="1000.51" y="-215.57" font-family="Helvetica,sans-Serif" font-size="9.00">work due after t=60 is left to the next cycle&#39;s window, and the nap still ends</text>
-<text xml:space="preserve" text-anchor="start" x="1000.51" y="-206.57" font-family="Helvetica,sans-Serif" font-size="9.00">exactly on time. With nothing expiring soon, the whole thing is one 60 s sleep.</text>
+<polygon fill="#f8fafc" stroke="#64748b" stroke-width="1.2" points="1376.28,-363.16 997.5,-363.16 997.5,-200.08 1382.28,-200.08 1382.28,-357.16 1376.28,-363.16"/>
+<polyline fill="none" stroke="#64748b" stroke-width="1.2" points="1376.28,-363.16 1376.28,-357.16"/>
+<polyline fill="none" stroke="#64748b" stroke-width="1.2" points="1382.28,-357.16 1376.28,-357.16"/>
+<text xml:space="preserve" text-anchor="start" x="1006.14" y="-350.57" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="9.00">Worked example — a 60 s nap, with </text>
+<text xml:space="preserve" text-anchor="start" x="1159.14" y="-350.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">&#45;&#45;ak&#45;renew&#45;margin 5</text>
+<text xml:space="preserve" text-anchor="start" x="1006.14" y="-341.57" font-family="Helvetica,sans-Serif" font-size="9.00">a credential is renewed a full margin BEFORE it expires, so its wake time is</text>
+<text xml:space="preserve" text-anchor="start" x="1006.14" y="-332.57" font-family="Courier,monospace" font-size="9.00">expiry − 5 s</text>
+<text xml:space="preserve" text-anchor="start" x="1069.14" y="-332.57" font-family="Helvetica,sans-Serif" font-size="9.00"> — that subtraction is what each line below is doing</text>
+<text xml:space="preserve" text-anchor="start" x="1006.14" y="-323.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=0 </text>
+<text xml:space="preserve" text-anchor="start" x="1027.14" y="-323.57" font-family="Courier,monospace" font-size="9.00">  nap starts, must still end at t=60</text>
+<text xml:space="preserve" text-anchor="start" x="1006.14" y="-314.57" font-family="Courier,monospace" font-size="9.00">        nothing due yet. Soonest expiry is a cert at </text>
+<text xml:space="preserve" text-anchor="start" x="1284.39" y="-314.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=15</text>
+<text xml:space="preserve" text-anchor="start" x="1305.39" y="-314.57" font-family="Courier,monospace" font-size="9.00">,</text>
+<text xml:space="preserve" text-anchor="start" x="1006.14" y="-305.57" font-family="Courier,monospace" font-size="9.00">        so it must be renewed at 15−5 = </text>
+<text xml:space="preserve" text-anchor="start" x="1216.14" y="-305.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=10</text>
+<text xml:space="preserve" text-anchor="start" x="1237.14" y="-305.57" font-family="Courier,monospace" font-size="9.00">         → sleep 10 s</text>
+<text xml:space="preserve" text-anchor="start" x="1006.14" y="-296.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=10</text>
+<text xml:space="preserve" text-anchor="start" x="1027.14" y="-296.57" font-family="Courier,monospace" font-size="9.00">  renew that one. Soonest expiry is now </text>
+<text xml:space="preserve" text-anchor="start" x="1237.14" y="-296.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=40</text>
+<text xml:space="preserve" text-anchor="start" x="1258.14" y="-296.57" font-family="Courier,monospace" font-size="9.00">,</text>
+<text xml:space="preserve" text-anchor="start" x="1006.14" y="-287.57" font-family="Courier,monospace" font-size="9.00">        so renew at 40−5 = </text>
+<text xml:space="preserve" text-anchor="start" x="1147.89" y="-287.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=35</text>
+<text xml:space="preserve" text-anchor="start" x="1168.89" y="-287.57" font-family="Courier,monospace" font-size="9.00">                 → sleep 25 s</text>
+<text xml:space="preserve" text-anchor="start" x="1006.14" y="-278.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=35</text>
+<text xml:space="preserve" text-anchor="start" x="1027.14" y="-278.57" font-family="Courier,monospace" font-size="9.00">  renew that one. Soonest expiry is now </text>
+<text xml:space="preserve" text-anchor="start" x="1237.14" y="-278.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=130</text>
+<text xml:space="preserve" text-anchor="start" x="1263.39" y="-278.57" font-family="Courier,monospace" font-size="9.00">,</text>
+<text xml:space="preserve" text-anchor="start" x="1006.14" y="-269.57" font-family="Courier,monospace" font-size="9.00">        so renew at 130−5 = t=125 — after the nap ends → sleep to t=60</text>
+<text xml:space="preserve" text-anchor="start" x="1006.14" y="-260.57" font-family="Courier,monospace" font-weight="bold" font-size="9.00">t=60</text>
+<text xml:space="preserve" text-anchor="start" x="1027.14" y="-260.57" font-family="Courier,monospace" font-size="9.00">  nap over → next attestation cycle</text>
+<text xml:space="preserve" text-anchor="start" x="1006.14" y="-251.57" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="9.00">One nap, three sleeps.</text>
+<text xml:space="preserve" text-anchor="start" x="1101.39" y="-251.57" font-family="Helvetica,sans-Serif" font-size="9.00"> Every wake renews only what is actually due, then</text>
+<text xml:space="preserve" text-anchor="start" x="1006.14" y="-242.57" font-family="Helvetica,sans-Serif" font-size="9.00">re&#45;derives the next wake from the soonest expiry still outstanding — so the RP</text>
+<text xml:space="preserve" text-anchor="start" x="1006.14" y="-233.57" font-family="Helvetica,sans-Serif" font-size="9.00">wakes when a credential needs it, never on a fixed tick.</text>
+<text xml:space="preserve" text-anchor="start" x="1006.14" y="-224.57" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="9.00">wake = min(end of nap, soonest expiry − margin)</text>
+<text xml:space="preserve" text-anchor="start" x="1212.39" y="-224.57" font-family="Helvetica,sans-Serif" font-size="9.00"> keeps both promises at once:</text>
+<text xml:space="preserve" text-anchor="start" x="1006.14" y="-215.57" font-family="Helvetica,sans-Serif" font-size="9.00">work due after t=60 is left to the next cycle&#39;s window, and the nap still ends</text>
+<text xml:space="preserve" text-anchor="start" x="1006.14" y="-206.57" font-family="Helvetica,sans-Serif" font-size="9.00">exactly on time. With nothing expiring soon, the whole thing is one 60 s sleep.</text>
 </g>
 <!-- IDLEEX&#45;&gt;WAKE -->
 <!-- END -->
