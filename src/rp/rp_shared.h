@@ -86,7 +86,7 @@ static inline bool charra_cert_needs_renewal(time_t expires_at) {
  * continuously and its cache would stop meaning anything. */
 #define RP_DEFAULT_ATTESTATION_INTERVAL_S 15
 #define RP_DEFAULT_QUALIFY_RENEW_MARGIN_S 30
-#define RP_DEFAULT_NUM_VERIFIERS 5
+#define RP_DEFAULT_NUM_VERIFIERS 1
 #define RP_MAX_SWEEP_VERIFIERS 5
 
 /* Benchmark mode: how many measured cycles each verifier count contributes,

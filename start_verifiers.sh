@@ -15,7 +15,7 @@
 # effect immediately -- a running Trust Manager needs no restart.
 #
 # This script's own options:
-#   -n, --count N          how many Verifiers to start. Default 5.
+#   -n, --count N          how many Verifiers to start. Default 1.
 #   -p, --startingport P   port of the first one; the rest follow
 #                          consecutively. Default 5684.
 #       --host ADDR        address written into verifiers_config.txt, i.e. the
@@ -30,7 +30,7 @@
 # Verifier's own --ip, which is distinct from --host here).
 #
 # Examples:
-#   ./start_verifiers.sh                            # 5 Verifiers from 5684
+#   ./start_verifiers.sh                            # 1 Verifier on 5684
 #   ./start_verifiers.sh 3 --startingport 5684      # 5684, 5685, 5686
 #   (a bare number is the count only as the FIRST argument; use -n otherwise)
 #   ./start_verifiers.sh 3 --ak-validity 3600 -v    # 3, each with those flags
@@ -38,7 +38,7 @@
 
 set -euo pipefail
 
-COUNT=5
+COUNT=1
 START_PORT=5684
 HOST=127.0.0.1
 CONFIG=verifiers_config.txt
