@@ -449,6 +449,35 @@ actual order `run_one_attestation_cycle()` runs things in, for one cycle
   `ActivateCredential`. **Still open on the Attester/RP side**: neither
   party has a persistent AK yet, nor client logic to call `/certify_ak` and
   attach the result to `/appraise` — see "Not yet built."
+- **All three certification relationships prove possession before issuing.**
+  There are three: the Verifier certifying RP's AK_r, the Verifier
+  certifying the Attester's AK_a (RP relaying), and the RP certifying AK_a
+  under its own CA. Every one of them now runs the same order — the CA
+  `TPM2_MakeCredential`s a fresh 32-byte random secret against that
+  subject's EK, bound to its AK name; only the owning TPM can
+  `ActivateCredential` it; the echoed secret is compared in constant time,
+  with a wrong length counted as a mismatch; and **nothing is signed and no
+  issuance ledger is written until that comparison passes**. The
+  certificate then travels in the clear on the delivery leg, because a
+  certificate is public data and possession has already been established.
+
+  The leg counts still differ, for structural reasons rather than
+  historical ones. Certifying AK_r is two legs, because the Verifier and
+  its subject talk directly. Certifying AK_a from a Verifier is four,
+  because they cannot: the RP carries the challenge out and the echo back.
+  The RP certifying AK_a is three — one more than the direct case, because
+  a Verifier learns EK_a and AK_a from the request the RP sends it, whereas
+  the RP has to FETCH them first.
+
+  The RP's leg was the last to change. It previously issued first and
+  sealed the finished certificate to EK_a with AES-256-GCM, so the proof
+  was observable only to the Attester (fail the unwrap and you hold an
+  undecryptable blob) and the RP wrote its issuance record regardless of
+  the outcome. Cryptographically the binding was equivalent; the problem
+  was that the RP's ledger could not mean the same thing a Verifier's did.
+  Its ACTIVATE reuses the request kind the Verifier relay already used —
+  the Attester's handler cannot tell the two CAs apart, and does not need
+  to — and both DELIVER legs are now identical on the Attester side.
 - **AK-provisioning state — built as `charra_ak_state.h`/`.c`** (Part 3): a
   persisted, on-disk record of every `/certify_ak` issuance. Renewal
   automatically revokes the requester's previous record; expiry is checked
