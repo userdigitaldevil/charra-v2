@@ -452,10 +452,12 @@ CHARRA_RC ensure_rp_ak_certificate(int verifier_index) {
         return CHARRA_RC_SUCCESS;
     }
     if (rp_ak_cert_ready[verifier_index]) {
-        /* Held in memory but expiring: a long-running daemon has to notice
-         * this, so the check is on every call rather than at startup. */
+        /* Held in memory but already expired: a long-running daemon has to
+         * notice this, so the check is on every call rather than at startup.
+         * There is no renewal margin -- this fires only once the certificate
+         * has genuinely lapsed. */
         charra_log_info("[" LOG_NAME "] In-memory AK certificate for Verifier "
-                        "%d is near expiry -- re-provisioning.",
+                        "%d has expired -- re-provisioning.",
                 verifier_index + 1);
         charra_free_if_not_null(rp_ak_cert_der[verifier_index]);
         rp_ak_cert_der[verifier_index] = NULL;

@@ -160,8 +160,7 @@ static bool rp_qualification_still_valid(time_t renew_deadline, time_t now) {
     return true;
 }
 
-CHARRA_RC rp_perform_qualification_handshake_once(
-        int num_verifiers, time_t refresh_margin_seconds) {
+CHARRA_RC rp_perform_qualification_handshake_once(int num_verifiers) {
     /* AK certificate readiness is orthogonal to the qualification cache
      * below: /qualify/submit needs an AK cert issued by whichever Verifier
      * we end up qualifying against, so it's provisioned per-candidate
@@ -177,12 +176,11 @@ CHARRA_RC rp_perform_qualification_handshake_once(
      * without it, RP re-qualified unconditionally on every single
      * attestation cycle regardless of how much of a previous grant was
      * left. See CHARRA_V2_NOTES.md. */
-    /* Compared against now+margin rather than now: with margin 0 this is
-     * exactly "renew only once expired"; with a margin it renews while the
-     * grant is still valid, which is what lets daemon mode do the renewal
-     * in its idle window instead of inside an attestation. */
+    /* Renew only once the grant has genuinely expired -- there is no
+     * margin and no early renewal, so a still-valid grant is always
+     * reused as-is. */
     time_t now = time(NULL);
-    if (rp_qualification_still_valid(now + refresh_margin_seconds, now)) {
+    if (rp_qualification_still_valid(now, now)) {
         return CHARRA_RC_SUCCESS;
     }
 
@@ -203,7 +201,7 @@ CHARRA_RC rp_perform_qualification_handshake_once(
      * pass it, and without this second look both would run the full
      * handshake, the second one discarding a grant it had just renewed. */
     now = time(NULL);
-    if (rp_qualification_still_valid(now + refresh_margin_seconds, now)) {
+    if (rp_qualification_still_valid(now, now)) {
         pthread_mutex_unlock(&rp_qualification_mutex);
         return CHARRA_RC_SUCCESS;
     }
@@ -376,17 +374,6 @@ CHARRA_RC rp_perform_qualification_handshake_once(
                     "second(s) from now, as granted by this Verifier); "
                     "shared with every other Verifier.",
                     (long)expires_at, (long)(expires_at - time(NULL)));
-            /* The margin only helps if it fits inside the window the
-             * Verifier actually granted -- which RP only learns here, not
-             * at CLI-parse time. */
-            if (rp_qualify_renew_margin_s > 0 &&
-                    (time_t)rp_qualify_renew_margin_s >= expires_at - time(NULL)) {
-                charra_log_warn(
-                        "[" LOG_NAME "] --qualify-renew-margin (%us) is not smaller "
-                        "than the %lds window this Verifier grants; RP will "
-                        "re-qualify on every idle pass.",
-                        rp_qualify_renew_margin_s, (long)(expires_at - time(NULL)));
-            }
             result = CHARRA_RC_SUCCESS;
         } else {
             charra_log_error(

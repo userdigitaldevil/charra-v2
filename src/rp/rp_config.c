@@ -40,8 +40,6 @@ static const struct option rp_long_options[] = {{"help", no_argument, 0, '0'},
         {"log-level", required_argument, 0, 'l'},
         {"benchmark", no_argument, 0, 'B'},
         {"interval", required_argument, 0, 'I'},
-        {"qualify-renew-margin", required_argument, 0, 'Q'},
-        {"ak-renew-margin", required_argument, 0, 'R'},
         {"verifiers", required_argument, 0, 'n'},
         {"attester-ak-validity", required_argument, 0, 'A'},
         {"duration", required_argument, 0, 'D'},
@@ -102,19 +100,6 @@ int parse_rp_command_line(int argc, char** argv) {
             printf(" -I, --interval=SECONDS:       Daemon mode: seconds "
                    "between attestation cycles. Default %d.\n",
                     RP_DEFAULT_ATTESTATION_INTERVAL_S);
-            printf(" -Q, --qualify-renew-margin=SECONDS: Daemon mode: renew "
-                   "qualification once it expires within SECONDS, from the "
-                   "idle window rather than inside an attestation. Must stay "
-                   "below the Verifier's --qualification-validity. Default "
-                   "%d.\n",
-                    RP_DEFAULT_QUALIFY_RENEW_MARGIN_S);
-            printf("     --ak-renew-margin=SECONDS: Renew an AK "
-               "certificate once it is within this long of "
-               "expiring.\n");
-        printf("               Applies to RP's own AK certificate "
-               "and to both of the Attester's. Default: %ds "
-               "\n",
-                RP_DEFAULT_AK_RENEW_MARGIN_S);
         printf(" -n, --verifiers=COUNT:        Daemon mode: attest against "
                    "COUNT Verifiers per attestation cycle (1..%d). "
                    "Default %d.\n",
@@ -161,23 +146,6 @@ int parse_rp_command_line(int argc, char** argv) {
                 return -1;
             }
             rp_attestation_interval_s = (unsigned int)value;
-            break;
-        case 'Q':
-            if (!charra_cli_parse_uint_arg(LOG_NAME,
-                        "--qualify-renew-margin", optarg, 0, 86400, &value)) {
-                return -1;
-            }
-            rp_qualify_renew_margin_s = (unsigned int)value;
-            break;
-        case 'R':
-            /* Upper bound is a year: a margin beyond that exceeds any
-             * plausible certificate lifetime, which would mean renewing on
-             * every cycle forever. */
-            if (!charra_cli_parse_uint_arg(LOG_NAME, "--ak-renew-margin",
-                        optarg, 0, 365L * 24 * 60 * 60, &value)) {
-                return -1;
-            }
-            rp_ak_renew_margin_s = (time_t)value;
             break;
         case 'n':
             if (!charra_cli_parse_uint_arg(LOG_NAME, "--verifiers", optarg, 1,
@@ -229,12 +197,6 @@ int parse_rp_command_line(int argc, char** argv) {
         }
     }
 
-        /* The other bound: a margin covering the whole validity window can
-     * never be satisfied, so every idle pass would re-qualify. */
-    /* No margin-vs-validity check here: the window is the Verifier's to
-     * choose (--qualification-validity there) and arrives on the wire, so
-     * it is checked where it is actually learned -- see the warning beside
-     * qualify_submit_expires_at. */
     return 0;
 }
 
@@ -307,11 +269,7 @@ void rp_log_effective_configuration(void) {
                 charra_cli_default_tag('C'));
     }
 
-    /* Renewal margins and log level apply to both modes. */
-    charra_log_info("[" LOG_NAME "]   %-22s %us%s", "--qualify-renew-margin",
-            rp_qualify_renew_margin_s, charra_cli_default_tag('Q'));
-    charra_log_info("[" LOG_NAME "]   %-22s %lds%s", "--ak-renew-margin",
-            (long)rp_ak_renew_margin_s, charra_cli_default_tag('R'));
+    /* Certificate lifetime and log level apply to both modes. */
     charra_log_info("[" LOG_NAME "]   %-22s %lds%s", "--attester-ak-validity",
             (long)attester_ak_cert_validity_seconds,
             charra_cli_default_tag('A'));

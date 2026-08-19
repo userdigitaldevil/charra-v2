@@ -573,11 +573,10 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
      * path in verifier/verifier_shared.h), so one Verifier's answer is every Verifier's
      * answer. No Verifier will accept /appraise without it, so abort here
      * rather than spawning threads that would all fail identically. */
-    rp_num_verifiers_this_cycle = num_verifiers;
-    /* Margin 0: this is the attestation path -- it needs a valid
-     * qualification, but has no reason to renew one that is still good.
-     * Daemon mode does early renewal from its idle window instead. */
-    if (rp_perform_qualification_handshake_once(num_verifiers, 0) !=
+    /* Re-qualifies only if the grant has actually expired; a still-valid
+     * one is reused as-is. Nothing renews it ahead of time, so this is the
+     * only place a re-qualification can happen. */
+    if (rp_perform_qualification_handshake_once(num_verifiers) !=
             CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not qualify with any "
                          "reachable Verifier; aborting attestation run.");

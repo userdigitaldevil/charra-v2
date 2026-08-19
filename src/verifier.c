@@ -59,12 +59,12 @@ char* verifier_ca_key_path = "keys/verifier-ca.key";
  * fixed absolute window: with a fixed not_after every certificate this
  * process ever issues would expire at the same instant, so one issued
  * late would live for less time than one issued early. Settable with
- * --ak-validity. Five minutes by default, matching the qualification
- * window: short-lived credentials keep the renewal path exercised on every
- * run instead of lying dormant behind a multi-year default. Must stay
- * comfortably above RP's --ak-renew-margin, or RP re-provisions on every
- * cycle. */
-#define CHARRA_AK_CERT_VALIDITY_SECONDS_DEFAULT (5 * 60)
+ * --ak-validity. Five years by default: RP renews only once a certificate
+ * has actually expired, so a short lifetime would buy nothing but a
+ * re-provisioning round inside an otherwise ordinary cycle. Revocation,
+ * not expiry, is what withdraws trust here -- see the AK issuance ledger
+ * below. */
+#define CHARRA_AK_CERT_VALIDITY_SECONDS_DEFAULT (5L * 365 * 24 * 60 * 60)
 time_t ak_cert_validity_seconds =
         CHARRA_AK_CERT_VALIDITY_SECONDS_DEFAULT;
 /* Persisted record of AK certificates issued via /certify_ak -- see

@@ -25,8 +25,6 @@
 bool rp_benchmark_mode = false;
 unsigned int rp_attestation_interval_s =
         RP_DEFAULT_ATTESTATION_INTERVAL_S;
-unsigned int rp_qualify_renew_margin_s = RP_DEFAULT_QUALIFY_RENEW_MARGIN_S;
-time_t rp_ak_renew_margin_s = RP_DEFAULT_AK_RENEW_MARGIN_S;
 int rp_num_verifiers = RP_DEFAULT_NUM_VERIFIERS;
 /* Optional daemon stop conditions; 0 = unbounded (run until signalled).
  * Both exit through exactly the same path as a signal, so shutdown stays
@@ -163,13 +161,15 @@ char* rp_ca_key_path = "keys/rp-ca.key";
 /* Lifetime of the Attester AK certificate RP issues under its own CA,
  * as a duration from issuance rather than a fixed absolute window (see
  * verifier.c's ak_cert_validity_seconds for why). Settable with
- * --attester-ak-validity. Five minutes by default, same reasoning as the
- * Verifier's --ak-validity.
+ * --attester-ak-validity. Five years by default, matching the Verifier's
+ * --ak-validity: with renewal driven purely by actual expiry there is no
+ * margin to keep it short for, so a PoC run never spends a cycle
+ * re-provisioning.
  * Independent of the Verifier's own --ak-validity: that one covers the
  * certificates the Verifier issues, this one only the Attester
  * certificate RP signs itself. Each certificate carries its own
  * notAfter, so the two never need to agree. */
-#define RP_AK_CERT_VALIDITY_SECONDS_DEFAULT (5 * 60)
+#define RP_AK_CERT_VALIDITY_SECONDS_DEFAULT (5L * 365 * 24 * 60 * 60)
 time_t attester_ak_cert_validity_seconds =
         RP_AK_CERT_VALIDITY_SECONDS_DEFAULT;
 char* attester_ak_state_file_path =
@@ -263,12 +263,6 @@ bool processing_qualify_submit_response = false;
  * one-time, Verifier-agnostic fact. 0 means "unknown/not currently
  * valid". */
 time_t rp_qualified_until = 0;
-/* How many verifiers[] entries rp_perform_qualification_handshake_once()
- * may try, set once by get_attestation_results() before spawning threads --
- * threads themselves only know their own index (see get_attestation_
- * results_thread()'s arg), so the retry-on-rejection path reads this
- * instead of a parameter. */
-int rp_num_verifiers_this_cycle = 0;
 /* Guards every TPM connection RP opens (provisioning and, later, each
  * Quote_r signing operation): the TPM simulator this dev environment uses
  * accepts only one client connection at a time, and every other binary
@@ -327,60 +321,6 @@ msg_certify_ak_response_dto certify_ak_response = {0};
 
 /** @brief SIGINT/SIGTERM handler: requests graceful termination. */
 static void handle_sigint(int signum CHARRA_UNUSED) { quit = true; }
-
-/**
- * @brief Renew any credential already inside its renewal margin.
- *
- * Every call is a cheap no-op unless something is actually due: each
- * ensure_* checks an in-memory expiry first and returns without I/O.
- */
-static void rp_renew_due_credentials(int num_verifiers) {
-    if (rp_qualify_renew_margin_s > 0) {
-        rp_perform_qualification_handshake_once(
-                num_verifiers, (time_t)rp_qualify_renew_margin_s);
-    }
-    /* The RP-issued Attester AK certificate renews here too, not only from
-     * the next cycle's ensure_* call: rp_next_renewal_due() folds its expiry
-     * into the wake time, so without this the RP woke exactly when it fell
-     * due and renewed nothing, then slept again. Its own margin check makes
-     * this a no-op until it is actually close to expiring. */
-    ensure_attester_identity_provisioned();
-    for (int i = 0; i < num_verifiers; ++i) {
-        ensure_rp_ak_certificate(i);
-        ensure_attester_identity_certified_by_verifier(i);
-    }
-}
-
-/**
- * @brief When the next credential falls due for renewal, or 0 if none is
- * known yet. Used to size the idle nap so RP wakes exactly when something
- * needs doing instead of at the next loop iteration.
- */
-static time_t rp_next_renewal_due(int num_verifiers) {
-    time_t earliest = 0;
-    if (rp_qualify_renew_margin_s > 0 && rp_qualified_until > 0) {
-        earliest = rp_qualified_until - (time_t)rp_qualify_renew_margin_s;
-    }
-    const time_t m = rp_ak_renew_margin_s;
-    for (int i = 0; i < num_verifiers; ++i) {
-        const time_t due[] = {rp_ak_cert_expires_at[i] - m,
-                attester_ak_cert_by_verifier_expires_at[i] - m};
-        const time_t have[] = {
-                rp_ak_cert_expires_at[i], attester_ak_cert_by_verifier_expires_at[i]};
-        for (size_t k = 0; k < 2; ++k) {
-            if (have[k] > 0 && (earliest == 0 || due[k] < earliest)) {
-                earliest = due[k];
-            }
-        }
-    }
-    if (attester_ak_cert_rp_expires_at > 0) {
-        time_t d = attester_ak_cert_rp_expires_at - m;
-        if (earliest == 0 || d < earliest) {
-            earliest = d;
-        }
-    }
-    return earliest;
-}
 
 /* --- attestation cycle -------------------------------------------------- */
 
@@ -704,36 +644,12 @@ int main(int argc, char** argv) {
                         "next attestation.",
                 cycle, nap);
 
-        /* Idle window. Renewals are driven by their own deadlines here, not
-         * by the loop's cadence: RP is doing nothing during this sleep, so
-         * anything that falls due mid-nap is renewed the moment it does
-         * rather than waiting for the next iteration to look. That is what
-         * decouples the renewal margins from --interval. Without it, a
-         * margin shorter than the interval lets the loop step straight over
-         * the renewal window, and the work lands inside the next attestation
-         * instead (get_attestation_results()'s margin-0 path), which is
-         * exactly what the margins exist to avoid. */
-        time_t idle_until = time(NULL) + nap;
-        while (!quit) {
-            time_t now = time(NULL);
-            if (now >= idle_until) {
-                break;
-            }
-            rp_renew_due_credentials(rp_num_verifiers);
-            if (quit) {
-                break;
-            }
-
-            time_t wake = idle_until;
-            time_t due = rp_next_renewal_due(rp_num_verifiers);
-            if (due > now && due < wake) {
-                wake = due;
-            }
-            now = time(NULL);
-            if (wake > now) {
-                rp_interruptible_sleep((unsigned int)(wake - now));
-            }
-        }
+        /* Nothing happens during the nap: no renewal, no I/O, no timers.
+         * Every credential is re-checked by its own ensure_* when the next
+         * cycle reaches it, and re-provisioned only once it has actually
+         * expired. The sleep is sliced internally so a stop request is
+         * acted on within a second rather than at the end of the nap. */
+        rp_interruptible_sleep(nap);
 
         if (daemon_deadline > 0 && time(NULL) >= daemon_deadline) {
             stop_reason = "--duration elapsed";

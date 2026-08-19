@@ -691,7 +691,7 @@ CHARRA_RC ensure_attester_identity_certified_by_verifier(
     }
     if (attester_ak_cert_by_verifier_ready[verifier_index]) {
         charra_log_info("[" LOG_NAME "] In-memory Attester AK certificate for "
-                        "Verifier %d is near expiry -- re-provisioning.",
+                        "Verifier %d has expired -- re-provisioning.",
                 verifier_index + 1);
         charra_free_if_not_null(
                 attester_ak_cert_by_verifier_der[verifier_index]);

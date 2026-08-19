@@ -14,16 +14,15 @@
 /**
  * @brief Load a cached certificate and report whether it can be used as-is.
  *
- * Usable means: the file exists, parses as X.509, and is not yet inside the
- * renewal margin. Anything else -- missing, unreadable, malformed, expiring
- * -- is reported as unusable so the caller re-provisions, which is the only
- * correct response: every one of these caches is keyed on nothing but the
- * file existing, and no peer gives the RP a distinct signal for "the
- * certificate you sent is stale" (a Verifier just votes NO). Without acting
- * on expiry here, a lapsed certificate would be reloaded and re-sent every
- * cycle and rejected every cycle, with nothing ever replacing it -- a stuck
- * state only a manual delete could clear. Renewing slightly early also keeps
- * a renewal from landing mid-cycle.
+ * Usable means: the file exists, parses as X.509, and has not yet expired.
+ * Anything else -- missing, unreadable, malformed, expired -- is reported as
+ * unusable so the caller re-provisions, which is the only correct response:
+ * every one of these caches is keyed on nothing but the file existing, and
+ * no peer gives the RP a distinct signal for "the certificate you sent is
+ * stale" (a Verifier just votes NO). Without acting on expiry here, a lapsed
+ * certificate would be reloaded and re-sent every cycle and rejected every
+ * cycle, with nothing ever replacing it -- a stuck state only a manual
+ * delete could clear.
  *
  * @param[in] cert_path file to load.
  * @param[in] description names the certificate in this function's log lines,
