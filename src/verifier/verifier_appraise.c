@@ -24,6 +24,7 @@
 #include "../util/charra_util.h"
 #include "../util/coap_util.h"
 #include "../util/crypto_util.h"
+#include "../util/hex_util.h"
 #include "../util/io_util.h"
 #include "verifier_shared.h"
 #include "verifier_util.h"
@@ -270,7 +271,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     uint8_t ek_fingerprint_rp[32] = {0};
     if (attestation_result_ekak_rp) {
         char ak_serial_rp_hex[33] = {0};
-        hex_prefix(ak_serial_rp, sizeof(ak_serial_rp), ak_serial_rp_hex,
+        charra_hex_encode_prefix(ak_serial_rp, sizeof(ak_serial_rp), ak_serial_rp_hex,
                 sizeof(ak_serial_rp_hex));
         charra_log_info(
                 "[" LOG_NAME "]     => RP's AK certificate is valid! "
@@ -282,7 +283,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                 &ak_cert_expires_at_rp);
         if (attestation_result_ekak_rp) {
             char ek_fingerprint_rp_hex[17] = {0};
-            hex_prefix(ek_fingerprint_rp, sizeof(ek_fingerprint_rp),
+            charra_hex_encode_prefix(ek_fingerprint_rp, sizeof(ek_fingerprint_rp),
                     ek_fingerprint_rp_hex, sizeof(ek_fingerprint_rp_hex));
             charra_log_info(
                     "[" LOG_NAME "]     => RP identity %s...: AK certificate "
@@ -340,7 +341,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                     "[" LOG_NAME "] Could not load qualification state.");
         }
         char ek_fingerprint_rp_hex[17] = {0};
-        hex_prefix(ek_fingerprint_rp, sizeof(ek_fingerprint_rp),
+        charra_hex_encode_prefix(ek_fingerprint_rp, sizeof(ek_fingerprint_rp),
                 ek_fingerprint_rp_hex, sizeof(ek_fingerprint_rp_hex));
         if (attestation_result_qualified) {
             charra_log_info(
@@ -451,9 +452,9 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         } else {
             char expected_nonce_hex[17] = {0};
             char received_nonce_hex[17] = {0};
-            hex_prefix(expected_nonce, expected_nonce_len, expected_nonce_hex,
+            charra_hex_encode_prefix(expected_nonce, expected_nonce_len, expected_nonce_hex,
                     sizeof(expected_nonce_hex));
-            hex_prefix(res.verifier_nonce, res.verifier_nonce_len,
+            charra_hex_encode_prefix(res.verifier_nonce, res.verifier_nonce_len,
                     received_nonce_hex, sizeof(received_nonce_hex));
             charra_log_error("[" LOG_NAME
                              "]     => Nonce in Quote_r is NOT valid! (%s)",
@@ -545,7 +546,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                     CHARRA_RC_SUCCESS;
             if (attestation_result_ekak) {
                 char ak_serial_hex[33] = {0};
-                hex_prefix(ak_serial, sizeof(ak_serial), ak_serial_hex,
+                charra_hex_encode_prefix(ak_serial, sizeof(ak_serial), ak_serial_hex,
                         sizeof(ak_serial_hex));
                 /* Chain validity alone cannot see a certificate superseded
                  * by a later renewal for the same EK -- only the ledger
@@ -646,7 +647,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                         last_request.nonce_len, last_request.nonce,
                         &attest_struct);
         char expected_nonce_hex[17] = {0};
-        hex_prefix(last_request.nonce, last_request.nonce_len,
+        charra_hex_encode_prefix(last_request.nonce, last_request.nonce_len,
                 expected_nonce_hex, sizeof(expected_nonce_hex));
         size_t expected_attester_nonce_len = last_request.nonce_len;
         /* Spent whichever way it went, so the next round must re-establish
@@ -658,7 +659,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                             "valid! (matches the one sent)");
         } else {
             char received_nonce_hex[17] = {0};
-            hex_prefix(attest_struct.extraData.buffer,
+            charra_hex_encode_prefix(attest_struct.extraData.buffer,
                     attest_struct.extraData.size, received_nonce_hex,
                     sizeof(received_nonce_hex));
             charra_log_error("[" LOG_NAME
@@ -683,7 +684,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                               attestation_result_nonce;
 
     char ek_fingerprint_rp_hex_result[17] = {0};
-    hex_prefix(ek_fingerprint_rp, sizeof(ek_fingerprint_rp),
+    charra_hex_encode_prefix(ek_fingerprint_rp, sizeof(ek_fingerprint_rp),
             ek_fingerprint_rp_hex_result, sizeof(ek_fingerprint_rp_hex_result));
 
     /* Every reason this vote is a NO, in one place. Logged HERE ONLY -- the

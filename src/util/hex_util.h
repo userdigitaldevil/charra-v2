@@ -17,6 +17,14 @@
 void charra_hex_encode(const uint8_t* data, size_t data_len, char* out);
 
 /**
+ * @brief Encodes as many of data_len's bytes as fit in out_len (including
+ * the NUL), truncating rather than overflowing. For log lines, where a
+ * readable prefix of a long field is enough.
+ */
+void charra_hex_encode_prefix(
+        const uint8_t* data, size_t data_len, char* out, size_t out_len);
+
+/**
  * @brief Decodes exactly byte_len*2 hex chars from hex into out. Returns
  * false on any non-hex character or if hex is shorter than byte_len*2.
  */

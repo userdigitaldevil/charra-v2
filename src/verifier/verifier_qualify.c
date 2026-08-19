@@ -24,6 +24,7 @@
 #include "../util/charra_util.h"
 #include "../util/coap_util.h"
 #include "../util/crypto_util.h"
+#include "../util/hex_util.h"
 #include "../util/io_util.h"
 #include "verifier_shared.h"
 #include "verifier_util.h"
@@ -282,7 +283,7 @@ void coap_qualify_submit_handler(struct coap_resource_t* resource,
     charra_rp_qualification_state_free(&qualification_state);
 
     char ek_fingerprint_hex[17] = {0};
-    hex_prefix(ek_fingerprint, sizeof(ek_fingerprint), ek_fingerprint_hex,
+    charra_hex_encode_prefix(ek_fingerprint, sizeof(ek_fingerprint), ek_fingerprint_hex,
             sizeof(ek_fingerprint_hex));
 
     if (qualification_rc == CHARRA_RC_SUCCESS) {

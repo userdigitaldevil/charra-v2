@@ -27,6 +27,7 @@
 #include "../util/charra_util.h"
 #include "../util/coap_util.h"
 #include "../util/crypto_util.h"
+#include "../util/hex_util.h"
 #include "../util/io_util.h"
 #include "../util/tpm2_util.h"
 #include "verifier_shared.h"
@@ -285,7 +286,7 @@ static CHARRA_RC certify_ak_do_challenge(const msg_certify_ak_request_dto* req,
     certify_ak_pending_store(&challenge);
     {
         char fingerprint_hex[17] = {0};
-        hex_prefix(challenge.ek_fingerprint, sizeof(challenge.ek_fingerprint),
+        charra_hex_encode_prefix(challenge.ek_fingerprint, sizeof(challenge.ek_fingerprint),
                 fingerprint_hex, sizeof(fingerprint_hex));
         charra_log_info("[" LOG_NAME "] /certify_ak: CHALLENGE issued to "
                         "identity %s... (subject=%s, valid %ds); awaiting "
@@ -341,7 +342,7 @@ static CHARRA_RC certify_ak_do_confirm(const msg_certify_ak_request_dto* req,
         goto cleanup;
     }
     char ek_fingerprint_hex[17] = {0};
-    hex_prefix(ek_fingerprint, sizeof(ek_fingerprint), ek_fingerprint_hex,
+    charra_hex_encode_prefix(ek_fingerprint, sizeof(ek_fingerprint), ek_fingerprint_hex,
             sizeof(ek_fingerprint_hex));
 
     certify_ak_pending_challenge challenge = {0};
@@ -474,7 +475,7 @@ static CHARRA_RC certify_ak_do_confirm(const msg_certify_ak_request_dto* req,
             if (charra_ak_state_find_by_ek_fingerprint(existing_records,
                         existing_count, ek_fingerprint, &existing_index)) {
                 char prev_serial_hex[33] = {0};
-                hex_prefix(existing_records[existing_index].serial,
+                charra_hex_encode_prefix(existing_records[existing_index].serial,
                         sizeof(existing_records[existing_index].serial),
                         prev_serial_hex, sizeof(prev_serial_hex));
                 bool prev_was_valid = charra_ak_state_is_valid(
@@ -514,7 +515,7 @@ static CHARRA_RC certify_ak_do_confirm(const msg_certify_ak_request_dto* req,
     }
     {
         char new_serial_hex[33] = {0};
-        hex_prefix(ak_cert_serial, sizeof(ak_cert_serial), new_serial_hex,
+        charra_hex_encode_prefix(ak_cert_serial, sizeof(ak_cert_serial), new_serial_hex,
                 sizeof(new_serial_hex));
         charra_log_info(
                 "[" LOG_NAME "] /certify_ak: identity %s...: new AK "

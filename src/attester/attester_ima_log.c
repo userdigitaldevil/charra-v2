@@ -15,6 +15,7 @@
 
 #include "../core/charra_dto.h"
 #include "../core/charra_event_log.h"
+#include "../util/hex_util.h"
 #include "../util/io_util.h"
 #include "../util/tpm2_util.h"
 
@@ -24,45 +25,6 @@
  * from these exact bytes, so every response must carry these exact bytes. */
 static uint8_t* cached_ima_log = NULL;
 static uint32_t cached_ima_log_len = 0;
-
-/**
- * @brief Converts one ASCII hex character to its value, or -1 if it is not a
- * hex digit.
- */
-static int hex_nibble(const char c) {
-    if (c >= '0' && c <= '9') {
-        return c - '0';
-    }
-    if (c >= 'a' && c <= 'f') {
-        return c - 'a' + 10;
-    }
-    if (c >= 'A' && c <= 'F') {
-        return c - 'A' + 10;
-    }
-    return -1;
-}
-
-/**
- * @brief Decodes hex_len ASCII hex characters into out_len bytes.
- *
- * @return true on success, false if the lengths disagree or a non-hex
- * character is encountered.
- */
-static bool hex_str_to_bytes(const char* hex, const size_t hex_len,
-        uint8_t* out, const size_t out_len) {
-    if (hex == NULL || out == NULL || hex_len != out_len * 2) {
-        return false;
-    }
-    for (size_t i = 0; i < out_len; ++i) {
-        const int hi = hex_nibble(hex[2 * i]);
-        const int lo = hex_nibble(hex[2 * i + 1]);
-        if (hi < 0 || lo < 0) {
-            return false;
-        }
-        out[i] = (uint8_t)((hi << 4) | lo);
-    }
-    return true;
-}
 
 /**
  * @brief Serializes one ima-ng entry's template_data into buf.
@@ -154,8 +116,8 @@ CHARRA_RC charra_ima_log_ascii_to_binary(
         const size_t file_hash_hex_len = strlen(file_hash_hex);
         uint8_t file_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
         if (file_hash_hex_len != TPM2_SHA256_DIGEST_SIZE * 2 ||
-                !hex_str_to_bytes(file_hash_hex, file_hash_hex_len, file_digest,
-                        TPM2_SHA256_DIGEST_SIZE)) {
+                !charra_hex_decode(
+                        file_hash_hex, TPM2_SHA256_DIGEST_SIZE, file_digest)) {
             charra_log_warn("[" LOG_NAME "] Skipping line %u: file hash is not "
                             "a valid 32 byte hex digest.",
                     line_no);
