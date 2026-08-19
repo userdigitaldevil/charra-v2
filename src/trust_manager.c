@@ -146,11 +146,9 @@ static void coap_handler(struct coap_resource_t* resource,
     /* get data */
     size_t data_len = 0;
     const uint8_t* data = NULL;
-    size_t data_offset = 0;
     size_t data_total_len = 0;
-    if ((coap_r = coap_get_data_large(
-                 request, &data_len, &data, &data_offset, &data_total_len)) == 0) {
-        charra_log_error("[" LOG_NAME "] Could not get CoAP PDU data.");
+    if (!charra_coap_get_payload(request, LOG_NAME, "/get_verifiers", &data,
+                &data_len, &data_total_len)) {
         /* Nothing allocated yet at this point (verifier_infos/response_data
          * below don't exist), so a plain return is correct here -- unlike
          * further down, there is nothing for a 'goto cleanup' to free, and

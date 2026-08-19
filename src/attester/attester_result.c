@@ -24,12 +24,8 @@ void coap_attest_result_handler(
 
     size_t data_len = 0;
     const uint8_t* data = NULL;
-    size_t data_offset = 0;
-    size_t data_total_len = 0;
-    if (coap_get_data_large(request, &data_len, &data, &data_offset,
-                &data_total_len) == 0) {
-        charra_log_error(
-                "[" LOG_NAME "] /attest_result: could not get CoAP PDU data.");
+    if (!charra_coap_get_payload(
+                request, LOG_NAME, "/attest_result", &data, &data_len, NULL)) {
         coap_pdu_set_code(response, COAP_RESPONSE_CODE_BAD_REQUEST);
         return;
     }

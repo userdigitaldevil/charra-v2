@@ -216,6 +216,21 @@ const char* charra_coap_method_to_str(const coap_request_t method);
 void charra_coap_log_peer_address(const char* log_name,
         const char* endpoint_name, struct coap_session_t* session);
 
+/**
+ * @brief Extracts a CoAP PDU's payload, logging under log_name/context when
+ * the PDU carries none.
+ *
+ * Wraps coap_get_data_large(), whose block-wise offset output is write-only
+ * at every call site in this codebase and so is not exposed here.
+ *
+ * @param context what is being read, for the log line, e.g. "/appraise".
+ * @param data_total_len_out the block-wise total; NULL if unwanted.
+ * @return false if the PDU carries no payload, with the outputs zeroed.
+ */
+bool charra_coap_get_payload(const struct coap_pdu_t* pdu,
+        const char* log_name, const char* context, const uint8_t** data_out,
+        size_t* data_len_out, size_t* data_total_len_out);
+
 /* --- server lifecycle ---------------------------------------------------- */
 
 /**

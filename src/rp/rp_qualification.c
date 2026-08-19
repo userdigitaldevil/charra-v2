@@ -26,6 +26,7 @@
 #include "../core/charra_marshaling.h"
 #include "../core/charra_rp_qualification.h"
 #include "../core/charra_sdk.h"
+#include "../util/coap_util.h"
 #include "../util/io_util.h"
 #include "rp_coap.h"
 #include "rp_identity.h"
@@ -39,16 +40,11 @@ static coap_response_t coap_qualify_response_handler(
         const coap_mid_t mid CHARRA_UNUSED) {
     processing_qualify_response = true;
 
-    int coap_r = 0;
     size_t data_len = 0;
     const uint8_t* data = NULL;
-    size_t data_offset = 0;
-    size_t data_total_len = 0;
-    if ((coap_r = coap_get_data_large(
-                 received, &data_len, &data, &data_offset, &data_total_len)) ==
-            0) {
-        charra_log_error(
-                "[" LOG_NAME "] /qualify: Could not get CoAP PDU data.");
+    if (!charra_coap_get_payload(
+                received, LOG_NAME, "/qualify response", &data, &data_len,
+                NULL)) {
         qualify_response_rc = CHARRA_RC_ERROR;
         goto cleanup;
     }
@@ -83,12 +79,10 @@ static coap_response_t coap_qualify_submit_response_handler(
      * dto in charra_dto.h. */
     size_t data_len = 0;
     const uint8_t* data = NULL;
-    size_t data_offset = 0;
-    size_t data_total_len = 0;
     qualify_submit_qualified = false;
     qualify_submit_expires_at = 0;
-    if (coap_get_data_large(received, &data_len, &data, &data_offset,
-                &data_total_len) != 0) {
+    if (charra_coap_get_payload(received, LOG_NAME, "/qualify/submit response",
+                &data, &data_len, NULL)) {
         msg_qualify_submit_response_dto resp = {0};
         if (charra_unmarshal_qualify_submit_response(
                     (uint32_t)data_len, data, &resp) == CHARRA_RC_SUCCESS) {

@@ -61,12 +61,8 @@ void coap_certify_ak_of_attester_handler(
 
     size_t data_len = 0;
     const uint8_t* data = NULL;
-    size_t data_offset = 0;
-    size_t data_total_len = 0;
-    if ((coap_r = coap_get_data_large(request, &data_len, &data, &data_offset,
-                 &data_total_len)) == 0) {
-        charra_log_error("[" LOG_NAME "] /certify_ak_of_attester: could not "
-                         "get CoAP PDU data.");
+    if (!charra_coap_get_payload(request, LOG_NAME, "/certify_ak_of_attester",
+                &data, &data_len, NULL)) {
         response_code = COAP_RESPONSE_CODE_BAD_REQUEST;
         goto cleanup;
     }

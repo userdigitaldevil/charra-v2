@@ -383,6 +383,31 @@ void charra_coap_log_peer_address(const char* log_name,
             "[%s] %s: request from %s.", log_name, endpoint_name, addr_buf);
 }
 
+bool charra_coap_get_payload(const struct coap_pdu_t* pdu,
+        const char* log_name, const char* context, const uint8_t** data_out,
+        size_t* data_len_out, size_t* data_total_len_out) {
+    size_t data_offset = 0;
+    size_t data_total_len = 0;
+
+    *data_out = NULL;
+    *data_len_out = 0;
+    if (data_total_len_out != NULL) {
+        *data_total_len_out = 0;
+    }
+
+    if (coap_get_data_large(pdu, data_len_out, data_out, &data_offset,
+                &data_total_len) == 0) {
+        charra_log_error(
+                "[%s] %s: could not get CoAP PDU data.", log_name, context);
+        return false;
+    }
+
+    if (data_total_len_out != NULL) {
+        *data_total_len_out = data_total_len;
+    }
+    return true;
+}
+
 /* --- server lifecycle ---------------------------------------------------- */
 
 void charra_coap_server_log_config(const charra_coap_server_config* config) {

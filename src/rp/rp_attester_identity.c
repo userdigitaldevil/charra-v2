@@ -28,6 +28,7 @@
 #include "../core/charra_key_mgr.h"
 #include "../core/charra_marshaling.h"
 #include "../util/crypto_util.h"
+#include "../util/coap_util.h"
 #include "../util/io_util.h"
 #include "rp_coap.h"
 #include "rp_identity.h"
@@ -43,16 +44,10 @@ static coap_response_t coap_activate_credential_response_handler(
         const coap_mid_t mid CHARRA_UNUSED) {
     processing_activate_credential_response = true;
 
-    int coap_r = 0;
     size_t data_len = 0;
     const uint8_t* data = NULL;
-    size_t data_offset = 0;
-    size_t data_total_len = 0;
-    if ((coap_r = coap_get_data_large(
-                 received, &data_len, &data, &data_offset, &data_total_len)) ==
-            0) {
-        charra_log_error("[" LOG_NAME
-                         "] ACTIVATE: Could not get CoAP PDU data.");
+    if (!charra_coap_get_payload(
+                received, LOG_NAME, "ACTIVATE", &data, &data_len, NULL)) {
         activate_credential_rc = CHARRA_RC_ERROR;
         goto cleanup;
     }
@@ -76,16 +71,10 @@ static coap_response_t coap_ak_identity_response_handler(
         const coap_mid_t mid CHARRA_UNUSED) {
     processing_ak_identity_response = true;
 
-    int coap_r = 0;
     size_t data_len = 0;
     const uint8_t* data = NULL;
-    size_t data_offset = 0;
-    size_t data_total_len = 0;
-    if ((coap_r = coap_get_data_large(
-                 received, &data_len, &data, &data_offset, &data_total_len)) ==
-            0) {
-        charra_log_error("[" LOG_NAME "] /certify_ak_of_attester (FETCH): "
-                         "Could not get CoAP PDU data.");
+    if (!charra_coap_get_payload(received, LOG_NAME,
+                "/certify_ak_of_attester (FETCH)", &data, &data_len, NULL)) {
         ak_identity_rc = CHARRA_RC_ERROR;
         goto cleanup;
     }

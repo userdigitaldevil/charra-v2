@@ -95,8 +95,6 @@ static coap_response_t coap_attester_handler(
         const coap_pdu_t* sent CHARRA_UNUSED,
         const coap_pdu_t* received,
         const coap_mid_t mid CHARRA_UNUSED) {
-    int coap_r = 0;
-
     processing_attestation_response = true;
 
     coap_show_pdu(LOG_DEBUG, received);
@@ -106,11 +104,9 @@ static coap_response_t coap_attester_handler(
     /* get data */
     size_t data_len = 0;
     const uint8_t* data = NULL;
-    size_t data_offset = 0;
     size_t data_total_len = 0;
-    if ((coap_r = coap_get_data_large(
-                 received, &data_len, &data, &data_offset, &data_total_len)) == 0) {
-        charra_log_error("[" LOG_NAME "] Could not get CoAP PDU data.");
+    if (!charra_coap_get_payload(received, LOG_NAME, "/attest response", &data,
+                &data_len, &data_total_len)) {
         attestation_rc = CHARRA_RC_ERROR;
         goto cleanup;
     } else {
@@ -166,11 +162,8 @@ static coap_response_t coap_verifier_handler_nonce(coap_session_t* session,
 
     size_t data_len = 0;
     const uint8_t* data = NULL;
-    size_t data_offset = 0;
-    size_t data_total_len = 0;
-    if (coap_get_data_large(received, &data_len, &data, &data_offset,
-                &data_total_len) == 0) {
-        charra_log_error("[" LOG_NAME "] Verifier returned no nonce.");
+    if (!charra_coap_get_payload(
+                received, LOG_NAME, "/nonce response", &data, &data_len, NULL)) {
         goto cleanup;
     }
     if (index == NULL || data_len == 0 ||
@@ -202,14 +195,11 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
     int* current_thread_index = coap_session_get_app_data(session);
     processing_appraisal_response[*current_thread_index] = true;
 
-    int coap_r = 0;
     size_t data_len = 0;
     const uint8_t* data = NULL;
-    size_t data_offset = 0;
-    size_t data_total_len = 0;
-    if ((coap_r = coap_get_data_large(
-                 received, &data_len, &data, &data_offset, &data_total_len)) == 0) {
-        charra_log_error("[" LOG_NAME "] Could not get CoAP PDU data.");
+    if (!charra_coap_get_payload(
+                received, LOG_NAME, "/appraise response", &data, &data_len,
+                NULL)) {
         attestation_rc = CHARRA_RC_ERROR;
         goto cleanup;
     }
@@ -239,16 +229,13 @@ static coap_response_t coap_trust_manager_handler(coap_session_t* session,
                                         const coap_mid_t mid CHARRA_UNUSED) {
     
     processing_trust_manager_response = true;
-    int coap_r = 0;
     int num_verifiers = *(int *)coap_session_get_app_data(session); 
     /* get data */
     size_t data_len = 0;
     const uint8_t* data = NULL;
-    size_t data_offset = 0;
     size_t data_total_len = 0;
-    if ((coap_r = coap_get_data_large(
-                 received, &data_len, &data, &data_offset, &data_total_len)) == 0) {
-        charra_log_error("[" LOG_NAME "] Could not get CoAP PDU data.");
+    if (!charra_coap_get_payload(received, LOG_NAME, "/get_verifiers response",
+                &data, &data_len, &data_total_len)) {
         goto cleanup;
     } else {
         charra_log_info(

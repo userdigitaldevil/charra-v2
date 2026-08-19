@@ -22,6 +22,7 @@
 #include "../core/charra_identity_key_mgr.h"
 #include "../core/charra_marshaling.h"
 #include "../util/crypto_util.h"
+#include "../util/coap_util.h"
 #include "../util/io_util.h"
 #include "rp_coap.h"
 #include "rp_shared.h"
@@ -34,16 +35,10 @@ static coap_response_t coap_certify_ak_response_handler(
         const coap_mid_t mid CHARRA_UNUSED) {
     processing_certify_ak_response = true;
 
-    int coap_r = 0;
     size_t data_len = 0;
     const uint8_t* data = NULL;
-    size_t data_offset = 0;
-    size_t data_total_len = 0;
-    if ((coap_r = coap_get_data_large(
-                 received, &data_len, &data, &data_offset, &data_total_len)) ==
-            0) {
-        charra_log_error(
-                "[" LOG_NAME "] /certify_ak: Could not get CoAP PDU data.");
+    if (!charra_coap_get_payload(received, LOG_NAME, "/certify_ak response",
+                &data, &data_len, NULL)) {
         certify_ak_rc = CHARRA_RC_ERROR;
         goto cleanup;
     }
