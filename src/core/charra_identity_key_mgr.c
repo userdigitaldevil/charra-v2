@@ -1,5 +1,6 @@
 #include "charra_identity_key_mgr.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "../common/charra_log.h"
@@ -402,4 +403,82 @@ CHARRA_RC charra_identity_key_mgr_load_private(
     memcpy(priv_out, buf, sizeof(*priv_out));
     charra_io_free_file_buffer(&buf);
     return CHARRA_RC_SUCCESS;
+}
+
+CHARRA_RC charra_identity_key_mgr_load_identity(ESYS_CONTEXT* esys_ctx,
+        const char* log_name, const char* ak_public_path,
+        const char* ak_private_path, ESYS_TR* ek_handle_out,
+        ESYS_TR* ak_handle_out, TPM2B_NAME** ak_name_out,
+        TPM2B_PUBLIC* ak_public_out) {
+    TPM2B_PUBLIC* ek_public = NULL;
+    CHARRA_RC result =
+            charra_identity_key_mgr_create_ek(esys_ctx, ek_handle_out, &ek_public);
+    Esys_Free(ek_public);
+    if (result != CHARRA_RC_SUCCESS) {
+        charra_log_error("[%s] Could not recreate the EK.", log_name);
+        return result;
+    }
+
+    TPM2B_PUBLIC ak_public = {0};
+    TPM2B_PRIVATE ak_private = {0};
+    if ((result = charra_identity_key_mgr_load_public(
+                 ak_public_path, &ak_public)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[%s] Could not load AK public key.", log_name);
+        return result;
+    }
+    if ((result = charra_identity_key_mgr_load_private(
+                 ak_private_path, &ak_private)) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[%s] Could not load AK private area.", log_name);
+        return result;
+    }
+    if ((result = charra_identity_key_mgr_load_ak(esys_ctx, *ek_handle_out,
+                 &ak_public, &ak_private, ak_handle_out, ak_name_out)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[%s] Could not load the AK.", log_name);
+        return result;
+    }
+
+    if (ak_public_out != NULL) {
+        *ak_public_out = ak_public;
+    }
+    return CHARRA_RC_SUCCESS;
+}
+
+CHARRA_RC charra_identity_key_mgr_open_tpm_and_load_identity(
+        const char* log_name, const char* ak_public_path,
+        const char* ak_private_path, ESYS_CONTEXT** esys_ctx_out,
+        TSS2_TCTI_CONTEXT** tcti_ctx_out, ESYS_TR* ek_handle_out,
+        ESYS_TR* ak_handle_out, TPM2B_NAME** ak_name_out,
+        TPM2B_PUBLIC* ak_public_out) {
+    /* Set before anything can fail: the teardown below reads both. */
+    *ek_handle_out = ESYS_TR_NONE;
+    *ak_handle_out = ESYS_TR_NONE;
+
+    if (Tss2_TctiLdr_Initialize(getenv("CHARRA_TCTI"), tcti_ctx_out) !=
+            TSS2_RC_SUCCESS) {
+        charra_log_error("[%s] Tss2_TctiLdr_Initialize.", log_name);
+        return CHARRA_RC_ERROR;
+    }
+    if (Esys_Initialize(esys_ctx_out, *tcti_ctx_out, NULL) != TSS2_RC_SUCCESS) {
+        charra_log_error("[%s] Esys_Initialize.", log_name);
+        Tss2_TctiLdr_Finalize(tcti_ctx_out);
+        return CHARRA_RC_ERROR;
+    }
+
+    CHARRA_RC result = charra_identity_key_mgr_load_identity(*esys_ctx_out,
+            log_name, ak_public_path, ak_private_path, ek_handle_out,
+            ak_handle_out, ak_name_out, ak_public_out);
+    if (result == CHARRA_RC_SUCCESS) {
+        return CHARRA_RC_SUCCESS;
+    }
+
+    if (*ek_handle_out != ESYS_TR_NONE) {
+        Esys_FlushContext(*esys_ctx_out, *ek_handle_out);
+    }
+    if (*ak_handle_out != ESYS_TR_NONE) {
+        Esys_FlushContext(*esys_ctx_out, *ak_handle_out);
+    }
+    Esys_Finalize(esys_ctx_out);
+    Tss2_TctiLdr_Finalize(tcti_ctx_out);
+    return result;
 }

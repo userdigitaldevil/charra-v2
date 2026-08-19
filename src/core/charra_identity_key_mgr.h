@@ -47,6 +47,7 @@
 
 #include <stdint.h>
 #include <tss2/tss2_esys.h>
+#include <tss2/tss2_tctildr.h>
 #include <tss2/tss2_tpm2_types.h>
 
 #include "../common/charra_error.h"
@@ -175,5 +176,40 @@ CHARRA_RC charra_identity_key_mgr_save_private(
 /** @brief Load a TPM2B_PRIVATE previously saved with the function above. */
 CHARRA_RC charra_identity_key_mgr_load_private(
         const char* path, TPM2B_PRIVATE* priv_out);
+
+/**
+ * @brief Recreates the EK and loads the AK persisted at ak_public_path /
+ * ak_private_path, on an ALREADY-OPEN ESAPI context.
+ *
+ * The EK is recreated rather than loaded: it is deterministic from the
+ * endorsement seed, so only the AK is on disk.
+ *
+ * @param[in] log_name the calling role's log prefix, i.e. its own LOG_NAME.
+ * @param[out] ak_public_out the loaded AK's public area; NULL if unwanted.
+ */
+CHARRA_RC charra_identity_key_mgr_load_identity(ESYS_CONTEXT* esys_ctx,
+        const char* log_name, const char* ak_public_path,
+        const char* ak_private_path, ESYS_TR* ek_handle_out,
+        ESYS_TR* ak_handle_out, TPM2B_NAME** ak_name_out,
+        TPM2B_PUBLIC* ak_public_out);
+
+/**
+ * @brief Opens a fresh TCTI + ESAPI connection and loads the persisted
+ * identity onto it, as above.
+ *
+ * On failure nothing is left open: any handle that did load is flushed
+ * first, because Esys_Finalize() tears down client-side state only and does
+ * not send TPM2_FlushContext -- an orphaned handle would sit in the TPM's
+ * small transient-object table until the TPM itself restarts.
+ *
+ * On success the caller owns the connection and must Esys_Finalize() and
+ * Tss2_TctiLdr_Finalize() it.
+ */
+CHARRA_RC charra_identity_key_mgr_open_tpm_and_load_identity(
+        const char* log_name, const char* ak_public_path,
+        const char* ak_private_path, ESYS_CONTEXT** esys_ctx_out,
+        TSS2_TCTI_CONTEXT** tcti_ctx_out, ESYS_TR* ek_handle_out,
+        ESYS_TR* ak_handle_out, TPM2B_NAME** ak_name_out,
+        TPM2B_PUBLIC* ak_public_out);
 
 #endif /* CHARRA_IDENTITY_KEY_MGR_H */

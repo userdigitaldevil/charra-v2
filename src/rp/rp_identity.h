@@ -34,8 +34,9 @@ CHARRA_RC rp_certify_ak_exchange(const char* host, unsigned int port,
         const msg_certify_ak_request_dto* req,
         msg_certify_ak_response_dto* response_out);
 
-/** @brief Open a TPM connection and load RP's persisted AK. Caller must
- * hold rp_tpm_mutex and must close promptly -- see rp_shared.h. */
+/** @brief Open a TPM connection and load RP's persisted AK, at the RP's key
+ * paths. Caller must hold rp_tpm_mutex and must close promptly -- see
+ * rp_shared.h. */
 CHARRA_RC rp_open_tpm_and_load_ak(ESYS_CONTEXT** esys_ctx_out,
         TSS2_TCTI_CONTEXT** tcti_ctx_out, ESYS_TR* ek_handle_out,
         ESYS_TR* ak_handle_out, TPM2B_NAME** ak_name_out);

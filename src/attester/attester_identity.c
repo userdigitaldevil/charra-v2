@@ -203,72 +203,17 @@ cleanup:
 CHARRA_RC attester_load_ak(ESYS_CONTEXT* esys_ctx,
         ESYS_TR* ek_handle_out, ESYS_TR* ak_handle_out,
         TPM2B_NAME** ak_name_out, TPM2B_PUBLIC* ak_public_out) {
-    TPM2B_PUBLIC* ek_public = NULL;
-    CHARRA_RC result =
-            charra_identity_key_mgr_create_ek(esys_ctx, ek_handle_out, &ek_public);
-    Esys_Free(ek_public);
-    if (result != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not recreate Attester's EK.");
-        return result;
-    }
-
-    TPM2B_PUBLIC ak_public = {0};
-    TPM2B_PRIVATE ak_private = {0};
-    if ((result = charra_identity_key_mgr_load_public(
-                 attester_ak_public_path, &ak_public)) != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not load AK public key.");
-        return result;
-    }
-    if ((result = charra_identity_key_mgr_load_private(
-                 attester_ak_private_path, &ak_private)) !=
-            CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not load AK private area.");
-        return result;
-    }
-    if ((result = charra_identity_key_mgr_load_ak(esys_ctx, *ek_handle_out,
-                 &ak_public, &ak_private, ak_handle_out, ak_name_out)) !=
-            CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not load Attester's AK.");
-        return result;
-    }
-    if (ak_public_out != NULL) {
-        *ak_public_out = ak_public;
-    }
-    return CHARRA_RC_SUCCESS;
+    return charra_identity_key_mgr_load_identity(esys_ctx, LOG_NAME,
+            attester_ak_public_path, attester_ak_private_path, ek_handle_out,
+            ak_handle_out, ak_name_out, ak_public_out);
 }
 
 CHARRA_RC attester_open_tpm_and_load_ak(ESYS_CONTEXT** esys_ctx_out,
         TSS2_TCTI_CONTEXT** tcti_ctx_out, ESYS_TR* ek_handle_out,
         ESYS_TR* ak_handle_out, TPM2B_NAME** ak_name_out,
         TPM2B_PUBLIC* ak_public_out) {
-    TSS2_RC tss_r = 0;
-    if ((tss_r = Tss2_TctiLdr_Initialize(
-                 getenv("CHARRA_TCTI"), tcti_ctx_out)) != TSS2_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Tss2_TctiLdr_Initialize.");
-        return CHARRA_RC_ERROR;
-    }
-    if ((tss_r = Esys_Initialize(esys_ctx_out, *tcti_ctx_out, NULL)) !=
-            TSS2_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Esys_Initialize.");
-        Tss2_TctiLdr_Finalize(tcti_ctx_out);
-        return CHARRA_RC_ERROR;
-    }
-
-    CHARRA_RC result = attester_load_ak(*esys_ctx_out, ek_handle_out,
-            ak_handle_out, ak_name_out, ak_public_out);
-    if (result != CHARRA_RC_SUCCESS) {
-        goto error;
-    }
-    return CHARRA_RC_SUCCESS;
-
-error:
-    if (*ek_handle_out != ESYS_TR_NONE) {
-        Esys_FlushContext(*esys_ctx_out, *ek_handle_out);
-    }
-    if (*ak_handle_out != ESYS_TR_NONE) {
-        Esys_FlushContext(*esys_ctx_out, *ak_handle_out);
-    }
-    Esys_Finalize(esys_ctx_out);
-    Tss2_TctiLdr_Finalize(tcti_ctx_out);
-    return result;
+    return charra_identity_key_mgr_open_tpm_and_load_identity(LOG_NAME,
+            attester_ak_public_path, attester_ak_private_path, esys_ctx_out,
+            tcti_ctx_out, ek_handle_out, ak_handle_out, ak_name_out,
+            ak_public_out);
 }
