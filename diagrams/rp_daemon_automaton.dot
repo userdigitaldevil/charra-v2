@@ -3,7 +3,7 @@ digraph rp_daemon {
   splines=ortho; forcelabels=true;
   fontname="Helvetica"; labelloc="t"; labeljust="l"; fontsize=22;
   ranksep=0.62; nodesep=0.55; esep=0.35;
-  label=<<b>CHARRA v2 — Relying Party, daemon mode</b><br align="left"/><font point-size="12">The RP's state machine (left) and, rank-aligned beside it, what each peer does when called (right).<br align="left"/>Every box names <b>who acts on whom</b>. Keys carry the owner: <b>EK_a / AK_a</b> are the Attester's, <b>EK_r / AK_r</b> the RP's<br align="left"/>— distinct key pairs, though in this PoC both live in the same TPM simulator. Diamonds are guards; red edges are failure paths. Red notes inside a box mark a <b>deviation from the DRA-TLS spec</b>. A <b>▸ abort</b> connector means<br align="left"/>&quot;continue at <i>RP abandons this cycle</i>&quot; in section 3 — drawn as a connector, not a wire, so five failure paths do not become five parallel lines.<br align="left"/>Anything written <b>--like-this</b> is a <b>command-line flag the RP process is started with</b> — a local setting, never a protocol message; the value beside it is this diagram's example, not a fixed constant.<br align="left"/></font><br align="left"/>>;
+  label=<<b>CHARRA v2 — Relying Party, daemon mode</b><br align="left"/><font point-size="12">The RP's own states run down the <b>centre</b> of the page. Each peer box sits on the <b>same horizontal line</b> as the RP state that calls it,<br align="left"/>reached by a dashed link — on whichever side keeps the wiring clear, so read the line, not the side. Peers are coloured by party:<br align="left"/><font color="#5b21b6"><b>purple</b></font> Trust Manager · <font color="#0d9488"><b>teal</b></font> Attester · <font color="#c2410c"><b>orange</b></font> Verifier.<br align="left"/>Every box names <b>who acts on whom</b>. Keys carry the owner: <b>EK_a / AK_a</b> are the Attester's, <b>EK_r / AK_r</b> the RP's<br align="left"/>— distinct key pairs, though in this PoC both live in the same TPM simulator. Diamonds are guards; red edges are failure paths. Red notes inside a box mark a <b>deviation from the DRA-TLS spec</b>. A <b>▸ abort</b> connector means<br align="left"/>&quot;continue at <i>RP abandons this cycle</i>&quot; in section 3 — drawn as a connector, not a wire, so five failure paths do not become five parallel lines.<br align="left"/>Anything written <b>--like-this</b> is a <b>command-line flag the RP process is started with</b> — a local setting, never a protocol message; the value beside it is this diagram's example, not a fixed constant.<br align="left"/></font><br align="left"/>>;
   node [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", fillcolor="#dbeafe", color="#1e3a8a", penwidth=1.2, margin="0.12,0.07"];
   edge [fontname="Helvetica", fontsize=9, color="#334155"];
 
@@ -173,14 +173,14 @@ digraph rp_daemon {
   {rank=same; TAPPR; V3;}
 
   edge [style=dashed, penwidth=1.4, arrowsize=0.8];
-  GETV   -> TM1 [dir=both, color="#7c3aed"];
-  ATTID  -> A0  [dir=both, color="#0d9488"];
-  ATTEST -> A1  [dir=both, color="#0d9488"];
-  RESULT -> A2  [color="#0d9488"];
-  QUAL   -> V1  [dir=both, color="#ea580c"];
-  TCERT1 -> V0  [dir=both, color="#ea580c", xlabel="subject: RP", fontcolor="#ea580c"];
-  TCERT2 -> V0    [dir=both, color="#ea580c", style=dotted, xlabel="① ③\nsubject: ATTESTER", fontcolor="#ea580c"];
-  TCERT2 -> ACONN [color="#0d9488", style=dotted];
-  TNONCE -> V2  [dir=both, color="#ea580c"];
-  TAPPR  -> V3  [dir=both, color="#ea580c"];
+  GETV   -> TM1 [weight=200, dir=both, color="#7c3aed"];
+  ATTID  -> A0  [weight=200, dir=both, color="#0d9488"];
+  ATTEST -> A1  [weight=200, dir=both, color="#0d9488"];
+  RESULT -> A2  [weight=200, color="#0d9488"];
+  QUAL   -> V1  [weight=200, dir=both, color="#ea580c"];
+  TCERT1 -> V0  [weight=200, dir=both, color="#ea580c", xlabel="subject: RP", fontcolor="#ea580c"];
+  TCERT2 -> V0    [weight=200, dir=both, color="#ea580c", style=dotted, xlabel="① ③\nsubject: ATTESTER", fontcolor="#ea580c"];
+  TCERT2 -> ACONN [weight=200, color="#0d9488", style=dotted];
+  TNONCE -> V2  [weight=200, dir=both, color="#ea580c"];
+  TAPPR  -> V3  [weight=200, dir=both, color="#ea580c"];
 }
