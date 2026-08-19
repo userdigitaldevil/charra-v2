@@ -43,7 +43,8 @@ the privacy-preserving redaction scheme from
   **once** → fan the same evidence out to all N verifiers in parallel
   (pthreads) → majority vote (`2*num_true > num_verifiers`) on the
   aggregate result. Runs that cycle in a **loop by default** (daemon mode:
-  attest, renew qualification if it is near expiry, sleep `--interval`,
+  attest (renewing any credential found expired at its point of use),
+  sleep `--interval`,
   repeat until SIGINT); `--benchmark` selects the bounded 1→5-verifier
   timing sweep (`NUM_RUNS = 5` measured cycles per step, after one discarded
   warm-up; writes `timings_RP_multi_verifiers.txt`)
@@ -105,6 +106,26 @@ This fork's `/certify_ak` work (Part 3) replaced this for the RP side; the
 Attester side is still on this baseline — see "Not yet built."
 
 ### Concept primer
+
+**Naming: keys carry the owner, certificates also carry the issuer.**
+`_a` is the Attester's, `_r` the Relying Party's — `EK_a`/`AK_a`,
+`EK_r`/`AK_r`, `TPM_a`/`TPM_r`. There is exactly **one** `AK_a` and **one**
+`AK_r`; what multiplies is the certificates over them, because each CA
+issues its own. Where the distinction matters this document writes:
+
+| Name | What it is | Wire field | Checked at |
+|---|---|---|---|
+| `AK_a_byRP` | `AK_a` certified by **RP's** CA | `ak_certificate_attester_by_rp` | Step 2a item 1 (RP) |
+| `AK_a_byV` | `AK_a` certified by **Verifier i's** CA | `ak_certificate_attester_by_verifier` | Step 3b item 1 |
+| `AK_r_byV` | `AK_r` certified by **Verifier i's** CA | `ak_certificate_rp` | Step 3a item 1 |
+
+`_byV` is *per Verifier*: each holds an independent CA key, so N Verifiers
+mean N distinct certificates over that one same key — which is why
+`charra_rp_build_evidence_message()` substitutes the right `AK_a_byV` from
+RP's own per-Verifier cache rather than forwarding whatever the Attester
+sent. `AK_r` has no RP-issued form; the RP does not certify itself. A bare
+`AK_a`/`AK_r` always means the key. (Quotations of the supervisor's spec
+below keep its own "EK/AK certificate" wording.)
 
 **PCR (Platform Configuration Register)** — write-only-by-extend hash
 register: `PCR[i] = Hash(PCR[i] || measurement)`. A tamper-evident chain of
@@ -402,11 +423,11 @@ actual order `run_one_attestation_cycle()` runs things in, for one cycle
      qualified means the cycle aborts before any per-Verifier thread
      starts.
    - **One thread per Verifier**, each independently:
-     1. `ensure_rp_ak_certificate(i)` — RP's own AK cert with Verifier
+     1. `ensure_rp_ak_certificate(i)` — `AK_r_byV` for Verifier
         `i` (cached after the first time; `/certify_ak` CHALLENGE/CONFIRM
         if not).
-     2. `ensure_attester_identity_certified_by_verifier(i)` — the
-        Attester's AK cert issued by Verifier `i`'s *own* CA (cached
+     2. `ensure_attester_identity_certified_by_verifier(i)` — `AK_a_byV`,
+        issued by Verifier `i`'s *own* CA (cached
         after the first time; `/certify_ak` CHALLENGE relayed through
         `/certify_ak_of_attester` ACTIVATE, then CONFIRM, if not).
      3. **`/nonce` (Verifier `i`)** — a genuinely Verifier-`i`-generated
@@ -414,15 +435,14 @@ actual order `run_one_attestation_cycle()` runs things in, for one cycle
         and of the nonce RP gave the Attester in step 3 (each
         `bin/verifier` process has its own RNG state; nothing shared).
      4. Build Verifier `i`'s own evidence message: `Quote_r` (signed over
-        `PCR_r || Verifier i's nonce`), RP's cert for Verifier `i`,
+        `PCR_r || Verifier i's nonce`), `AK_r_byV`,
         `log_r`, the Attester's nonce/`Quote_a`/signature/public key, and
-        both Attester AK certs (RP-issued, and Verifier `i`'s own
-        issuance).
+        both `AK_a_byRP` and Verifier `i`'s own `AK_a_byV`.
      5. **`/appraise` (Verifier `i`)** — the first and only point
         `/appraise` gets called, once per Verifier, near the end of the
-        cycle, not the start. Runs **Step 3a** (`Evidence_r`: RP's AK cert
+        cycle, not the start. Runs **Step 3a** (`Evidence_r`: `AK_r_byV`
         against Verifier `i`'s own CA + RP's qualification, `Quote_r`
-        signature, nonce) **and Step 3b** (`Evidence_a'`: Attester's cert
+        signature, nonce) **and Step 3b** (`Evidence_a'`: `AK_a_byV`
         against Verifier `i`'s own CA, `Quote_a` signature, nonce). Both
         run unconditionally — see "Verifier verdicts" below for why the
         3a→3b gate was removed.
@@ -483,16 +503,14 @@ actual order `run_one_attestation_cycle()` runs things in, for one cycle
   automatically revokes the requester's previous record; expiry is checked
   for free by `mbedtls_x509_crt_verify()`.
 - **Certificate renewal is expiry-driven, on all three certificates.** Each
-  disk cache is re-provisioned once it is within `--ak-renew-margin`
-  (RP-side, default one day) of expiring, the same "renew while the
-  current grant is still good" rule the qualification refresh margin uses:
-  RP's own AK certificate per Verifier (`/certify_ak`), and the Attester's
-  AK certificate as issued by RP's CA and by each Verifier's CA
-  (`/certify_ak_of_attester`). All three are also renewed from the daemon's
-  idle window, not only from the next cycle: `rp_next_renewal_due()` folds
-  every one of their expiries into the wake time, so leaving any of them
-  out of `rp_renew_due_credentials()` makes the RP wake exactly when that
-  credential falls due and renew nothing. This is not optional tidiness. The caches
+  disk cache is re-provisioned by the first attestation cycle that finds it
+  **already expired** — `charra_cert_needs_renewal()` is simply
+  `expires_at <= time(NULL)`. Covers `AK_r_byV` per Verifier
+  (`/certify_ak`), plus `AK_a_byRP` and each `AK_a_byV`
+  (`/certify_ak_of_attester`). There is no
+  renewal margin and no scheduled renewal: nothing runs between cycles, and
+  each `ensure_*` re-checks its own expiry when the cycle reaches it. This
+  is not optional tidiness. The caches
   were keyed purely on the file existing, and a Verifier gives no distinct
   signal for a stale certificate — it just votes NO — so an expired
   certificate would be resent and rejected every cycle forever, with
@@ -752,6 +770,43 @@ in `coap_appraise_handler`. Verified: clean
 rebuild (zero warnings) + a full live 1–5-verifier sweep, all attestations
 passing, log tags now `[crypto_util]`/untagged in place of `[verifier]`.
 
+**The TPM-backed check has since been removed; both roles verify with
+mbedTLS only.** `coap_appraise_handler` used to verify `Quote_a` *twice* —
+`Esys_VerifySignature` via `charra_verify_tpm2_quote_signature_with_tpm_logged()`
+and `charra_crypto_verify_quote_signature_mbedtls()` — and AND the two
+booleans into the verdict. The two can only ever agree: both answer "does
+this RSA-PSS signature match this public key over these bytes", the TPM
+holds no secret in the verifying direction (the Attester's public key is
+pushed in with `Esys_LoadExternal` first), and the `TPMT_TK_VERIFIED` ticket
+the TPM path returns was allocated, null-checked and freed without ever
+being consumed. What the redundancy did cost was real: it made the
+Verifier's `/appraise` depend on TPM availability, so an unreachable
+simulator produced `"could not initialise the TPM TCTI"` and a NO vote from
+a Verifier that could have answered correctly in software — and it put N
+Verifier threads in contention for the one-client-at-a-time simulator, the
+same hazard `rp_evidence.c` already avoids by verifying `Quote_a` in
+software on the RP side.
+
+Removed: the TPM verify, its `Esys_LoadExternal`, `sig_key_handle`,
+`validation`, the `TPM2B_ATTEST` that existed only to feed the TPM, the
+second boolean, and the handler's whole `Tss2_TctiLdr_Initialize` /
+`Esys_Initialize` bring-up and matching teardown — those two calls were its
+only TPM users. **`bin/verifier` no longer opens a TPM to appraise**, which
+is as it should be: a Verifier consumes evidence and needs no root of trust
+of its own. `/certify_ak` still uses one, for `Esys_MakeCredential` (itself
+computable in software, as `tpm2_makecredential` does offline — a candidate
+for the same treatment). `charra_verify_tpm2_quote_signature_with_tpm()` and
+`charra_load_external_public_key()` stay in the shared modules; `verifier_old.c`
+still calls them. Side effect on the timing files: `durations_verifier-*.txt`
+no longer carries an `init took …` line and `total_measured` drops that term.
+
+**Measured.** `durations_verifier-5684.txt` is append-mode, so it holds both
+eras of the same handler. Mean `appraising took` fell from **13.91 ms**
+(n=302, with the TPM path) to **3.44 ms** (n=13, mbedTLS only) — but the
+tail is the real result: the old range was 2.34–236.48 ms, the new one
+2.58–4.16 ms. That 236 ms outlier is exactly the single-client simulator
+contention this removal was about; the median case was never the problem.
+
 ### `verifier.c` — AK-serial validity check relocated to `charra_ak_state.c`
 
 `is_ak_serial_currently_valid()` — the Step 3a/3b item 1 revocation check
@@ -798,7 +853,7 @@ configuration, `main()`, and `handle_sigint()`.
 
 | Module | Holds | Owns (`static`, not in the shared header) |
 |---|---|---|
-| `attester_attest.c` | `/attest` — Quote_a, the IMA log, both AK certificates | `attest_request_counter`, `format_pcr_selection` |
+| `attester_attest.c` | `/attest` — Quote_a, the IMA log, `AK_a_byRP` + `AK_a_byV` | `attest_request_counter`, `format_pcr_selection` |
 | `attester_certify_ak.c` | `/certify_ak_of_attester`, all four legs | — |
 | `attester_identity.c` | EK/AK identity: create, persist, load | manufacturer CA paths, EK validity window, AK private path, `attester_ak_keypair_ready` |
 | `attester_ima_log.c` | ASCII→binary conversion, PCR replay | `cached_ima_log`, `cached_ima_log_len`, the hex/template helpers |
@@ -930,8 +985,9 @@ does.
 
 **Built**: `msg_rp_appraisal_dto` (`charra_dto.h`) — Quote_a's three fields
 + Quote_r's three (mirrored shape) + `event_log` (meaning `log_r`) + two
-variable-length AK certificate fields (`ak_certificate`/`_len` for EK_a/AK_a,
-`ak_certificate_rp`/`_len` for EK_r/AK_r), 9 CBOR array elements total.
+variable-length AK certificate fields (`ak_certificate`/`_len` — what is now
+`AK_a_byV`; `ak_certificate_rp`/`_len` — `AK_r_byV`), 9 CBOR array elements
+total.
 `charra_marshal_rp_appraisal()`/`charra_unmarshal_rp_appraisal()`
 (`charra_marshaling.c`) bounds-check every fixed-size field against its
 destination `sizeof` before copying. `coap_appraise_handler` unmarshals,
@@ -963,8 +1019,8 @@ verifier_nonce` under the RP's TPM-resident AK). Confirmed live: every
 `relying_party.log` from a live run shows "RP Appraisal Successful" and a
 "RP Privacy Cleaning" block before evidence ever reaches a Verifier.
 
-**Resolved (2026-08-17): `charra_rp_appraise_evidence()` now validates the
-Attester's RP-issued AK certificate (Step 2a item 1).** Added as the new
+**Resolved (2026-08-17): `charra_rp_appraise_evidence()` now validates
+`AK_a_byRP` (Step 2a item 1).** Added as the new
 first check, ahead of the quote-signature check (renumbering the rest):
 `charra_crypto_verify_ekak_certificate()` — the same shared chain+key-match
 helper the Verifier uses for its own Step 3a/3b item 1 — against
@@ -1440,7 +1496,7 @@ new bad-argument check for the now-mandatory salt); `test_sdk` 20→23
 - **Verifier endpoints**: `coap_qualify_handler()` (`/qualify` — fabricates
   a fresh challenge via `charra_rp_qualification_generate()`) and
   `coap_qualify_submit_handler()` (`/qualify_submit` — chain-verifies the
-  submitter's AK cert, same check as Step 3a item 1, then verifies an
+  submitter's `AK_r_byV`, same check as Step 3a item 1, then verifies an
   RSA-PSS/SHA-256 signature over the submitted PCR digest before calling
   `charra_rp_qualification_check()`) — backed by a new
   `qualification_state` global (single-RP assumption, matching
@@ -1833,16 +1889,32 @@ is now tracked separately from `attestation_result_qualified`; the `4.03`
 message distinguishes `"RP qualification expired!"` (record exists, expired)
 from `"RP not qualified!"` (no record). Same response code either way (RP's
 correct reaction is identical), message just tells a human/log which.
-`coap_verifier_handler_appraisal()` branches on `4.03` the same way it
-already branches on `4.01`: sets `rp_qualification_rejected[verifier_index]`,
-and the existing retry loop invalidates the qualification cache and
-re-handshakes once before resubmitting.
+`coap_verifier_handler_appraisal()` branched on `4.03` the same way it
+already branched on `4.01`: set `rp_qualification_rejected[verifier_index]`,
+and a retry loop invalidated the qualification cache and re-handshaked once
+before resubmitting.
 
-**Verified live**, forcing the mismatch scenario (RP's cache claims valid,
-Verifier's ledger hand-edited to already-expired): RP skips `/qualify` on
-its stale cache, gets `4.03 "RP qualification expired!"`, re-qualifies,
-resubmits, reaches `"Attestation successful!"` on the retry; the following
-cycle correctly reuses the freshly-earned cache. Full suite, 0 regressions.
+**Verified live at the time**, forcing the mismatch scenario (RP's cache
+claims valid, Verifier's ledger hand-edited to already-expired): RP skipped
+`/qualify` on its stale cache, got `4.03 "RP qualification expired!"`,
+re-qualified, resubmitted, reached `"Attestation successful!"` on the retry;
+the following cycle reused the freshly-earned cache. Full suite, 0
+regressions.
+
+**Superseded — none of that retry machinery still exists.** Commit
+`0439ab3` ("Drop the out-of-band rejection codes and retries; a failed check
+is just a NO") removed the out-of-band rejection codes together with the
+retry loop that consumed them: `/appraise` now always answers `2.05` with
+`Attestation successful!`/`Attestation failed!`, and the RP treats a
+Verifier's answer as a vote rather than an instruction — see
+`rp_attestation.c`'s "One attempt: the Verifier's answer is a vote, not an
+instruction to retry." The reasons are logged on the Verifier instead. That
+commit left `rp_num_verifiers_this_cycle` behind as a write-only global —
+it existed so the retry path could reach the Verifier count without a
+parameter — which has since been deleted along with this paragraph's
+correction. An expired grant is now caught one layer earlier: the RP's own
+`rp_qualification_still_valid()` check re-qualifies before submitting, so
+the stale-cache case above no longer reaches a Verifier at all.
 
 `.gitignore` updated for `rp-qualification-until-*.txt` at the time; now
 moot — see "state/ layout (final form)" above, `.gitignore` ignores
@@ -1859,11 +1931,7 @@ outlived one grant. RP now runs a real loop by default:
 while (!quit) {
     run_one_attestation_cycle(--verifiers);
     stop if --cycles reached;
-    idle_until = now + min(--interval, time left of --duration);
-    while (now < idle_until) {                 /* the idle window */
-        renew anything already inside its margin;
-        sleep until min(idle_until, next renewal deadline);
-    }
+    sleep min(--interval, time left of --duration);   /* nothing else */
     stop if --duration elapsed;
 }
 ```
@@ -1888,51 +1956,60 @@ attestations. **SIGTERM shares the SIGINT handler**: `timeout`,
 hard-killed the process straight past the cleanup that releases the last
 cycle's evidence buffers.
 
-**Why no dedicated renewal thread**: renewal only matters *at attestation
-time*, so doing it in the idle window between cycles is sufficient, and a
-timer thread would add locking for no correctness gain. It runs *after* the
-attestation rather than before, so a near-expiry renewal never lands inside
-one.
+**Why no dedicated renewal thread, and no scheduled renewal at all.**
+Renewal only matters *at attestation time*, so the credential checks live
+where they are used: every `ensure_*` re-reads its own recorded expiry when
+the cycle reaches it and re-provisions only once the credential has
+genuinely lapsed. Nothing happens during the nap — no timers, no I/O, no
+wake-time arithmetic — and `rp_interruptible_sleep()` slices it only so
+Ctrl-C is honoured within a second.
 
-**Renewal is deadline-driven, not tied to the loop cadence.** The idle
-window computes when the next credential actually falls due
-(`rp_next_renewal_due()` — the minimum of `rp_qualified_until` and every
-certificate's recorded expiry, each less its margin), sleeps exactly that
-long, renews whatever is due, then sleeps out the remainder against a
-*fixed* `idle_until`, so the interval is preserved rather than extended.
-Nothing is detected while asleep: every deadline is already held in memory,
-so the wake time is arithmetic, not polling. `rp_renew_due_credentials()`
-then sweeps all four credentials, but each `ensure_*` checks its own expiry
-first and returns without I/O when it is not due — cheaper to ask
-everything than to track which one caused the wake, and anything falling
-due in the same second is picked up in one wake.
+An earlier design put renewal in an *idle window*: `rp_next_renewal_due()`
+folded every credential's `expires_at` (each less a margin) into a single
+minimum, the daemon slept to exactly that instant, `rp_renew_due_credentials()`
+renewed whatever had come due, and the loop recomputed and slept again
+against a fixed `idle_until`. That kept renewal out of the measured path —
+worth **~+0.38s on a 0.65s appraisal phase** (0.65s with a live grant, 1.03s
+when it had to re-qualify inline) — at the cost of two margin flags
+(`--qualify-renew-margin`, `--ak-renew-margin`), a `margin < validity` bound
+on each, a startup cross-check, and a wake-time scheduler whose two halves
+had to agree on the same credential set (they once did not: the wake time
+folded in the RP-issued Attester certificate while the renewal pass did not
+call `ensure_attester_identity_provisioned()`, so the RP woke exactly when
+it fell due and renewed nothing).
 
-This replaced a check that ran *once per loop iteration*, which coupled the
-margin to `--interval`: a margin shorter than the interval let the loop step
-straight over the renewal window, and the work landed inside the next
-attestation instead. Measured cost of that: **~+0.38s on a 0.65s appraisal
-phase** (0.65s when the grant was live, 1.03s when it had to re-qualify
-inline) — not a failure, since `get_attestation_results()` re-qualifies at
-margin 0 and proceeds, but exactly the latency the margin exists to remove.
-With the deadline-driven window the `margin > interval` bound is gone, along
-with the startup warning that enforced it. Only `margin < validity` still
-matters: a margin at or above the whole window is never satisfiable, so the
-credential would be renewed continuously and its cache would stop meaning
-anything.
+All of it is gone. The margins, both flags, `rp_next_renewal_due()`,
+`rp_renew_due_credentials()` and the idle loop were removed; the AK
+certificate lifetimes moved to **5 years** on both issuers, since renewal
+now fires only on real expiry and a short lifetime buys nothing but a
+`/certify_ak` round trip inside an ordinary cycle. The qualification window
+stays at 180s: it answers *"is the RP still running the right code"*, which
+does go stale, unlike identity. `rp_perform_qualification_handshake_once()`
+lost its `refresh_margin_seconds` parameter rather than keep one every
+caller passed 0.
 
-**AK certificates renew in the idle window too**, not only inside a cycle.
-Previously the only thing that ever renewed them was `ensure_*` running
-mid-attestation, so certificate renewal *always* paid its cost inside the
-measured path — the opposite of what the qualification margin was built to
-achieve.
+**Consequence, worth stating plainly:** with 5-year defaults the AK renewal
+path effectively never executes, so a regression there would go unnoticed.
+Exercise it deliberately with a short `--ak-validity` /
+`--attester-ak-validity`.
 
-**One attempt per idle window.** If a renewal fails, the credential stays
-due, so the recomputed deadline is in the past, the `due > now` guard fails,
-and RP sleeps out the rest of the window rather than spinning. The retry
-comes sooner than the next window anyway: the next cycle's own `ensure_*`
-calls attempt it inline. If renewal never succeeds the credential genuinely
-expires and the Verifier votes NO with a specific reason — fail-closed, not
-silently accepted.
+**If a renewal fails**, the credential stays expired and the next cycle
+tries again; if it never succeeds the Verifier votes NO with a specific
+reason — fail-closed, not silently accepted.
+
+**The straddle case, confirmed live.** Without a margin a credential is
+checked at its point of use and not before, so one still valid at the check
+can lapse during the round trip that follows. Observed: a 16-cycle run at
+`--interval 10` with 60s AK lifetimes lost **cycle 11** exactly this way —
+`ensure_attester_identity_provisioned()` ran at Phase 1½ and correctly found
+`AK_a_byRP` unexpired, and one `/attest` round trip later Step 2a item 1
+reported `serial is REVOKED or EXPIRED` for the same serial
+(`0x3a3c54c7…`). Behaved as designed: non-fatal, cycle abandoned, cycle 12
+re-provisioned (new serial `0x2fb262f0…`) and passed 2/2. The other 15
+cycles were unanimous. Exposure scales inversely with lifetime — roughly one
+cycle in sixteen at 60s, unreachable at the 5-year default. This is the
+latency-for-simplicity trade the margins used to buy out, now paid in a rare
+lost cycle instead of in every cycle's appraisal phase.
 
 **The qualification window moved onto the wire.** It is the Verifier's
 parameter — it is what stamps `expires_at` into its own ledger — so
@@ -1957,7 +2034,7 @@ the existing parser) formats `now`/`now + validity` at issuance.
 
 **Daemon-safety fixes found while building this:**
 - **Per-cycle leak**: `charra_unmarshal_attestation_response()` heap-
-  allocates `event_log` plus both Attester AK certificates (~6 KB), and
+  allocates `event_log` plus `AK_a_byRP` and `AK_a_byV` (~6 KB), and
   `last_response = res` overwrote the previous cycle's pointers wholesale.
   Harmless when the process exited immediately; ~8.6 MB/day at a 60s
   interval otherwise. Added `charra_free_attestation_response()`, called
@@ -1990,8 +2067,7 @@ all zero, 3/3 votes.
 
 **Verified live**: 7 daemon cycles, 7/7 unanimous votes, clean SIGINT
 shutdown; with `bin/verifier --qualification-validity 90 --ak-validity 600`
-and `bin/relying_party --interval 15 --qualify-renew-margin 40
---attester-ak-validity 900`, RP logged `90 second(s) from now, as granted
+and `bin/relying_party --interval 15 --attester-ak-validity 900`, RP logged `90 second(s) from now, as granted
 by this Verifier` (never the 300s default, confirming the value crosses the
 wire), and `openssl x509 -dates` showed exactly 600s and 900s spans on the
 two issued certificates. A logging bug surfaced here first: the "valid
@@ -2245,9 +2321,9 @@ Three gaps closed after the shared-state investigation above:
 
 A long-standing intermittent failure: a clean RP would pass two or three
 cycles, then **every** Verifier would reject a cycle at once, with the same
-four reasons — RP AK certificate `REVOKED or EXPIRED in this Verifier's
-ledger`, qualification `NOT EVALUATED`, `Quote_r signature MISMATCH`, and the
-Attester's AK certificate `WRONG`. It reproduced roughly one run in three to
+four reasons — `AK_r_byV` `REVOKED or EXPIRED in this Verifier's
+ledger`, qualification `NOT EVALUATED`, `Quote_r signature MISMATCH`, and
+`AK_a_byV` `WRONG`. It reproduced roughly one run in three to
 five and resisted several rounds of diagnosis, because every one of those
 reasons points at the RP's credentials and none of them point at the actual
 cause.
@@ -2310,8 +2386,7 @@ threads), but the ledger-level guard is weaker than it reads.
 same port, allows a Verifier on a different port, releases on normal exit, and
 reclaims a lock left by a `SIGKILL`ed instance. With the stray containers
 stopped, six consecutive isolated runs of
-`bin/relying_party --verifiers 2 --interval 60 --qualify-renew-margin 30
---duration 250` passed all 4 cycles each — 24 for 24, with no failed
+`bin/relying_party --verifiers 2 --interval 60 --duration 250` passed all 4 cycles each — 24 for 24, with no failed
 majorities, no Verifier NO votes, and no NUL-padded logs.
 
 The reproduction harness itself needs the TPM simulator reset per run

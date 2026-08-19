@@ -28,6 +28,21 @@ design is shaped this way).
 | `Quote_r` | RSA-PSS signature by RP's TPM-resident AK over `PCR_r ‖ verifier_nonce` |
 | `ek_fingerprint` | `SHA-256(EK certificate DER)` — the identity key for every ledger |
 
+**Key names carry the owner; certificate names also carry the issuer.** There
+is exactly one `AK_a` and one `AK_r` — what multiplies is the certificates
+over them, because each CA issues its own:
+
+| Name | What it is | Wire field (`msg_rp_evidence_dto`) | Checked at |
+|---|---|---|---|
+| `AK_a_byRP` | `AK_a` certified by **RP's** CA | `ak_certificate_attester_by_rp` | Step 2a item 1 (RP) |
+| `AK_a_byV` | `AK_a` certified by **Verifier i's** CA | `ak_certificate_attester_by_verifier` | Step 3b item 1 |
+| `AK_r_byV` | `AK_r` certified by **Verifier i's** CA | `ak_certificate_rp` | Step 3a item 1 |
+
+`_byV` is *per Verifier*: each holds an independent CA key, so N Verifiers
+mean N distinct certificates over that one same key. `AK_r` has no RP-issued
+form — the RP does not certify itself. A bare `AK_a` / `AK_r` below always
+means the key.
+
 **One structural fact drives everything below:** every exchange is
 RP-initiated CoAP FETCH with a CBOR body. The Attester and Verifiers never
 open outbound sessions, so anything that looks like "the Attester asks the
@@ -60,7 +75,7 @@ endpoints.
 
 ② **Collect.** RP generates a 20-byte nonce and FETCHes `/attest`. The
 Attester quotes its PCRs with that nonce as `qualifyingData` and returns
-`Quote_a`, the raw `log_a`, and **both** of its AK certificates.
+`Quote_a`, the raw `log_a`, and both `AK_a_byRP` and `AK_a_byV`.
 
 ③ **Appraise, then cleanse — the heart of the design.** RP runs the full
 six-check Step 2a gate against the *raw* log, then Step 2b redacts it. This
@@ -124,7 +139,7 @@ Attester side, `coap_attest_handler()` → `attester.c:1305`:
 2. `qualifying_data ← req.nonce`, then `Esys_Quote()` with the **restricted**
    AK. Restricted matters: the same key is certified by `/certify_ak_of_attester`,
    so Step 3b's "cert matches the quoting key" check can pass.
-3. Reads `log_a` from disk and both cached AK certificates
+3. Reads `log_a` from disk and both cached certificates (`AK_a_byRP`, `AK_a_byV`)
    (`state/attester/ak-certificates/attester-ak-certificate-{rp,verifier}.der`).
 
 `msg_attestation_response_dto` — exactly **six** CBOR fields, in this order:
@@ -135,8 +150,8 @@ Attester side, `coap_attest_handler()` → `attester.c:1305`:
 | 2 | `tpm2_signature` | `TPMT_SIGNATURE` — RSA-PSS/SHA-256 over field 1 |
 | 3 | `tpm2_public_key` | `TPM2B_PUBLIC` of the quoting AK — the key field 2 verifies under |
 | 4 | `event_log` | `log_a`, **raw**, real paths |
-| 5 | `ak_certificate_attester_by_verifier` | AK cert (DER) from a Verifier's CA — Step 3b item 1's input |
-| 6 | `ak_certificate_attester_by_rp` | AK cert (DER) from RP's CA — Step 2a item 1's input |
+| 5 | `ak_certificate_attester_by_verifier` | **`AK_a_byV`** (DER) — Step 3b item 1's input |
+| 6 | `ak_certificate_attester_by_rp` | **`AK_a_byRP`** (DER) — Step 2a item 1's input |
 
 Two things are **not** in this message, and both are deliberate:
 
@@ -152,7 +167,7 @@ Two things are **not** in this message, and both are deliberate:
   goes any further. Forwarding it to a Verifier would leak a stronger
   identifier than the path redaction protects.
 
-Both AK certificates are re-read **from disk on every `/attest` call** rather
+Both certificates are re-read **from disk on every `/attest` call** rather
 than cached in memory, because `DELIVER_VERIFIER` can rewrite the
 Verifier-issued one at any time between calls.
 
@@ -164,7 +179,7 @@ cycle reports every problem:
 
 | # | Check | Function |
 |---|---|---|
-| 1 | Attester AK cert chains to **RP's own CA** + matches the quoting key, and its serial is live in RP's ledger | `charra_crypto_verify_ekak_certificate()` + `charra_ak_state_check_serial_valid()` |
+| 1 | **`AK_a_byRP`** chains to **RP's own CA** + matches the quoting key, and its serial is live in RP's ledger | `charra_crypto_verify_ekak_certificate()` + `charra_ak_state_check_serial_valid()` |
 | 2 | `Quote_a` signature under `tpm2_public_key` | `charra_crypto_rsa_verify_signature()` (mbedTLS, **not** TPM) |
 | 3 | `qualifyingData == last_request.nonce` | `charra_verify_tpm2_quote_qualifying_data()` |
 | 4 | Every entry: `template_digest == SHA256(template_data)` | `charra_verify_log_entries_self_consistent()` |
@@ -230,10 +245,10 @@ Each `get_attestation_results_thread()`:
 ```
 RP → Verifier  msg_rp_evidence_dto {
    pcr_r, verifier_nonce, rp_signature, rp_public_key,   ← Quote_r
-   ak_certificate_rp,                                    ← EK_r/AK_r  (Step 3a-1)
+   ak_certificate_rp,                                    ← AK_r_byV   (Step 3a-1)
    attester_nonce,
    attestation_data, tpm2_signature, tpm2_public_key,    ← Quote_a fwd (Step 3b-2)
-   ak_certificate_attester_by_verifier,                  ← EK_a/AK_a  (Step 3b-1)
+   ak_certificate_attester_by_verifier,                  ← AK_a_byV   (Step 3b-1)
    ak_certificate_attester_by_rp,                        ← forwarded, not checked
    log_r }                                               ← NO content check
 ```
@@ -259,7 +274,7 @@ depends on the CA signature, not on who relayed the bytes.
 
 | Item | Check | On failure |
 |---|---|---|
-| 1 | `ak_certificate_rp` chains to **this Verifier's** CA, matches `rp_public_key`, serial live in `rp/` ledger | `ekak_rp_why` |
+| 1 | **`AK_r_byV`** chains to **this Verifier's** CA, matches `rp_public_key`, serial live in `rp/` ledger | `ekak_rp_why` |
 | 1b | `ek_fingerprint` (derived in 1) is present and unexpired in the **shared** qualification ledger | see §2 |
 | 2 | `rp_signature` over `pcr_r ‖ verifier_nonce` | |
 | 3 | `verifier_nonce == verifier_challenge_nonce` — plain byte compare | |
@@ -321,7 +336,7 @@ RP  redacts challenge_log with that salt
     replays → pcr_digest
     signs pcr_digest with its AK
 
-   ──FETCH /qualify_submit─────►  chain-verify submitter's AK cert
+   ──FETCH /qualify_submit─────►  chain-verify submitter's AK_r_byV
                                   verify signature over pcr_digest
                                   memcmp(submitted, golden)
    ◄──── qualified + expires_at ─ persist to SHARED ledger, keyed by ek_fingerprint
@@ -383,15 +398,14 @@ challenge at a time.
 Cache short-circuit first:
 
 ```c
-renew_deadline = now + refresh_margin_seconds;
-if (rp_qualified_until <= renew_deadline)
+if (rp_qualified_until <= now)
         rp_qualified_until = rp_qualification_cache_load();
-if (rp_qualified_until > renew_deadline) return SUCCESS;   // skip entirely
+if (rp_qualified_until > now) return SUCCESS;   // skip entirely
 ```
 
-`refresh_margin_seconds` is what lets daemon mode renew during the **idle
-window** (margin = `--qualify-renew-margin`) instead of inside an attestation
-(margin = 0).
+There is no renewal margin: a grant is re-earned only once it has genuinely
+expired, so the handshake always runs inside the attestation cycle that
+discovers the expiry.
 
 Then, per candidate Verifier in order — transport failure moves to the next,
 a received *verdict* stops the search (it would be identical everywhere):
@@ -415,7 +429,7 @@ order — the first two are authentication, only the third is the actual test:
 
 | Gate | Check | Failure |
 |---|---|---|
-| 1 | `ak_certificate_rp` chains to this Verifier's CA, matches `rp_public_key`, serial live → yields `ek_fingerprint` | `4.01` |
+| 1 | **`AK_r_byV`** chains to this Verifier's CA, matches `rp_public_key`, serial live → yields `ek_fingerprint` | `4.01` |
 | 2 | `rp_signature` verifies over `submitted_pcr_digest` under that certified key | `4.01` |
 | 3 | `charra_rp_qualification_check()` | `2.05` + `qualified=0` |
 
@@ -707,7 +721,7 @@ preceding ACTIVATE already supplied the possession proof.
 | `state/verifier/ak-provisioning/attester/…-<port>.txt` | Verifier | AK issuances for Attester identities — **per port** |
 | `state/verifier/qualification/rp-qualification-state.txt` | Verifier | Qualification grants — **SHARED across ports** |
 | `state/relying-party/identity/` | RP | RP's EK cert + AK keypair blobs |
-| `state/relying-party/ak-certificates/…-<port>.der` | RP | RP's own AK cert, per Verifier |
+| `state/relying-party/ak-certificates/…-<port>.der` | RP | `AK_r_byV`, one per Verifier |
 | `state/relying-party/attester-ak-certificates/` | RP | Attester certs RP holds (RP-issued + one per Verifier) |
 | `state/relying-party/ak-provisioning/` | RP | RP-as-CA issuance ledger for the Attester |
 | `state/relying-party/qualification-cache/…until.txt` | RP | One epoch timestamp — **single file** |

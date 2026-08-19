@@ -73,8 +73,9 @@ For the same thing spelled out line by line, with every flag explained, see
 
 ## 4. `bin/relying_party`
 
-Runs a **continuous attestation daemon by default**: attest → sleep, renewing
-any credential that falls due during the idle window → repeat, until stopped.
+Runs a **continuous attestation daemon by default**: attest → sleep → repeat,
+until stopped. Nothing happens during the sleep; a credential is re-provisioned
+by the first cycle that finds it expired.
 
 ```bash
 bin/relying_party [OPTIONS]
@@ -87,11 +88,9 @@ bin/relying_party [OPTIONS]
 | `-l`, `--log-level=LEVEL` | INFO | `TRACE\|DEBUG\|INFO\|WARN\|ERROR\|FATAL`. Overrides `$LOG_LEVEL_CHARRA` |
 | `-n`, `--verifiers=COUNT` | 5 | Verifiers per attestation cycle (1..10), taken from `verifiers_config.txt` |
 | `-I`, `--interval=SECONDS` | 15 | Sleep **between** attestation cycles |
-| `-Q`, `--qualify-renew-margin=SECONDS` | 30 | Renew qualification when it expires within this, during idle time |
-| `-R`, `--ak-renew-margin=SECONDS` | 45 | Renew an **AK certificate** once it is within this long of expiring. Covers all three: RP's own (per Verifier), and the Attester's from RP's CA and from each Verifier's CA |
 | `-D`, `--duration=SECONDS` | 0 | Stop cleanly after ~N seconds. 0 = run until signalled |
 | `-C`, `--cycles=COUNT` | 0 | Stop cleanly after N attestation cycles. 0 = unbounded |
-| `-A`, `--attester-ak-validity=SECONDS` | 300 (5 min) | Lifetime of the Attester AK cert **RP** issues under its own CA |
+| `-A`, `--attester-ak-validity=SECONDS` | 157680000 (5 yr) | Lifetime of the Attester AK cert **RP** issues under its own CA |
 | `-B`, `--benchmark` | off | Run the bounded 1→5-Verifier timing sweep and exit instead |
 | `--verifier-timeout=SECONDS` | 6 | Wait for a Verifier's reply before giving up. Also bounds **every other** RP round trip — Trust Manager, `/certify_ak`, `/qualify`. A Verifier that times out counts against the majority exactly like a NO vote |
 | `--attester-timeout=SECONDS` | 6 | Wait for the Attester's evidence before giving up, which ends the cycle |
@@ -173,8 +172,6 @@ bin/attester &
 bin/relying_party \
     --verifiers 3 \
     --interval 20 \
-    --qualify-renew-margin 40 \
-    --ak-renew-margin 60 \
     --attester-ak-validity 600 \
     --duration 300 \
     --log-level INFO
@@ -186,8 +183,6 @@ What each RP flag on line 6 does:
 |---|---|
 | `--verifiers 3` | Ask the Trust Manager for IDs 1,2,3 → ports 5684-5686. The other two Verifiers stay idle. Must be ≤ the number actually running, or RP waits on a dead port |
 | `--interval 20` | Sleep 20s **after** each attestation cycle finishes. At ~3s per attestation cycle with 3 Verifiers, cycles start roughly every 23s |
-| `--qualify-renew-margin 40` | During the idle sleep, re-run `/qualify` once the qualification grant is within 40s of expiring. Must be < the Verifier's `--qualification-validity` (default 180) |
-| `--ak-renew-margin 60` | Same idea for AK certificates — RP's own per Verifier, plus both of the Attester's. Must be < the shortest certificate lifetime in play (defaults: 300) |
 | `--attester-ak-validity 600` | The Attester AK certificate **RP itself** signs lives 10 min. Only affects RP's own CA leg; each Verifier's leg uses that Verifier's `--ak-validity` |
 | `--duration 300` | Exit cleanly after ~5 min. Drop it to run until Ctrl+C |
 | `--log-level INFO` | Default. Use `DEBUG` (or `-v`) to see CoAP and TPM detail |
@@ -289,7 +284,7 @@ bin/verifier --port 5684 [OPTIONS]
 | `-c`, `--coap-log-level=LEVEL` | INFO | libcoap log-level |
 | `--port=PORT` | 31415 | **Port to listen on** |
 | `--qualification-validity=SECONDS` | 180 (3 min) | How long a passed RP qualification stays valid |
-| `--ak-validity=SECONDS` | 300 (5 min) | Lifetime of AK certs **this Verifier** issues, from issuance |
+| `--ak-validity=SECONDS` | 157680000 (5 yr) | Lifetime of AK certs **this Verifier** issues, from issuance |
 | `-f`, `--pcr-file=PATH` | `reference-pcrs.txt` | Reference PCRs. **Vestigial** — see below |
 | `-s`, `--pcr-selection=X1[,X2…]` | 0,1,2,3,4,5,6,7,10 | PCRs to check. **Vestigial** — see below |
 | `--ima[=PATH]` | kernel IMA log | Request an IMA event log. **Vestigial** — see below |
@@ -397,59 +392,43 @@ LOG_LEVEL_CHARRA=DEBUG bin/verifier --port 5684
 
 ## 10. Tuning the timing flags
 
-Only **one** coupling matters:
-
-```
---qualify-renew-margin  <  --qualification-validity
-          30            <          180              (defaults)
-```
-
-A margin covering the whole window can never be satisfied, so RP would
-re-qualify on every idle pass.
-
-**The margin is deliberately *not* coupled to `--interval`.** Renewal is
-deadline-driven, not loop-driven: the idle window computes when the next
-credential falls due, sleeps exactly that long, renews, then sleeps out the
-remainder against a fixed deadline. So a margin *shorter* than the interval
-is fine — the daemon wakes for it mid-nap. (Before this, the check ran once
-per attestation cycle, a short margin let the loop step over the window
-entirely, and the renewal landed inside the next attestation instead.)
-
-RP cannot check this at startup — the window is the Verifier's to choose and
-arrives on the wire, so RP warns only once it has learned it from a
-`/qualify_submit` response.
+**There are no renewal margins.** Every credential is re-provisioned by the
+first attestation cycle that finds it *already expired* — nothing renews
+ahead of time, and nothing happens between cycles. That removes the coupling
+this section used to be about; what is left is only the lifetimes themselves.
 
 `--qualification-validity` lives on the **Verifier only** — it issues the
-grant, and reports the deadline to RP on the wire.
+grant, and RP recomputes the same deadline locally (nothing on the wire
+carries it, so both binaries must be given matching values).
 
 AK validity is *per issuer*: `--ak-validity` on the Verifier,
 `--attester-ak-validity` on RP. Each certificate carries its own `notAfter`,
-so consumers read the real value.
+so consumers read the real value and the two never need to agree.
 
-`--ak-renew-margin` (RP) is the certificate counterpart of
-`--qualify-renew-margin`, and the AK certificate durations mirror the
-qualification ones exactly:
+Both AK lifetimes default to **5 years**. Renewal fires only on genuine
+expiry, so a short lifetime buys nothing but a `/certify_ak` round trip per
+Verifier inside an otherwise ordinary cycle. The qualification window stays
+short (180s) on purpose: it answers *"is the RP still running the right
+code"*, which does go stale — unlike identity, which does not.
 
-```
---ak-renew-margin  <  --ak-validity / --attester-ak-validity
-       45           <              300                    (defaults)
-```
-
-It must stay **smaller than the shortest AK certificate lifetime in play**,
-or every certificate is always "about to expire" and RP re-provisions on
-every single attestation cycle — a `/certify_ak` round trip per Verifier,
-forever.
-
-RP cannot check this for you at startup either: the lifetime is chosen by
-whoever issues the certificate, so RP only learns it on parsing one. A margin
-noticeably below the validity is the rule of thumb.
+**Consequence worth knowing.** With the 5-year defaults, the AK renewal path
+effectively never runs. To exercise it, set a short `--ak-validity` /
+`--attester-ak-validity` deliberately, as below.
 
 ### Short-lived setup, to watch renewal happen
 
 ```bash
-bin/verifier --port 5684 --qualification-validity 90 --ak-validity 600 &
-bin/relying_party --verifiers 1 --interval 15 --qualify-renew-margin 40 --duration 300
+bin/verifier --port 5684 --qualification-validity 90 --ak-validity 120 &
+bin/relying_party --verifiers 1 --interval 15 --duration 300
 ```
+
+Or, for the whole stack at once, `VERIFIER_AK_VALIDITY=60
+VERIFIER_QUALIFICATION_VALIDITY=45 RP_ATTESTER_AK_VALIDITY=60
+./run_daemon.sh`, which warns that these are short enough to hit the straddle.
+
+**Expect an occasional failed cycle when you do this** — see the
+troubleshooting row above. A 16-cycle run at these values lost one cycle and
+recovered on the next; that is the design working, not a fault.
 
 ---
 
@@ -498,7 +477,8 @@ Inside: `cd ~/charra && make -j`. The TPM simulator starts automatically;
 | Every attestation fails after a TPM reset | Stale `state/` — delete it |
 | `Esys_Create: 0x921`, Attester cannot create its AK | TPM is in dictionary-attack lockout; run `tpm2_dictionarylockout --clear-lockout`. Every later step fails in a confusing cascade from this one cause |
 | `could not read keys/verifier-ca-<port>.crt` | Port not in `verifiers_config.txt` when `gen-ak-pki.sh` ran |
-| RP re-qualifies every idle pass | `--qualify-renew-margin` ≥ the Verifier's validity window |
-| RP re-provisions AK certs every attestation cycle | `--ak-renew-margin` ≥ the certificate lifetime (`--ak-validity` / `--attester-ak-validity`) |
+| One cycle fails with `serial is REVOKED or EXPIRED` (Step 2a item 1), next one passes | The straddle: a credential was valid when checked and lapsed during the round trip after. Expected with short `--ak-validity`; non-fatal, self-correcting. Unreachable at the 5-year default |
+| RP re-qualifies on almost every cycle | `--qualification-validity` is at or below `--interval`, so the grant expires between cycles |
+| RP re-provisions AK certs every cycle | `--ak-validity` / `--attester-ak-validity` shorter than `--interval` |
 | `timeout`/`docker stop` kills RP mid-attestation-cycle | Fixed — SIGTERM now shuts down cleanly |
 | A Verifier votes NO and RP doesn't say why | By design. `/appraise` always answers `2.05` with `Attestation successful!`/`Attestation failed!` — any failed check is just a NO. **The reasons are logged on the Verifier**, so read that Verifier's log, not RP's |
