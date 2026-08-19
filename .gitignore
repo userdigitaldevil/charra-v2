@@ -64,3 +64,4 @@ durations_verifier-*.txt
 # Visual Studio
 .vs/
 
+.DS_Store

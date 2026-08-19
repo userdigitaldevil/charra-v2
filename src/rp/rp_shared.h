@@ -124,6 +124,14 @@ typedef struct verifier_info {
 /* --- Verifier endpoints, resolved once per cycle by get_verifiers() ----- */
 extern verifier_info verifiers[MAX_VERIFIERS];
 
+/* How many entries of verifiers[] the Trust Manager actually filled this
+ * cycle. The Trust Manager may legitimately answer with fewer records than
+ * were requested (an ID missing from its verifiers_config.txt), and the
+ * remaining slots then still hold the previous cycle's endpoints -- or
+ * nothing at all on the first cycle. get_verifiers() fails the cycle rather
+ * than attesting against them; see its own comment. */
+extern int verifiers_resolved;
+
 /* --- RP's own identity, provisioned per Verifier ------------------------ */
 extern bool rp_ak_cert_ready[MAX_VERIFIERS];
 extern time_t rp_ak_cert_expires_at[MAX_VERIFIERS];

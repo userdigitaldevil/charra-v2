@@ -57,6 +57,7 @@ bool attestation_results[MAX_VERIFIERS];
 bool rp_ak_cert_was_cached[MAX_VERIFIERS];
 long verifier_latency_ms[MAX_VERIFIERS];
 verifier_info verifiers[MAX_VERIFIERS];
+int verifiers_resolved = 0;
 /* Was 6000 -- 1000x too large: this feeds libcoap's ack_timeout (seconds),
  * so a stray retransmission could take tens of real seconds to resolve. */
 uint16_t verifier_response_timeout = RP_DEFAULT_VERIFIER_TIMEOUT_S;
@@ -338,6 +339,12 @@ static void rp_renew_due_credentials(int num_verifiers) {
         rp_perform_qualification_handshake_once(
                 num_verifiers, (time_t)rp_qualify_renew_margin_s);
     }
+    /* The RP-issued Attester AK certificate renews here too, not only from
+     * the next cycle's ensure_* call: rp_next_renewal_due() folds its expiry
+     * into the wake time, so without this the RP woke exactly when it fell
+     * due and renewed nothing, then slept again. Its own margin check makes
+     * this a no-op until it is actually close to expiring. */
+    ensure_attester_identity_provisioned();
     for (int i = 0; i < num_verifiers; ++i) {
         ensure_rp_ak_certificate(i);
         ensure_attester_identity_certified_by_verifier(i);

@@ -362,7 +362,13 @@ actual order `run_one_attestation_cycle()` runs things in, for one cycle
 
 1. **`/get_verifiers` (Trust Manager)** — resolve this round's Verifier
    IDs to IP/port (`get_verifiers()`). A static config lookup, nothing
-   cryptographic.
+   cryptographic. Fail-closed on a short answer: the Trust Manager may
+   legitimately return fewer records than were requested (an ID missing
+   from `verifiers_config.txt`), but the unfilled `verifiers[]` slots then
+   still hold the previous cycle's endpoints while the majority vote's
+   denominator stays at the requested count, so `get_verifiers()` compares
+   `verifiers_resolved` against `num_verifiers` and abandons the cycle
+   rather than attesting against endpoints it never resolved.
 2. **Attester identity provisioning, once ever** —
    `ensure_attester_identity_provisioned()`: FETCH the Attester's EK
    cert/AK public key/AK name, validate the EK chain locally, sign +
@@ -449,7 +455,11 @@ actual order `run_one_attestation_cycle()` runs things in, for one cycle
   current grant is still good" rule the qualification refresh margin uses:
   RP's own AK certificate per Verifier (`/certify_ak`), and the Attester's
   AK certificate as issued by RP's CA and by each Verifier's CA
-  (`/certify_ak_of_attester`). This is not optional tidiness. The caches
+  (`/certify_ak_of_attester`). All three are also renewed from the daemon's
+  idle window, not only from the next cycle: `rp_next_renewal_due()` folds
+  every one of their expiries into the wake time, so leaving any of them
+  out of `rp_renew_due_credentials()` makes the RP wake exactly when that
+  credential falls due and renew nothing. This is not optional tidiness. The caches
   were keyed purely on the file existing, and a Verifier gives no distinct
   signal for a stale certificate — it just votes NO — so an expired
   certificate would be resent and rejected every cycle forever, with

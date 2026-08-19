@@ -292,6 +292,9 @@ static coap_response_t coap_trust_manager_handler(coap_session_t* session,
                 "%s", resp.verifiers[i].ip_address);
         verifiers[i].port_number = resp.verifiers[i].port_number;
     }
+    /* Only these entries were filled this cycle; get_verifiers() decides
+     * what a short list means. */
+    verifiers_resolved = (int)verifiers_to_copy;
 
     /* Print the received verifier information */
     for (size_t i = 0; i < verifiers_to_copy; i++) {
@@ -328,6 +331,11 @@ CHARRA_RC get_verifiers(int* requested_ids, int num_verifiers) {
         req.verifier_ids[i] = requested_ids[i];
     }
 
+    /* Reset before the exchange, not after: a Trust Manager that never
+     * answers leaves the handler unrun, and a stale count from the previous
+     * cycle would then read as a full, fresh list. */
+    verifiers_resolved = 0;
+
     uint8_t* req_buf = NULL;
     uint32_t req_buf_len = 0;
     CHARRA_RC result = charra_marshal_get_verifiers_request(
@@ -352,7 +360,26 @@ CHARRA_RC get_verifiers(int* requested_ids, int num_verifiers) {
     });
 
     charra_free_if_not_null(req_buf);
-    return result;
+    if (result != CHARRA_RC_SUCCESS) {
+        return result;
+    }
+
+    /* Fail closed on a short list. verifiers[] beyond verifiers_resolved
+     * still holds the previous cycle's endpoints (or nothing at all on the
+     * first), yet every later stage -- the per-Verifier threads, and the
+     * majority vote's denominator -- is sized by num_verifiers. Attesting
+     * against endpoints this cycle never resolved would either re-use stale
+     * ones or dial port 0, and both count as a NO in a vote whose threshold
+     * assumed a full set. One cycle skipped is the correct answer. */
+    if (verifiers_resolved < num_verifiers) {
+        charra_log_error(
+                "[" LOG_NAME "] Only %d of %d requested Verifier(s) were "
+                "resolved; abandoning this cycle rather than attesting "
+                "against unresolved endpoints.",
+                verifiers_resolved, num_verifiers);
+        return CHARRA_RC_ERROR;
+    }
+    return CHARRA_RC_SUCCESS;
 }
 
 CHARRA_RC get_evidence(void) {

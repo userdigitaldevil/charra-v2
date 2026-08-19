@@ -1,0 +1,186 @@
+digraph rp_daemon {
+  compound=true; newrank=true; rankdir=TB; bgcolor="white";
+  splines=ortho; forcelabels=true;
+  fontname="Helvetica"; labelloc="t"; labeljust="l"; fontsize=22;
+  ranksep=0.62; nodesep=0.55; esep=0.35;
+  label=<<b>CHARRA v2 — Relying Party, daemon mode</b><br align="left"/><font point-size="12">The RP's state machine (left) and, rank-aligned beside it, what each peer does when called (right).<br align="left"/>Every box names <b>who acts on whom</b>. Keys carry the owner: <b>EK_a / AK_a</b> are the Attester's, <b>EK_r / AK_r</b> the RP's<br align="left"/>— distinct key pairs, though in this PoC both live in the same TPM simulator. Diamonds are guards; red edges are failure paths. Red notes inside a box mark a <b>deviation from the DRA-TLS spec</b>. A <b>▸ abort</b> connector means<br align="left"/>&quot;continue at <i>RP abandons this cycle</i>&quot; in section 3 — drawn as a connector, not a wire, so five failure paths do not become five parallel lines.<br align="left"/>Anything written <b>--like-this</b> is a <b>command-line flag the RP process is started with</b> — a local setting, never a protocol message; the value beside it is this diagram's example, not a fixed constant.<br align="left"/></font><br align="left"/>>;
+  node [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", fillcolor="#dbeafe", color="#1e3a8a", penwidth=1.2, margin="0.12,0.07"];
+  edge [fontname="Helvetica", fontsize=9, color="#334155"];
+
+  /* ---------- peers: free nodes, rank-aligned to their caller ---------- */
+  node [fillcolor="#ede9fe", color="#5b21b6"];
+  TM1 [label=<<b>TRUST MANAGER</b> · /get_verifiers &nbsp;<font point-size="8">port 6000</font><br align="left"/><b>RP asks</b> for verifier IDs 1..N<br align="left"/><b>Trust Manager answers</b> with {ip, port} for each ID<br align="left"/>it finds in verifiers_config.txt<br align="left"/><font color="#b91c1c">⚠ answer is unauthenticated: no signature, no nonce</font><br align="left"/>>];
+
+  node [fillcolor="#ccfbf1", color="#115e59"];
+  A0 [label=<<b>ATTESTER</b> · /certify_ak_of_attester &nbsp;<font point-size="8">two legs of four</font><br align="left"/><b>① FETCH — RP reads from the Attester:</b> EK_a certificate,<br align="left"/>AK_a public key, AK_a name<br align="left"/><b>② DELIVER_RP — RP writes back:</b> the AK_a certificate the<br align="left"/>RP just minted under its OWN CA<br align="left"/><font color="#991b1b"><b>No ActivateCredential on this leg.</b> The RP-CA track proves nothing<br align="left"/>about possession: it trusts the EK_a certificate chain and signs. The<br align="left"/>ACTIVATE and DELIVER_VERIFIER legs of this same endpoint belong to<br align="left"/>the Verifier-CA relay further down — see the ▸ connector there.</font><br align="left"/>>];
+  A1 [label=<<b>ATTESTER</b> · /attest &nbsp;<font point-size="8">port 5683</font><br align="left"/><b>RP sends</b> its nonce; <b>Attester answers</b> with Quote_a<br align="left"/>① Attester ensures its own EK_a + AK_a exist (cached)<br align="left"/>② Attester opens its TPM and loads AK_a<br align="left"/>③ <b>first /attest of the process only:</b> Attester extends its own<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;PCRs from its IMA log. PCRs 0–15 cannot be reset, so<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;repeating it would keep growing PCR 10 and no replay of the<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;log would reproduce it — later calls skip straight to ④<br align="left"/>④ Attester runs TPM2_Quote, signed by AK_a,<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;qualified by the RP's nonce<br align="left"/>⑤ Attester returns Quote_a + log + AK_a certificates<br align="left"/>>];
+  A2 [label=<<b>ATTESTER</b> · /attest_result<br align="left"/><b>RP tells the Attester</b> whether its evidence passed Step 2a<br align="left"/><font color="#991b1b">The Attester only <b>logs</b> it — INFO on accept, ERROR on reject.<br align="left"/>Nothing is persisted and nothing acts on it. On a real base station<br align="left"/>this is the hook that would drive an alert or a re-measurement.</font><br align="left"/>>];
+
+  node [fillcolor="#ffedd5", color="#9a3412"];
+  V0 [label=<<b>VERIFIER i</b> · /certify_ak — acting as Privacy CA<br align="left"/><font point-size="8">default port 31415; run at 5684+ per verifiers_config.txt</font><br align="left"/><b>ONE endpoint, TWO subjects.</b> The request carries a <font face="Courier">subject</font> field:<br align="left"/>&nbsp;&nbsp;<font face="Courier">SUBJECT_RP</font> — certify <b>AK_r</b>, against <b>EK_r</b>, activated by <b>TPM_r</b><br align="left"/>&nbsp;&nbsp;<font face="Courier">SUBJECT_ATTESTER</font> — certify <b>AK_a</b>, against <b>EK_a</b>, activated by <b>TPM_a</b><br align="left"/><font point-size="9">The subject is bound into the pending challenge and picks which issuance<br align="left"/>ledger the record lands in. The Verifier refuses to guess — mixing the two<br align="left"/>is exactly what that field exists to prevent.</font><br align="left"/><br align="left"/><b>Both subjects run the same two legs:</b><br align="left"/>&nbsp;&nbsp;① <b>Verifier i validates that subject's EK certificate</b> chains to the<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;manufacturer root, then challenges: TPM2_MakeCredential against<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;that EK. <font point-size="9">Not the only EK check in the system — the RP runs the same<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;chain validation on EK_a before minting its own certificate (see Phase 1).<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;It is the only one bound to a possession proof.</font><br align="left"/>&nbsp;&nbsp;② <b>the TPM that owns the EK activates the credential</b> and the secret is<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;echoed back — the RP itself for SUBJECT_RP, the <b>Attester</b> for<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;SUBJECT_ATTESTER, where the RP only relays<br align="left"/>&nbsp;&nbsp;③ <b>Verifier i issues</b> that AK's certificate under its own CA<br align="left"/>>];
+  V1 [label=<<b>VERIFIER</b> · /qualify → /qualify_submit &nbsp;<font point-size="8">the RP access check</font><br align="left"/><b>Before an RP may redact real Attester evidence, it must prove<br align="left"/>it runs the correct, unmodified PATH_Clean SDK — the path-mapping<br align="left"/>module that turns a real path into its redacted form.</b><br align="left"/><br align="left"/><b>/qualify — the Verifier sets the exam:</b><br align="left"/>&nbsp;&nbsp;① fabricates a synthetic IMA log from a random seed<br align="left"/>&nbsp;&nbsp;② redacts it ITSELF with a random salt → the golden answer,<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;and replays that to a golden PCR digest<br align="left"/>&nbsp;&nbsp;③ sends the RP the RAW log + the salt — never the golden answer<br align="left"/><br align="left"/><b>/qualify_submit — the Verifier marks it:</b><br align="left"/>&nbsp;&nbsp;④ <b>who is this:</b> the submitter's AK_r certificate must chain to this<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Verifier's CA, the submitted public key must match that certificate,<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;and its serial must still be live in this Verifier's AK ledger<br align="left"/>&nbsp;&nbsp;⑤ <b>did that key sign this:</b> the RSA-PSS signature over the submitted<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;PCR digest must verify under it — otherwise anyone could staple a<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;valid certificate to a log they never produced<br align="left"/>&nbsp;&nbsp;⑥ the RP's redacted log must equal the golden log BYTE FOR BYTE,<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;and its PCR digest must equal the golden PCR digest<br align="left"/>&nbsp;&nbsp;⑦ all three ⇒ qualified for the validity window, recorded in the<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;ledger shared by every Verifier instance, so one answer serves all.<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;The challenge is spent either way — a retry needs a fresh /qualify<br align="left"/><br align="left"/><font point-size="9">The golden comparison is on log + digest, never on signature bytes: RSA-PSS<br align="left"/>salting makes two honest signings over identical data differ. The shared salt is<br align="left"/>the one deliberate exception to never transmitting it — safe only because this<br align="left"/>log is synthetic.</font><br align="left"/><font color="#991b1b" point-size="9"><b>Blind spot:</b> the SDK takes ONE salt for the whole log here, because byte-identical<br align="left"/>reproduction is only possible that way. Real evidence takes the other branch —<br align="left"/>a fresh salt per entry. Same function, so the exam proves the RP holds the right<br align="left"/>path-mapping module, but it never exercises the per-entry salt path itself.</font><br align="left"/><font color="#991b1b" point-size="9"><b>Deviation:</b> the spec has the Verifier PUSH test logs to the RP periodically.<br align="left"/>Here the RP PULLS a challenge when its grant expires — same check, inverted<br align="left"/>initiator; the period comes from the RP's expiry + renew margin, not a Verifier timer.<br align="left"/>The SDK itself is never distributed either: it is compiled into both binaries.</font><br align="left"/>>];
+  V2 [label=<<b>VERIFIER i</b> · /nonce<br align="left"/><b>RP sends</b> the same request it sent the Attester<br align="left"/><b>Verifier i keeps</b> the RP's nonce, to check Quote_a's<br align="left"/>own freshness later (Step 3b ③)<br align="left"/><b>Verifier i answers</b> with a nonce IT chose — a value the RP<br align="left"/>picked itself would prove nothing about Quote_r's freshness<br align="left"/><font color="#991b1b">Asymmetry: Quote_r answers a Verifier-chosen nonce, Quote_a only<br align="left"/>answers one the RP <i>told</i> the Verifier about. Step 3b freshness is<br align="left"/>therefore RP-asserted — a dishonest RP could replay an old Quote_a<br align="left"/>together with its matching old nonce.</font><br align="left"/>>];
+  V3 [label=<<b>VERIFIER i</b> · /appraise<br align="left"/><b>RP submits</b> the evidence; <b>Verifier i judges</b> it<br align="left"/><b>Step 3a</b> — the RP's own evidence (Quote_r, log_r)<br align="left"/>&nbsp;&nbsp;① AK_r certificate chains to this Verifier's CA <b>and its serial is<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;still live in this Verifier's AK ledger</b> — the ledger is the<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;revocation mechanism, since EKs are not re-checked here<br align="left"/>&nbsp;&nbsp;①b this RP holds a valid qualification<br align="left"/>&nbsp;&nbsp;② Quote_r signature verifies under AK_r<br align="left"/>&nbsp;&nbsp;③ the nonce it issued comes back, single-use<br align="left"/><b>Step 3b</b> — the Attester's original evidence (Quote_a)<br align="left"/>&nbsp;&nbsp;① AK_a certificate — chain + ledger, same as ① above<br align="left"/>&nbsp;&nbsp;② Quote_a signature under AK_a, verified <b>twice and ANDed</b>:<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;once by the TPM, once by mbedTLS. Step 3a ② has no such<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;second opinion — PCR_r never was in a TPM to begin with<br align="left"/>&nbsp;&nbsp;③ the RP's nonce comes back in Quote_a<br align="left"/><b>Verifier i replies</b> 3a AND 3b — both always run, so one<br align="left"/>reply lists every reason it failed<br align="left"/><font color="#991b1b"><b>log_r is received and never checked.</b> No self-consistency pass, no<br align="left"/>replay, no comparison against PCR_r — the Verifier accepts PCR_r purely<br align="left"/>on RP's signature over it. Log content is the RP's Step 2a job, run on<br align="left"/>the raw log before redaction, and the Verifier does not re-do it.</font><br align="left"/><font color="#991b1b"><b>Deviation:</b> the spec's item 1 says "EK and AK certificates". Only the AK<br align="left"/>certificate is checked here; EK_r and EK_a were chain-validated once at<br align="left"/>certification, and the EK↔AK binding is carried by ActivateCredential.</font><br align="left"/>>, fillcolor="#fed7aa"];
+
+  /* ============================ 1 · STARTUP ============================ */
+  node [fillcolor="#dbeafe", color="#1e3a8a"];
+  subgraph cluster_startup {
+    label=<<b>1 · Startup</b>>; fontsize=14; style="rounded,filled"; fillcolor="#f8fafc"; color="#94a3b8";
+    START [label="START — the RP process begins", shape=oval, fillcolor="#1e3a8a", fontcolor="white"];
+    NOTATION [label=<<b>Notation</b><br align="left"/><b>_a</b> the Attester's · <b>_r</b> the Relying Party's<br align="left"/>&nbsp;&nbsp;EK_a / AK_a, EK_r / AK_r &nbsp; endorsement + attestation keys<br align="left"/>&nbsp;&nbsp;TPM_a / TPM_r &nbsp; each party's TPM (one simulator here)<br align="left"/>&nbsp;&nbsp;log_a &nbsp; the Attester's raw measurement log<br align="left"/>&nbsp;&nbsp;log_r &nbsp; the same log after the RP redacts every path<br align="left"/>&nbsp;&nbsp;Quote_a / Quote_r &nbsp; the signed (PCR, nonce) pair from each<br align="left"/>&nbsp;&nbsp;PCR_r &nbsp; the PCR digest a replay of log_r produces<br align="left"/><b>template_hash</b> &nbsp; the per-entry digest IMA stores in the log, over<br align="left"/>&nbsp;&nbsp;that entry's template_data (its algorithm, file digest and path)<br align="left"/><b>fail-closed</b> &nbsp; when a check cannot be completed the answer is NO,<br align="left"/>&nbsp;&nbsp;never a default yes<br align="left"/><b>best-effort</b> &nbsp; a failure here does not stop the cycle<br align="left"/><b>Step 2a / 2b / 3a / 3b</b> &nbsp; step numbers from the DRA-TLS<br align="left"/>&nbsp;&nbsp;privacy-protection specification<br align="left"/>>, shape=note, fillcolor="#f8fafc", color="#64748b", fontsize=9];
+    CLI   [label=<<b>RP parses its own command line</b><br align="left"/>--interval 15s  --verifiers 5  --duration  --cycles<br align="left"/>--verifier-timeout 6s  --attester-timeout 6s<br align="left"/>--qualify-renew-margin 30s  --ak-renew-margin 45s<br align="left"/>--attester-ak-validity &nbsp;<font point-size="9">the window on the certificate the RP mints in Phase 1</font><br align="left"/>>];
+    ENTER [label=<<b>RP enters the attestation loop</b><br align="left"/>cycle = 0, and <b>if --duration was given</b> deadline = now + it<br align="left"/><font point-size="9">without --duration there is no deadline at all and every check on it below<br align="left"/>is skipped — the daemon then stops only on --cycles or an operator stop request (Ctrl-C / SIGTERM)</font><br align="left"/>>];
+  }
+  START -> CLI -> ENTER;
+
+  /* ============================ 2 · CYCLE ============================ */
+  subgraph cluster_cycle {
+    label=<<b>2 · Attestation cycle</b> — run_one_attestation_cycle(). Benchmark mode runs this same body, but a failed cycle is FATAL there; only the daemon treats it as one lost cycle.>;
+    fontsize=14; style="rounded,filled"; fillcolor="#eff6ff"; color="#3b82f6";
+    CYC    [label="RP starts a cycle   ·   asks for Verifier IDs 1..N", fillcolor="#bfdbfe"];
+    GETV   [label=<<b>Phase 1</b> · <b>RP → Trust Manager</b><br align="left"/>FETCH /get_verifiers for IDs 1..N<br align="left"/><font point-size="9">timeout is a fixed 30 s built into the RP — not --verifier-timeout,<br align="left"/>and there is no flag for it</font><br align="left"/>>];
+    GETVQ  [label="Trust Manager returned\nall N endpoints?", shape=diamond, fillcolor="#fef9c3", color="#a16207", width=2.1, height=1.05];
+    ATTID  [label=<<b>RP certifies the Attester under the RP's own CA</b><br align="left"/><b>① cache check first:</b> a valid AK_a certificate already held<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;→ nothing to do, the RP moves straight on<br align="left"/><b>② otherwise</b> the RP FETCHes the Attester's identity, checks EK_a<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;chains to the manufacturer root, mints the certificate and<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;DELIVER_RPs it back<br align="left"/><font point-size="9">The cache is a file on disk, so this normally runs once per deployment,<br align="left"/>not once per process — and again when the certificate nears expiry<br align="left"/>(--ak-renew-margin), which the idle window also watches for.</font><br align="left"/><b>fail-closed:</b> a failure aborts the cycle<br align="left"/>>];
+    ATTIDQ [label="Attester identity\nprovisioned?", shape=diamond, fillcolor="#fef9c3", color="#a16207", width=1.6, height=0.9];
+    MKREQ  [label=<<b>Phase 2</b> · <b>RP builds an attestation request</b><br align="left"/>fresh nonce, chosen by the RP<br align="left"/>>];
+    ATTEST [label=<<b>RP → Attester</b> · FETCH /attest<br align="left"/>timeout --attester-timeout<br align="left"/>>];
+    STEP2A [label=<<b>Step 2a · RP appraises the Attester's evidence itself</b><br align="left"/>① AK_a certificate the RP issued  ② Quote_a signature under AK_a<br align="left"/>③ the RP's nonce came back  ④ log self-consistency<br align="left"/>⑤ replayed PCR digest  ⑥ file-hash policy — all six always run<br align="left"/>>, fillcolor="#c7d2fe"];
+    RESULT [label=<<b>RP → Attester</b> · PUT /attest_result<br align="left"/>the RP reports its verdict, only when it reached one<br align="left"/>>];
+    EVQ    [label="RP accepted the\nAttester's evidence?", shape=diamond, fillcolor="#fef9c3", color="#a16207", width=1.9, height=0.95];
+    STEP2B [label=<<b>Phase 3 · Step 2b · RP redacts the evidence, ONCE per cycle</b><br align="left"/>RP rewrites every path in the Attester's log:<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;redacted_path = SHA256(path ‖ fresh random salt), a new salt per entry<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;→ irreversible even against guessed paths, and repeated paths cannot be correlated<br align="left"/>RP recomputes each entry's template_hash — it must equal SHA256 of the<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;new template_data, or log_r fails its own self-consistency check<br align="left"/>RP replays log_r into PCR_r<br align="left"/><font color="#991b1b"><b>Deviation:</b> PCR_r is computed in SOFTWARE by replaying log_r — not a real<br align="left"/>TPM2_Quote over live PCRs. See the signing box below.</font><br align="left"/><b>Once, not per thread:</b> the salts are random, so redacting again would hand<br align="left"/>each Verifier a different log_r for one and the same attestation<br align="left"/>>, fillcolor="#c7d2fe"];
+    QCACHED[label="RP already holds a\nvalid qualification?", shape=diamond, fillcolor="#fef9c3", color="#a16207", width=2.0, height=1.05];
+    QUAL   [label=<<b>RP → Verifier</b> · the RP sits the access check<br align="left"/><font point-size="9">only reached on a cache miss or expiry. The RP tries Verifiers in order and<br align="left"/>stops at the first verdict — the ledger is shared, so the answer would be the<br align="left"/>same everywhere. Only a TRANSPORT failure (or an AK_r certificate it could not<br align="left"/>get from that Verifier) moves to the next candidate; a local redact, replay or<br align="left"/>sign failure abandons the search outright.</font><br align="left"/>&nbsp;&nbsp;⓪ <b>RP first gets AK_r certified by that Verifier</b> — /qualify_submit<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;rejects an unknown submitter, so on a cold start the very first<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/certify_ak happens HERE, not in the threads below (they find it cached)<br align="left"/>&nbsp;&nbsp;① RP asks that Verifier for a challenge &nbsp;<font point-size="8">/qualify</font><br align="left"/>&nbsp;&nbsp;② RP redacts the synthetic log it was handed, using the salt it<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;was given — the same SDK function real evidence goes through, though<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;in its one-salt-for-the-whole-log mode; see the Verifier box<br align="left"/>&nbsp;&nbsp;③ RP replays its result into a PCR digest and signs it with AK_r<br align="left"/>&nbsp;&nbsp;④ RP submits log + digest + signature + its AK_r certificate<br align="left"/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<font point-size="8">/qualify_submit</font><br align="left"/>>];
+    QUALQ  [label="RP is qualified?", shape=diamond, fillcolor="#fef9c3", color="#a16207", width=1.6, height=0.9];
+    FORK   [label="RP forks one thread per Verifier", shape=box, style=filled, fillcolor="#1e40af", fontcolor="white", height=0.28];
+    JOIN   [label="RP joins every thread", shape=box, style=filled, fillcolor="#1e40af", fontcolor="white", height=0.28];
+    VOTE   [label="RP counts the votes — strict majority\n2 × (Verifiers that voted PASS) > (Verifiers configured)", shape=diamond, fillcolor="#fef9c3", color="#a16207", width=3.0, height=1.3];
+    PASS   [label="RP concludes: ATTESTATION SUCCESSFUL", fillcolor="#bbf7d0", color="#166534"];
+    FAILV  [label="RP concludes: ATTESTATION FAILED", fillcolor="#fecaca", color="#991b1b"];
+    node [shape=rarrow, fillcolor="#fecaca", color="#991b1b", fontsize=9, margin="0.06,0.04", height=0.32];
+    AB1 [label="▸ abort"]; AB2 [label="▸ abort"]; AB3 [label="▸ abort"];
+    AB4 [label="▸ abort"]; AB5 [label="▸ abort"];
+    node [shape=box, style="rounded,filled", fillcolor="#dbeafe", color="#1e3a8a", fontsize=10, margin="0.12,0.07", height=0.5];
+    CYCDONE[label=<<b>RP finishes the cycle</b><br align="left"/>either verdict completes it — a lost vote is a<br align="left"/><i>result</i>, not a cycle failure; the daemon carries on<br align="left"/>>, fillcolor="#bfdbfe"];
+
+    subgraph cluster_thread {
+      label=<<b>One RP thread per Verifier</b> — N concurrent (default 5)>; fontsize=12;
+      style="rounded,filled"; fillcolor="#fff7ed"; color="#fb923c";
+      node [fillcolor="#ffedd5", color="#9a3412"];
+      TRESET [label=<<b>RP thread i clears Verifier i's vote to FALSE</b><br align="left"/>fail-closed: no stale PASS survives into this vote<br align="left"/>>];
+      TCERT1 [label=<<b>RP → Verifier i /certify_ak:</b> get AK_r certified &nbsp;<font face="Courier" point-size="9">subject: RP</font><br align="left"/><b>cache first:</b> held and not near expiry → skipped, no round trip<br align="left"/>otherwise the two-leg /certify_ak handshake runs<br align="left"/><font point-size="9">On a cold start this is normally already cached: qualification needed AK_r<br align="left"/>certified by this same Verifier and did it first, upstream of the fork.</font><br align="left"/>best-effort — the RP forwards the evidence either way<br align="left"/>>];
+      TCERT2 [label=<<b>RP relays, three parties:</b> get AK_a certified &nbsp;<font face="Courier" point-size="9">subject: ATTESTER</font><br align="left"/><b>cache first:</b> held and not near expiry → skipped, no round trip<br align="left"/>① RP asks <b>Verifier i /certify_ak</b> for a challenge<br align="left"/>② RP passes it to <b>Attester /certify_ak_of_attester</b> — only TPM_a can activate it<br align="left"/>③ RP returns the Attester's answer to <b>Verifier i /certify_ak</b><br align="left"/>④ RP delivers the certificate to <b>Attester /certify_ak_of_attester</b><br align="left"/>best-effort<br align="left"/>>];
+      TNONCE [label=<<b>RP → Verifier i:</b> FETCH /nonce<br align="left"/>the RP sends the same request it sent the Attester,<br align="left"/>and Verifier i answers with a nonce of its own<br align="left"/>>];
+      TNQ    [label="Verifier i\nsupplied a nonce?", shape=diamond, fillcolor="#fef9c3", color="#a16207", width=1.6, height=0.9];
+      TBUILD [label=<<b>RP thread i signs and assembles the evidence for Verifier i</b><br align="left"/>signs (PCR_r ‖ Verifier i's nonce) with AK_r → Quote_r<br align="left"/><b>signed per Verifier, not once:</b> each Verifier issued its own nonce, so<br align="left"/>each signature is over different bytes<br align="left"/>sends Quote_a (the Attester's) + Quote_r + log_r<br align="left"/>+ the AK_a and AK_r certificates<br align="left"/><font color="#991b1b"><b>log_a is NOT forwarded</b> — log_r replaces it. Sending the raw log<br align="left"/>would defeat the redaction entirely, so Evidence_a' is Quote_a alone.<br align="left"/><b>Quote_r proves</b> "a TPM-certified identity signed this PCR_r for this<br align="left"/>nonce" — not "the TPM attests this PCR_r", since PCR_r is a replay.</font><br align="left"/>>];
+      TAPPR  [label=<<b>RP → Verifier i:</b> FETCH /appraise<br align="left"/>one attempt — the answer is a vote, not a retry<br align="left"/>>];
+      TVOTE  [label=<<b>RP records Verifier i's vote</b><br align="left"/>PASS only if Verifier i replied \"Attestation successful!\"<br align="left"/>>, fillcolor="#fed7aa"];
+      ACONN  [label="▸ ② ④ to Attester\n/certify_ak_of_attester", shape=rarrow, fillcolor="#ccfbf1", color="#115e59", fontsize=9, margin="0.06,0.04", height=0.34];
+      TDEAD  [label="RP thread i gives up\nVerifier i's vote stays FALSE", style="filled,dashed", fillcolor="#fecaca", color="#991b1b"];
+    }
+  }
+
+  ENTER -> CYC;
+  CYC -> GETV -> GETVQ;
+  GETVQ -> ATTID [xlabel="yes"];
+  ATTID -> ATTIDQ;
+  ATTIDQ -> MKREQ [xlabel="yes"];
+  MKREQ -> ATTEST -> STEP2A -> RESULT -> EVQ;
+  EVQ -> STEP2B [xlabel="yes"];
+  STEP2B -> AB5 [xlabel="redact/replay failed", color="#b91c1c", fontcolor="#b91c1c", constraint=false];
+  STEP2B -> QCACHED;
+  QCACHED -> FORK [xlabel="yes · skip", color="#166534", fontcolor="#166534"];
+  QCACHED -> QUAL [xlabel="no · miss/expired"];
+  QUAL -> QUALQ;
+  QUALQ -> FORK [xlabel="yes"];
+  FORK -> TRESET [lhead=cluster_thread];
+  TRESET -> TCERT1 -> TCERT2 -> TNONCE -> TNQ;
+  TNQ -> TBUILD [xlabel="yes"];
+  TNQ -> TDEAD [xlabel="no", color="#b91c1c", fontcolor="#b91c1c"];
+  TBUILD -> TAPPR -> TVOTE;
+  TVOTE -> JOIN [ltail=cluster_thread];
+  TDEAD -> JOIN [style=dashed, color="#b91c1c"];
+  JOIN -> VOTE;
+  VOTE -> PASS [xlabel="yes"]; VOTE -> FAILV [xlabel="no"];
+  PASS -> CYCDONE; FAILV -> CYCDONE;
+
+  /* ============================ 3 · LOOP CONTROL ============================ */
+  subgraph cluster_loop {
+    label=<<b>3 · Loop control</b>>; fontsize=14; style="rounded,filled"; fillcolor="#f8fafc"; color="#94a3b8";
+    CYCFAIL [label=<<b>▸ abort — every abort connector lands here</b><br/><b>RP abandons this cycle</b> — logged, <b>not</b> fatal<br/>a peer briefly unreachable costs the RP one cycle, not the process>, fillcolor="#fee2e2", color="#991b1b", penwidth=2.2, style="rounded,filled,dashed"];
+    QQUIT [label="RP asked to stop?\n(Ctrl-C / SIGINT / SIGTERM —\nthe OS, never a peer)", shape=diamond, fillcolor="#fef9c3", color="#a16207", width=1.9, height=1.0];
+    QCYC  [label="RP hit --cycles?", shape=diamond, fillcolor="#fef9c3", color="#a16207", width=1.7, height=0.9];
+    QDUR  [label="RP hit --duration?", shape=diamond, fillcolor="#fef9c3", color="#a16207", width=1.7, height=0.9];
+    NAP   [label="RP naps for min(--interval, time left on --duration)"];
+  }
+  GETVQ  -> AB1 [xlabel="no", color="#b91c1c", fontcolor="#b91c1c", constraint=false];
+  ATTIDQ -> AB2 [xlabel="no", color="#b91c1c", fontcolor="#b91c1c", constraint=false];
+  EVQ    -> AB3 [xlabel="no", color="#b91c1c", fontcolor="#b91c1c", constraint=false];
+  QUALQ  -> AB4 [xlabel="no", color="#b91c1c", fontcolor="#b91c1c", constraint=false];
+  CYCDONE -> QQUIT; CYCFAIL -> QQUIT;
+  QQUIT -> QCYC [xlabel="no"];
+  QCYC  -> QDUR [xlabel="no"];
+  QDUR  -> NAP  [xlabel="no"];
+
+  /* ============================ 4 · IDLE ============================ */
+  subgraph cluster_idle {
+    label=<<b>4 · Idle window</b> — the wait between one attestation cycle and the next.<br align="left"/><font point-size="11">The RP has no attestation work here, so instead of sleeping straight through the gap,<br align="left"/>it spends it renewing whatever is about to expire. Each renewal fires on its own credential's<br align="left"/>deadline, not on the loop cadence — that is what decouples the renew margins from --interval.</font><br align="left"/>>;
+    fontsize=14; style="rounded,filled"; fillcolor="#f0fdf4"; color="#22c55e";
+    node [fillcolor="#dcfce7", color="#166534"];
+    IDLE0 [label="RP sets idle_until = now + nap"];
+    DURCHK[label="--duration elapsed\nwhile napping?", shape=diamond, fillcolor="#fef9c3", color="#a16207", width=1.9, height=1.0];
+    RENEW [label=<<b>RP renews whatever is close to expiring</b><br align="left"/>· its qualification, at --qualify-renew-margin<br align="left"/>&nbsp;&nbsp;<font point-size="9">skipped entirely when that margin is 0 — re-qualifying then falls back<br align="left"/>&nbsp;&nbsp;inside the next attestation, which is what the margin exists to avoid</font><br align="left"/>· its own AK_r certificate from each Verifier<br align="left"/>· the Attester's AK_a certificate from each Verifier<br align="left"/>· the Attester's AK_a certificate <b>the RP itself minted</b> (Phase 1)<br align="left"/>&nbsp;&nbsp;the last three at --ak-renew-margin<br align="left"/><font point-size="9">each call re-checks its own cache first, so a pass with nothing due is free.<br align="left"/>Same endpoints the cycle uses, reached from the idle window.</font><br align="left"/>>];
+    WAKE  [label=<<b>RP sleeps only until the next renewal falls due</b><br align="left"/>wake = min(idle_until, next renewal deadline)<br align="left"/>>];
+    SLEEP [label=<<b>RP sleeps until <font face="Courier">wake</font>, in 1-second slices</b><br align="left"/>nothing is polled or awaited here — the slicing exists only so that a<br align="left"/><b>Ctrl-C / SIGINT / SIGTERM</b> is acted on within a second, instead of after<br align="left"/>the whole (possibly minutes-long) sleep has run its course<br align="left"/>>];
+    IDLEQ [label="nap over, or asked to stop?\n(tested BEFORE each renewal pass)", shape=diamond, fillcolor="#fef9c3", color="#a16207", width=2.4, height=1.1];
+    IDLESIG [label="which of the two\nended the nap?", shape=diamond, fillcolor="#fef9c3", color="#a16207", width=2.1, height=1.05];
+  }
+  NAP -> IDLE0 -> IDLEQ;
+  IDLEQ -> RENEW [xlabel="no · still napping"];
+  RENEW -> WAKE -> SLEEP;
+  SLEEP -> IDLEQ [xlabel="re-test", constraint=false];
+  IDLEQ -> IDLESIG [xlabel="yes"];
+  IDLESIG -> SHUT   [xlabel="asked to stop", color="#b91c1c", fontcolor="#b91c1c"];
+  IDLESIG -> DURCHK [xlabel="nap simply\nran out"];
+  DURCHK -> SHUT [xlabel="yes", color="#b91c1c", fontcolor="#b91c1c"];
+  DURCHK -> CYC  [xlabel="no", color="#1e40af", fontcolor="#1e40af", penwidth=1.8, constraint=false];
+
+  /* ============================ 5 · SHUTDOWN ============================ */
+  subgraph cluster_shut {
+    label=<<b>5 · Shutdown</b>>; fontsize=14; style="rounded,filled"; fillcolor="#f8fafc"; color="#94a3b8";
+    SHUT [label=<<b>RP releases the last cycle's evidence buffers</b><br align="left"/>and tears down its CoAP context<br align="left"/>>];
+    END  [label="RP exits — EXIT_SUCCESS", shape=doubleoctagon, fillcolor="#bbf7d0", color="#166534"];
+  }
+  QQUIT -> SHUT [xlabel="yes", color="#b91c1c", fontcolor="#b91c1c"];
+  QCYC  -> SHUT [xlabel="yes", color="#b91c1c", fontcolor="#b91c1c"];
+  QDUR  -> SHUT [xlabel="yes", color="#b91c1c", fontcolor="#b91c1c"];
+  SHUT -> END;
+
+  /* ---------- rank-align each peer with the RP state that calls it ---------- */
+  {rank=same; CLI; NOTATION;}
+  {rank=same; GETVQ;  AB1;}
+  {rank=same; ATTIDQ; AB2;}
+  {rank=same; EVQ;    AB3;}
+  {rank=same; QUALQ;  AB4;}
+  {rank=same; STEP2B; AB5;}
+  {rank=same; GETV; TM1;}
+  {rank=same; ATTID; A0;}
+  {rank=same; ATTEST; A1;}
+  {rank=same; RESULT; A2;}
+  {rank=same; QUAL; V1;}
+  {rank=same; TCERT1; V0;}
+  {rank=same; TCERT2; ACONN;}
+  {rank=same; TNONCE; V2;}
+  {rank=same; TAPPR; V3;}
+
+  edge [style=dashed, penwidth=1.4, arrowsize=0.8];
+  GETV   -> TM1 [dir=both, color="#7c3aed"];
+  ATTID  -> A0  [dir=both, color="#0d9488"];
+  ATTEST -> A1  [dir=both, color="#0d9488"];
+  RESULT -> A2  [color="#0d9488"];
+  QUAL   -> V1  [dir=both, color="#ea580c"];
+  TCERT1 -> V0  [dir=both, color="#ea580c", xlabel="subject: RP", fontcolor="#ea580c"];
+  TCERT2 -> V0    [dir=both, color="#ea580c", style=dotted, xlabel="① ③\nsubject: ATTESTER", fontcolor="#ea580c"];
+  TCERT2 -> ACONN [color="#0d9488", style=dotted];
+  TNONCE -> V2  [dir=both, color="#ea580c"];
+  TAPPR  -> V3  [dir=both, color="#ea580c"];
+}

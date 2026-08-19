@@ -21,6 +21,11 @@
 #       --host ADDR        address written into verifiers_config.txt, i.e. the
 #                          address the RP will dial. Default 127.0.0.1.
 #       --config PATH      config file to generate. Default verifiers_config.txt.
+#       --logdir DIR       write each Verifier's output to DIR/verifier_<port>.log
+#                          instead of this script's stdout. Without it every
+#                          Verifier's output interleaves into one stream, which
+#                          is exactly what the per-thread log prefixes exist to
+#                          avoid. DIR is created if missing.
 #   -h, --help             this message.
 #
 # ANY OTHER OPTION is passed through unchanged to every Verifier, so
@@ -42,10 +47,11 @@ COUNT=5
 START_PORT=5684
 HOST=127.0.0.1
 CONFIG=verifiers_config.txt
+LOGDIR=
 VERIFIER_ARGS=()
 FIRST_ARG=1
 
-usage() { sed -n '3,37p' "$0" | sed 's/^#\{1,\} \{0,1\}//;s/^#$//'; exit "${1:-0}"; }
+usage() { sed -n '3,43p' "$0" | sed 's/^#\{1,\} \{0,1\}//;s/^#$//'; exit "${1:-0}"; }
 
 need_value() {
     [ "$2" -ge 2 ] || { echo "$1 needs a value." >&2; exit 1; }
@@ -59,6 +65,7 @@ while [ $# -gt 0 ]; do
                      need_value "$1" $#; START_PORT=$2; shift 2 ;;
         --host)      need_value "$1" $#; HOST=$2; shift 2 ;;
         --config)    need_value "$1" $#; CONFIG=$2; shift 2 ;;
+        --logdir)    need_value "$1" $#; LOGDIR=$2; shift 2 ;;
         --port|--port=*)
             echo "Refusing --port: this script assigns ports from" >&2
             echo "--startingport upward. Use --startingport instead." >&2
@@ -94,6 +101,8 @@ only the first 10 of $COUNT are reachable from it." >&2
 
 # Written via a temporary file so a Trust Manager reading concurrently can
 # never observe a half-written config.
+[ -n "$LOGDIR" ] && mkdir -p "$LOGDIR"
+
 tmp=$(mktemp "${CONFIG}.XXXXXX")
 for ((i = 0; i < COUNT; i++)); do
     echo "$((i + 1)) $HOST $((START_PORT + i))"
@@ -108,11 +117,20 @@ fi
 
 for ((i = 0; i < COUNT; i++)); do
     PORT=$((START_PORT + i))
-    echo "Starting bin/verifier on port $PORT"
-    if [ ${#VERIFIER_ARGS[@]} -gt 0 ]; then
-        bin/verifier --port "$PORT" "${VERIFIER_ARGS[@]}" &
+    if [ -n "$LOGDIR" ]; then
+        echo "Starting bin/verifier on port $PORT -> $LOGDIR/verifier_$PORT.log"
     else
-        bin/verifier --port "$PORT" &
+        echo "Starting bin/verifier on port $PORT"
+    fi
+    if [ ${#VERIFIER_ARGS[@]} -gt 0 ]; then
+        set -- --port "$PORT" "${VERIFIER_ARGS[@]}"
+    else
+        set -- --port "$PORT"
+    fi
+    if [ -n "$LOGDIR" ]; then
+        bin/verifier "$@" > "$LOGDIR/verifier_$PORT.log" 2>&1 &
+    else
+        bin/verifier "$@" &
     fi
 done
 
