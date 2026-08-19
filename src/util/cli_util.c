@@ -42,7 +42,6 @@ static const struct option verifier_options[] = {
         {"peer-public-key", required_argument, 0, '3'},
         {"verify-peer", required_argument, 0, '4'},
         {"port", required_argument, 0, 'b'},
-        {"qualification-validity", required_argument, 0, '5'},
         {"ak-validity", required_argument, 0, '6'}, {0}};
 
 static const struct option attester_options[] = {
@@ -158,11 +157,6 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
                 printf("     --port=PORT:                Connect to PORT "
                        "instead of default port %u.\n",
                         *(variables->common_config.port));
-                printf("     --qualification-validity=SECONDS: How long a\n"
-                       "                                 passed RP qualification stays "
-                       "valid. Must match the RP's own flag. Default %ld.\n",
-                        (long)*(variables->verifier_config
-                                        .qualification_validity_seconds));
                 printf("     --ak-validity=SECONDS:      Lifetime of AK "
                        "certificates this Verifier issues, measured from "
                        "issuance. Default %ld.\n",
@@ -356,16 +350,6 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
                 return -1;
             }
             *(variables->verifier_config.ak_cert_validity_seconds) =
-                    (time_t)value;
-        } else if (caller == VERIFIER && identifier == '5') {
-            // set qualification validity window
-            long value = 0;
-            if (!charra_cli_parse_uint_arg(log_name,
-                        "--qualification-validity", optarg, 1, LONG_MAX,
-                        &value)) {
-                return -1;
-            }
-            *(variables->verifier_config.qualification_validity_seconds) =
                     (time_t)value;
         } else if (caller == VERIFIER && identifier == 'i') {
             *variables->common_config.use_dtls_psk = true;

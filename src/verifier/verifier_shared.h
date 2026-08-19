@@ -39,8 +39,8 @@ extern uint8_t verifier_challenge_nonce[TPM2_SHA256_DIGEST_SIZE];
 extern uint32_t verifier_challenge_nonce_len;
 
 /* --- paths, finalized in verifier.c's main() once --port is known -------
- * All but qualification_state_file_path point into verifier.c's own
- * buffers, not string literals, so they must not be freed or reassigned. */
+ * All point into verifier.c's own buffers, not string literals, so they
+ * must not be freed or reassigned. */
 
 /** Synthetic TPM manufacturer root, for validating EK certificates. */
 extern char* manufacturer_root_cert_path;
@@ -61,11 +61,6 @@ extern time_t ak_cert_validity_seconds;
  * separately-issued certificate. */
 extern char* rp_ak_state_file_path;
 extern char* attester_ak_state_file_path;
-
-/** Who has passed /qualify + /qualify_submit. Unlike the ledgers above, ONE
- * file shared by every Verifier instance: qualifying with one qualifies
- * with all. Safe because this ledger only ever appends. */
-extern char* qualification_state_file_path;
 
 /** Per-round /appraise timings. Per port, since sibling Verifiers share one
  * working directory and would otherwise interleave into one file. */

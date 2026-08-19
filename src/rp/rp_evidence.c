@@ -16,6 +16,7 @@
 
 #include "../common/charra_log.h"
 #include "../common/charra_macro.h"
+#include "../core/TEE.h"
 #include "../core/charra_ak_state.h"
 #include "../core/charra_event_log.h"
 #include "../core/charra_identity_key_mgr.h"
@@ -28,6 +29,31 @@
 #include "rp_shared.h"
 
 #define LOG_NAME "relying party"
+
+/** Source files RP passes to the (simulated) TEE to measure into the
+ * Attestation Document's file_hash: the appraisal gate (this file) plus the
+ * actual redaction/replay/policy logic it gates (charra_sdk.c,
+ * charra_event_log.c). The TEE itself has no opinion on this list -- see
+ * TEE.h -- so it lives here, as RP's own declaration of what code it is
+ * vouching for. The Verifier holds its own, independent copy of this same
+ * list (see verifier_appraise.c) rather than reading it from here or from
+ * the TEE; keep the two in sync by hand if this ever changes. */
+static const char* const rp_appraisal_code_files[] = {
+        "src/rp/rp_evidence.c",
+        "src/core/charra_sdk.c",
+        "src/core/charra_event_log.c",
+};
+#define RP_APPRAISAL_CODE_FILES_COUNT \
+        (sizeof(rp_appraisal_code_files) / sizeof(rp_appraisal_code_files[0]))
+
+/** pcrdigest_a: the TPM-signed PCR digest from the Attester's own quote,
+ * captured during appraisal (check 5 below) so the exact value that gated
+ * appraisal is also the one bound into the TEE's REPORT_DATA in
+ * charra_rp_build_evidence_message() -- not a second, independent read that
+ * could drift from the one actually checked. Private to this file: nothing
+ * outside the appraisal/evidence-building pipeline needs it. */
+static uint8_t rp_pcrdigest_a[TPM2_SHA256_DIGEST_SIZE] = {0};
+static uint32_t rp_pcrdigest_a_len = 0;
 
 bool charra_rp_appraise_evidence(
         const msg_attestation_response_dto* res) {
@@ -134,6 +160,21 @@ bool charra_rp_appraise_evidence(
         goto done;
     }
 
+    /* pcrdigest_a, captured for the TEE's REPORT_DATA -- see the file-level
+     * comment on rp_pcrdigest_a. A failed appraisal here means the whole
+     * cycle aborts before charra_rp_build_evidence_message() ever runs (see
+     * get_attestation_results() in rp_attestation.c), so it is always the
+     * value from a successful appraisal by the time anything reads it. */
+    rp_pcrdigest_a_len = attest_struct.attested.quote.pcrDigest.size;
+    if (rp_pcrdigest_a_len > sizeof(rp_pcrdigest_a)) {
+        charra_log_error("[" LOG_NAME "] pcrdigest_a exceeds its expected "
+                         "size; refusing to appraise.");
+        rp_pcrdigest_a_len = 0;
+        goto done;
+    }
+    memcpy(rp_pcrdigest_a, attest_struct.attested.quote.pcrDigest.buffer,
+            rp_pcrdigest_a_len);
+
     /* --- 3. nonce: the quote must answer the challenge we just sent ------ */
     charra_log_info("[" LOG_NAME "] Verifying nonce ...");
     nonce_ok = charra_verify_tpm2_quote_qualifying_data(
@@ -190,7 +231,7 @@ CHARRA_RC charra_rp_prepare_evidence(void) {
     struct timespec redact_start, redact_end;
     clock_gettime(CLOCK_MONOTONIC, &redact_start);
     CHARRA_RC charra_r = charra_sdk_redact_ima_log(last_response.event_log,
-            last_response.event_log_len, NULL, &rp_log_r, &rp_log_r_len);
+            last_response.event_log_len, &rp_log_r, &rp_log_r_len);
     clock_gettime(CLOCK_MONOTONIC, &redact_end);
     if (charra_r != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Redaction of the event log failed.");
@@ -254,12 +295,11 @@ void charra_rp_release_evidence(void) {
  * @brief Frees the heap-allocated fields of an /attest response DTO.
  *
  * charra_unmarshal_attestation_response() malloc()s three of them
- * (event_log plus both Attester AK certificates, ~6 KB per cycle). Under
- * the original one-shot design nothing had to free them -- the process
- * exited right after -- but in daemon mode every cycle allocates a fresh
- * set, so they must be released or they accumulate for the process's
- * lifetime. Nulls as it frees, so it's safe on a zeroed struct and safe to
- * call twice.
+ * (event_log plus both Attester AK certificates, ~6 KB per cycle). Freed
+ * explicitly rather than left for process exit, so a run that ever
+ * attests more than once in one process -- or is checked under valgrind --
+ * does not accumulate or misreport them as still reachable. Nulls as it
+ * frees, so it's safe on a zeroed struct and safe to call twice.
  */
 void charra_free_attestation_response(
         msg_attestation_response_dto* res) {
@@ -400,6 +440,75 @@ CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
 
     ev.log_r = rp_log_r;
     ev.log_r_len = rp_log_r_len;
+
+    /* --- simulated TEE Attestation Document (see TEE.h) ------------------
+     * REPORT_DATA = hash(verifier_nonce || pcrdigest_a || log_r): binds
+     * this attestation to the exact challenge this Verifier issued, the
+     * exact TPM-signed digest appraisal checked log_a's replay against, and
+     * the exact log_r this message carries -- so it cannot be replayed
+     * against a different nonce, a different Attester evidence, or a
+     * different redacted log. */
+    charra_log_info(
+            "[" LOG_NAME "]  +------------ RP TEE Attestation --------------+");
+    size_t report_data_input_len =
+            (size_t)ev.verifier_nonce_len + rp_pcrdigest_a_len + rp_log_r_len;
+    uint8_t* report_data_input = malloc(report_data_input_len);
+    if (report_data_input == NULL) {
+        charra_log_error(
+                "[" LOG_NAME "] Out of memory building TEE REPORT_DATA.");
+        return CHARRA_RC_ERROR;
+    }
+    memcpy(report_data_input, ev.verifier_nonce, ev.verifier_nonce_len);
+    memcpy(report_data_input + ev.verifier_nonce_len, rp_pcrdigest_a,
+            rp_pcrdigest_a_len);
+    memcpy(report_data_input + ev.verifier_nonce_len + rp_pcrdigest_a_len,
+            rp_log_r, rp_log_r_len);
+
+    uint8_t report_data[TPM2_SHA256_DIGEST_SIZE] = {0};
+    CHARRA_RC tee_rc =
+            hash_sha256(report_data_input_len, report_data_input, report_data);
+    free(report_data_input);
+    if (tee_rc != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not compute TEE REPORT_DATA.");
+        return tee_rc;
+    }
+    charra_print_hex(CHARRA_LOG_DEBUG, sizeof(report_data), report_data,
+            "[" LOG_NAME "]     REPORT_DATA = hash(nonce || pcrdigest_a || "
+            "log_r): 0x",
+            "\n", false);
+
+    tee_attestation_document doc = {0};
+    if ((tee_rc = tee_attestation(rp_appraisal_code_files,
+                 RP_APPRAISAL_CODE_FILES_COUNT, report_data, &doc)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] TEE attestation failed.");
+        return tee_rc;
+    }
+    memcpy(ev.tee_file_hash, doc.file_hash, sizeof(ev.tee_file_hash));
+    memcpy(ev.tee_report_data, doc.report_data, sizeof(ev.tee_report_data));
+    charra_print_hex(CHARRA_LOG_DEBUG, sizeof(doc.file_hash), doc.file_hash,
+            "[" LOG_NAME "]     file_hash (measures rp_appraisal_code_files): "
+            "0x",
+            "\n", false);
+
+    if ((tee_rc = tee_sign(&doc, ev.tee_signature)) != CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Could not sign the TEE Attestation Document.");
+        return tee_rc;
+    }
+    ev.tee_signature_len = CHARRA_RSA_SIGNATURE_LEN;
+
+    if ((tee_rc = tee_public_key_der(ev.tee_public_key,
+                 sizeof(ev.tee_public_key), &ev.tee_public_key_len)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Could not export the TEE's public key.");
+        return tee_rc;
+    }
+    charra_log_info(
+            "[" LOG_NAME "]     => TEE Attestation Document signed and ready "
+            "(TEE public key %u bytes).",
+            ev.tee_public_key_len);
 
     return charra_marshal_rp_evidence(&ev, marshaled_len, marshaled);
 }

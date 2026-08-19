@@ -217,9 +217,8 @@ CHARRA_RC charra_replay_ima_log(const uint8_t* log, uint32_t log_len,
  * template_digest equal SHA256(template_data), both fields as they
  * currently appear in the log?
  *
- * This is NOT a check that redaction was done faithfully -- that question
- * needs the separate qualification handshake (charra_rp_qualification.h).
- * This only catches a log that is internally malformed: corruption in
+ * This is NOT a check that redaction was done faithfully -- it only catches
+ * a log that is internally malformed: corruption in
  * transit, a redaction bug, or a tampered field that no longer matches its
  * neighbor within the same entry.
  */

@@ -186,13 +186,13 @@ before any thread starts** — redaction is randomised, so per-thread redaction
 would hand each Verifier a different `log_r` for the same attestation.
 
 ```
-charra_sdk_redact_ima_log(log_a, …, salt = NULL, → rp_log_r)
+charra_sdk_redact_ima_log(log_a, …, → rp_log_r)
 ```
 
-`salt = NULL` means **a fresh random salt per entry, never transmitted**.
-(The one exception is `/qualify`, §2.) Per entry: locate the path inside the
-`ima-ng` `n-ng` field, replace `template_data` with `SHA256(salt‖path)`,
-recompute `template_digest`. `pcr_index` and `template_name` pass through.
+A fresh random salt is generated per entry and never transmitted. Per entry:
+locate the path inside the `ima-ng` `n-ng` field, replace `template_data`
+with `SHA256(salt‖path)`, recompute `template_digest`. `pcr_index` and
+`template_name` pass through.
 
 Then replay `log_r` → per-PCR accumulators → `hash_sha256_array()` → `PCR_r`.
 
@@ -204,10 +204,7 @@ Then replay `log_r` → per-PCR accumulators → `hash_sha256_array()` → `PCR_
 
 ### Phase ④/⑤ — per-Verifier threads
 
-`get_attestation_results()` → one `pthread` per Verifier. Before spawning:
-`rp_perform_qualification_handshake_once()` (§2) runs **once** for all of
-them; if it fails, the cycle aborts rather than spawning N threads that would
-all be rejected identically.
+`get_attestation_results()` → one `pthread` per Verifier.
 
 Each `get_attestation_results_thread()`:
 
@@ -260,9 +257,9 @@ depends on the CA signature, not on who relayed the bytes.
 | Item | Check | On failure |
 |---|---|---|
 | 1 | `ak_certificate_rp` chains to **this Verifier's** CA, matches `rp_public_key`, serial live in `rp/` ledger | `ekak_rp_why` |
-| 1b | `ek_fingerprint` (derived in 1) is present and unexpired in the **shared** qualification ledger | see §2 |
 | 2 | `rp_signature` over `pcr_r ‖ verifier_nonce` | |
 | 3 | `verifier_nonce == verifier_challenge_nonce` — plain byte compare | |
+| 4 | simulated TEE Attestation Document (see `TEE.h`): `tee_signature` valid under `tee_public_key`, `tee_file_hash` matches this Verifier's own hash of the appraisal/cleaning source, `tee_report_data == hash(verifier_nonce ‖ pcrdigest_a ‖ log_r)` | `tee_why` |
 
 **Step 3b — original evidence (`Evidence_a'`)**
 
@@ -275,7 +272,11 @@ depends on the CA signature, not on who relayed the bytes.
 Step 3b runs **even when 3a failed** — its checks read only received fields,
 so nothing depends on RP's identity having verified. Running it always means
 one appraisal reports every problem instead of leaking them one round trip at
-a time. The verdict is still fail-closed: all nine booleans ANDed.
+a time. The verdict is still fail-closed: all eight booleans ANDed. (Step 3a
+item 4 is computed inside the Step 3b code block, since it needs `Quote_a`'s
+unmarshaled `pcrDigest` — Step 3b's own item 3 already unmarshals it — but it
+is still ANDed into the final verdict regardless of which step number it is
+filed under.)
 
 `log_r` gets **no content inspection at all** — no replay, no hash check, no
 policy. That is Step 2a's job, already done, against the raw log.
@@ -300,147 +301,6 @@ policy. That is Step 2a's job, already done, against the raw log.
 ```c
 if (2 * num_true > num_verifiers) "Attestation successful by majority vote!"
 ```
-
----
-
-# 2. `/qualify` + `/qualify_submit` — proving RP's redaction pipeline works
-
-## 2.1 High level
-
-Separate from per-attestation appraisal. Before a Verifier trusts an RP to
-redact real evidence, it proves — using data it **fabricates itself**, so it
-already knows the right answer — that the RP's SDK actually works.
-
-```
-RP ──FETCH /qualify────────────►  Verifier
-                                  fabricate synthetic log
-                                  redact it locally  → golden_log, golden_pcr
-   ◄──── challenge_log + salt ──  (keeps golden answer in memory)
-
-RP  redacts challenge_log with that salt
-    replays → pcr_digest
-    signs pcr_digest with its AK
-
-   ──FETCH /qualify_submit─────►  chain-verify submitter's AK cert
-                                  verify signature over pcr_digest
-                                  memcmp(submitted, golden)
-   ◄──── qualified + expires_at ─ persist to SHARED ledger, keyed by ek_fingerprint
-```
-
-Three things make this work:
-
-**The salt is transmitted — the one and only place that happens.** Redaction
-normally mints a fresh secret salt per entry, so two honest redactions of the
-same log never match bytewise. That would make a byte-exact comparison
-structurally impossible. So `/qualify` ships the salt alongside the challenge.
-Safe **only** because `challenge_log` is synthetic — fabricated paths, not a
-real device's.
-
-**The grant is shared across all Verifiers.** The ledger file
-(`state/verifier/qualification/rp-qualification-state.txt`, no port suffix) is
-one file every `bin/verifier` opens. So RP runs this handshake **once per
-validity window against whichever Verifier answers first**, and every other
-Verifier sees the result. Safe because
-`charra_qualification_state_renew()` only ever *appends* — unlike
-`charra_ak_state_renew()`, which revokes-on-write and therefore genuinely
-needs per-Verifier files.
-
-**The grant is identity-bound.** Keyed by `ek_fingerprint`, so RP A's passing
-grant cannot let RP B's `/appraise` through.
-
-## 2.2 Low level
-
-### Leg 1 — `/qualify`
-
-`coap_qualify_handler()` → `verifier_qualify.c:52`. Ignores the request body
-entirely; nothing about the challenge is caller-supplied.
-
-```c
-charra_rp_qualification_state_free(&qualification_state);  // drop prior round
-charra_random_bytes(&seed);  charra_random_bytes(salt);
-charra_rp_qualification_generate(NUM_ENTRIES=5, seed, salt, &state,
-                                 &challenge_log, &len);
-```
-
-Inside `charra_rp_qualification_generate()`:
-
-1. `charra_synth_generate_ima_log(5, seed)` → a well-formed `ima-ng` log with
-   fabricated-but-plausible paths. Deterministic in `(entries, seed)`.
-2. `charra_sdk_redact_ima_log(raw, salt)` → **`state.golden_log`**
-3. `charra_replay_ima_log(golden_log, PCR 10)` → **`state.golden_pcr`**
-
-```
-Verifier → RP   msg_qualify_response_dto { challenge_log, salt[16] }
-```
-
-State lives in one `qualification_state` global — a single outstanding
-challenge at a time.
-
-### Leg 2 — RP computes
-
-`rp_perform_qualification_handshake_once()` → `rp_qualification.c:147`
-
-Cache short-circuit first:
-
-```c
-renew_deadline = now + refresh_margin_seconds;
-if (rp_qualified_until <= renew_deadline)
-        rp_qualified_until = rp_qualification_cache_load();
-if (rp_qualified_until > renew_deadline) return SUCCESS;   // skip entirely
-```
-
-`refresh_margin_seconds` is what lets daemon mode renew during the **idle
-window** (margin = `--qualify-renew-margin`) instead of inside an attestation
-(margin = 0).
-
-Then, per candidate Verifier in order — transport failure moves to the next,
-a received *verdict* stops the search (it would be identical everywhere):
-
-1. `ensure_rp_ak_certificate(i)` — `/qualify_submit` needs a cert that Verifier can chain
-2. FETCH `/qualify`
-3. `charra_sdk_redact_ima_log(challenge_log, qualify_challenge_salt)` — the
-   **same** pipeline real evidence uses, with the received salt
-4. `charra_replay_ima_log(..., CHARRA_IMA_PCR_INDEX)` → `submitted_pcr_digest`
-5. `charra_identity_key_mgr_sign()` under `rp_tpm_mutex`
-6. FETCH `/qualify_submit`
-
-The whole loop is held under `rp_qualification_mutex` — every response global
-(`qualify_challenge_log`, `qualify_response_rc`, …) is shared, and the
-retry path can call this from more than one thread.
-
-### Leg 3 — `/qualify_submit`
-
-`coap_qualify_submit_handler()` → `verifier_qualify.c:153`. Three gates, in
-order — the first two are authentication, only the third is the actual test:
-
-| Gate | Check | Failure |
-|---|---|---|
-| 1 | `ak_certificate_rp` chains to this Verifier's CA, matches `rp_public_key`, serial live → yields `ek_fingerprint` | `4.01` |
-| 2 | `rp_signature` verifies over `submitted_pcr_digest` under that certified key | `4.01` |
-| 3 | `charra_rp_qualification_check()` | `2.05` + `qualified=0` |
-
-Without gates 1–2 anyone could submit an arbitrary log with no proof they ever
-ran a real RP's pipeline.
-
-Gate 3 is two `memcmp`s:
-
-```c
-log_matches = len == golden_log_len && memcmp(submitted, golden_log, len) == 0;
-pcr_matches = memcmp(submitted_pcr_digest, golden_pcr, 32) == 0;
-```
-
-On pass: `expires_at = now + validity`, and a record
-`{ek_fingerprint, qualified_at, expires_at}` is appended to the shared ledger
-under `flock()`.
-
-```
-Verifier → RP   msg_qualify_submit_response_dto { qualified, expires_at }
-```
-
-`expires_at` is on the wire deliberately: the Verifier owns the window
-(`--qualification-validity`), so RP reads the real deadline instead of
-assuming a matching constant. RP caches it to
-`state/relying-party/qualification-cache/rp-qualification-until.txt`.
 
 ---
 
@@ -705,25 +565,21 @@ preceding ACTIVATE already supplied the possession proof.
 |---|---|---|
 | `state/verifier/ak-provisioning/rp/…-<port>.txt` | Verifier | AK issuances for RP identities — **per port** |
 | `state/verifier/ak-provisioning/attester/…-<port>.txt` | Verifier | AK issuances for Attester identities — **per port** |
-| `state/verifier/qualification/rp-qualification-state.txt` | Verifier | Qualification grants — **SHARED across ports** |
 | `state/relying-party/identity/` | RP | RP's EK cert + AK keypair blobs |
 | `state/relying-party/ak-certificates/…-<port>.der` | RP | RP's own AK cert, per Verifier |
 | `state/relying-party/attester-ak-certificates/` | RP | Attester certs RP holds (RP-issued + one per Verifier) |
 | `state/relying-party/ak-provisioning/` | RP | RP-as-CA issuance ledger for the Attester |
-| `state/relying-party/qualification-cache/…until.txt` | RP | One epoch timestamp — **single file** |
 | `state/attester/` | Attester | Its EK/AK + both delivered certs |
 
-**Why AK ledgers are per-port but the qualification ledger is not:**
-`charra_ak_state_renew()` *revokes* any existing record for the same
-`ek_fingerprint` before appending. Share that file across Verifiers and the
-second Verifier to certify an RP instantly revokes the first's freshly-issued
-certificate. `charra_qualification_state_renew()` only appends, so sharing is
-safe — and is exactly what makes one `/qualify` suffice for all N Verifiers.
+**Why AK ledgers are per-port:** `charra_ak_state_renew()` *revokes* any
+existing record for the same `ek_fingerprint` before appending. Share that
+file across Verifiers and the second Verifier to certify an RP instantly
+revokes the first's freshly-issued certificate.
 
-Both use `flock()` on a companion `.lock` file, safe across the separate
-`bin/verifier` OS processes. Both scan **backward** on lookup: after N
-renewals for one EK, up to N−1 superseded records exist oldest-first, so a
-forward scan would keep returning the stale one.
+Each ledger uses `flock()` on a companion `.lock` file, safe across the
+separate `bin/verifier` OS processes. Each scans **backward** on lookup:
+after N renewals for one EK, up to N−1 superseded records exist
+oldest-first, so a forward scan would keep returning the stale one.
 
 ## 5.2 Locks
 
@@ -731,7 +587,6 @@ forward scan would keep returning the stale one.
 |---|---|
 | `rp_tpm_mutex` | Every RP TPM session. The simulator accepts **one connection at a time**; an RP that held one open for its whole run once starved a Verifier's `/certify_ak` indefinitely. Every use is open → one operation → close |
 | `rp_ak_reprovision_mutex` | `/certify_ak` response globals — N threads can legitimately be mid-exchange |
-| `rp_qualification_mutex` | `/qualify` response globals |
 | `attester_identity_provision_mutex` | Track A, once per process |
 | `attester_identity_relay_mutex` | Track B relay |
 
@@ -774,8 +629,8 @@ This replaced a scheme where the Verifier answered `4.01`/`4.03`/`4.12` to
 tell the RP which remedy to attempt and the RP re-provisioned and retried on
 each. That made the verdict a *work order* rather than a vote, and put RP's
 retry logic at the mercy of codes another party chose. `4.01` still exists,
-but only on `/certify_ak` and `/qualify_submit`, where it is a genuine
-authentication failure rather than an appraisal outcome.
+but only on `/certify_ak`, where it is a genuine authentication failure
+rather than an appraisal outcome.
 
 Even the exits that reject a request *before* appraising it — malformed CBOR,
 an oversized field, a Verifier-side error opening its own duration log —
@@ -797,10 +652,10 @@ identity checks:
 - **`/attest_result` is advisory.** The Attester logs RP's Step 2a verdict
   and does nothing else with it. Nothing downstream depends on delivery, and
   the Attester does not verify who sent it.
-- **`/nonce` and `/qualify` are unauthenticated too.** Both hand out
-  freshly generated challenges to any caller. Neither commits the Verifier to
-  anything — the identity checks happen at `/appraise` and
-  `/qualify_submit`, where the RP has to prove possession of a certified key.
+- **`/nonce` is unauthenticated too.** It hands out a freshly generated
+  challenge to any caller. It commits the Verifier to nothing — the identity
+  checks happen at `/appraise`, where the RP has to prove possession of a
+  certified key.
 - **The Trust Manager authenticates nobody**, and carries no endorsement
   content — it is plain ID → endpoint resolution.
 - **The Attester's EK certificate is validated exactly once**, by the RP at
@@ -852,21 +707,16 @@ No response body is consumed. The Attester logs and returns.
 
 | Dir | DTO | Fields in order |
 |---|---|---|
-| → | `msg_rp_evidence_dto` | 1 `pcr_r` (32 B) · 2 `verifier_nonce` · 3 `rp_signature` · 4 `rp_public_key` · 5 `ak_certificate_rp`→ · 6 `attester_nonce` · 7 `attestation_data` · 8 `tpm2_signature` · 9 `tpm2_public_key` · 10 `ak_certificate_attester_by_verifier`→ · 11 `ak_certificate_attester_by_rp`→ · 12 `log_r`→ |
+| → | `msg_rp_evidence_dto` | 1 `pcr_r` (32 B) · 2 `verifier_nonce` · 3 `rp_signature` · 4 `rp_public_key` · 5 `ak_certificate_rp`→ · 6 `attester_nonce` · 7 `attestation_data` · 8 `tpm2_signature` · 9 `tpm2_public_key` · 10 `ak_certificate_attester_by_verifier`→ · 11 `ak_certificate_attester_by_rp`→ · 12 `log_r`→ · 13 `tee_file_hash` (32 B) · 14 `tee_report_data` (32 B) · 15 `tee_signature` · 16 `tee_public_key` |
 | ← | **Plain text** | `"Attestation successful!"` or `"Attestation failed!    "`, always `2.05` |
 
 Fields 1–4 are `Quote_r`; 5 is Step 3a item 1's input; 6 is unused (see §1.2);
 7–9 are `Quote_a` forwarded verbatim; 10 is Step 3b item 1's input; 11 is
-forwarded but not checked by the Verifier; 12 is never inspected.
-
-### `/qualify` + `/qualify_submit` — RP ↔ Verifier
-
-| Dir | DTO | Fields in order |
-|---|---|---|
-| → | *(none)* | Request body ignored entirely |
-| ← | `msg_qualify_response_dto` | `challenge_log`→, `salt` (16 B) |
-| → | `msg_qualify_submit_request_dto` | `submitted_redacted_log`→, `submitted_pcr_digest` (32 B), `rp_signature`, `rp_public_key`, `ak_certificate_rp`→ |
-| ← | `msg_qualify_submit_response_dto` | `qualified` (u32), `expires_at` (u64 epoch) |
+forwarded but not checked by the Verifier; 12 is never inspected here (it is
+Step 2a's job, already done, against the raw log) but IS covered by 13–16;
+13–16 are the simulated TEE Attestation Document (see `TEE.h`) — Step 3a item
+4's input, checked against field 12 (`log_r`) and against `attest_struct`'s
+`pcrDigest` inside field 7 (`attestation_data`).
 
 ### `/certify_ak` — requester ↔ Verifier
 

@@ -43,8 +43,8 @@ void charra_rp_release_evidence(void);
 /**
  * @brief Frees the heap fields of an /attest response DTO.
  *
- * Needed because the daemon loop runs this once per cycle; under the
- * original one-shot design nothing had to free them.
+ * Safe on a zeroed struct and safe to call twice, so it is also called once
+ * at shutdown for clean, valgrind-legible exit even after a single cycle.
  */
 void charra_free_attestation_response(msg_attestation_response_dto* res);
 

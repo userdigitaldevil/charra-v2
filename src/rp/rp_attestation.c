@@ -26,7 +26,6 @@
 #include "rp_coap.h"
 #include "rp_evidence.h"
 #include "rp_identity.h"
-#include "rp_qualification.h"
 #include "rp_shared.h"
 
 #define LOG_NAME "relying party"
@@ -140,12 +139,12 @@ static coap_response_t coap_attester_handler(
     charra_log_info(
             "[" LOG_NAME "] Evidence appraised locally; privacy-cleaning "
             "before forwarding to the Verifiers.");
-    /* Store last response, releasing the previous cycle's buffers first --
-     * a plain struct assignment would otherwise orphan them once this
-     * handler runs more than once (daemon mode). Safe here: get_evidence()
-     * completes fully before get_attestation_results() spawns the Verifier
-     * threads that read last_response, so nothing still points into the
-     * old buffers by the time this runs again. */
+    /* Store last response, releasing any previous buffers first -- a plain
+     * struct assignment would otherwise orphan them if this handler ever
+     * runs more than once in a process. Safe here: get_evidence() completes
+     * fully before get_attestation_results() spawns the Verifier threads
+     * that read last_response, so nothing still points into the old
+     * buffers by the time this runs again. */
     charra_free_attestation_response(&last_response);
     last_response = res;
 
@@ -420,12 +419,10 @@ void* get_attestation_results_thread(void* arg) {
     attestation_results[verifier_index] = false;
     verifier_latency_ms[verifier_index] = -1;
 
-    /* Qualification is handled once, up front, by get_attestation_results()
-     * before any thread starts -- the ledger is shared, so one Verifier's
-     * answer is every Verifier's. These two are still per-Verifier: this
-     * Verifier's certificate for RP's AK, and its certificate for the
-     * Attester's. Both are best-effort -- send the evidence either way and
-     * let the Verifier judge Step 3a/3b and record its own decision. */
+    /* Per-Verifier: this Verifier's certificate for RP's AK, and its
+     * certificate for the Attester's. Both are best-effort -- send the
+     * evidence either way and let the Verifier judge Step 3a/3b and record
+     * its own decision. */
     if (ensure_rp_ak_certificate(verifier_index) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not provision RP's AK "
                          "certificate; forwarding evidence anyway.");
@@ -522,23 +519,6 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
         return CHARRA_RC_ERROR;
     }
 
-    /* Qualify once, before any verifier thread starts -- the qualification
-     * ledger is shared across all Verifiers (see qualification_state_file_
-     * path in verifier/verifier_shared.h), so one Verifier's answer is every Verifier's
-     * answer. No Verifier will accept /appraise without it, so abort here
-     * rather than spawning threads that would all fail identically. */
-    rp_num_verifiers_this_cycle = num_verifiers;
-    /* Margin 0: this is the attestation path -- it needs a valid
-     * qualification, but has no reason to renew one that is still good.
-     * Daemon mode does early renewal from its idle window instead. */
-    if (rp_perform_qualification_handshake_once(num_verifiers, 0) !=
-            CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not qualify with any "
-                         "reachable Verifier; aborting attestation run.");
-        charra_rp_release_evidence();
-        return CHARRA_RC_ERROR;
-    }
-
     CHARRA_RC result = CHARRA_RC_ERROR;
 
     charra_log_info("[" LOG_NAME "] Forwarding (redacted) evidence to the verifiers.");
@@ -561,35 +541,29 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
         pthread_join(threads[i], NULL);
     }
 
-    /* Identity readiness, as of right now -- not "did we redo either this
-     * cycle": rp_ak_cert_ready[] is per-Verifier, rp_qualified_until is now
-     * a single shared value (qualifying is Verifier-agnostic); both are
-     * independently cached on disk and only get touched when their cache
-     * was missing or expired, so most cycles this just reports cache state
-     * untouched this round. */
+    /* Identity readiness, as of right now -- not "did we redo this cycle":
+     * rp_ak_cert_ready[] is per-Verifier, independently cached on disk and
+     * only touched when the cache was missing or expired, so most cycles
+     * this just reports cache state untouched this round. */
     int num_not_ready = 0;
-    time_t readiness_now = time(NULL);
-    bool qualified = rp_qualified_until > readiness_now;
     for (int i = 0; i < num_verifiers; ++i) {
         bool ak_ready = rp_ak_cert_ready[i];
-        if (ak_ready && qualified) {
+        if (ak_ready) {
             charra_log_info(
                     "[" LOG_NAME "] Verifier %d (port %u): ready (AK "
-                    "certified, qualified).",
+                    "certified).",
                     i + 1, verifiers[i].port_number);
         } else {
             num_not_ready++;
             charra_log_info(
-                    "[" LOG_NAME "] Verifier %d (port %u): NOT fully ready "
-                    "(AK certified: %s, qualified: %s).",
-                    i + 1, verifiers[i].port_number,
-                    ak_ready ? "yes" : "no", qualified ? "yes" : "no");
+                    "[" LOG_NAME "] Verifier %d (port %u): NOT ready (AK "
+                    "certificate not provisioned).",
+                    i + 1, verifiers[i].port_number);
         }
     }
     if (num_not_ready > 0) {
-        charra_log_info("[" LOG_NAME "] %d/%d Verifier(s) not yet fully "
-                        "ready (missing AK certificate and/or "
-                        "qualification).",
+        charra_log_info("[" LOG_NAME "] %d/%d Verifier(s) not yet ready "
+                        "(missing AK certificate).",
                 num_not_ready, num_verifiers);
     }
 

@@ -299,13 +299,12 @@ cleanup:
         }
     } else {
         /* DELIVER_RP/DELIVER_VERIFIER (and every error path): a bare
-         * ack -- same "code-only response" convention /qualify/submit
-         * uses when there's no payload worth sending back. */
+         * ack -- a code-only response, since there is no payload worth
+         * sending back. */
         coap_add_data_large_response(resource, session, request, response,
                 query, COAP_MEDIATYPE_TEXT_PLAIN, -1, 0, 0, NULL, NULL, NULL);
     }
     /* req.ak_certificate is heap-allocated by charra_unmarshal_certify_ak_
-     * of_attester_request() -- this handler's own to free, same convention
-     * as verifier.c's coap_qualify_submit_handler(). */
+     * of_attester_request() -- this handler's own to free. */
     charra_free_if_not_null(req.ak_certificate);
 }

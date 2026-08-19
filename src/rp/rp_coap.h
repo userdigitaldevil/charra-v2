@@ -3,9 +3,9 @@
  * @brief The Relying Party's one-shot CoAP client exchange.
  *
  * Every RP-as-client request -- /get_verifiers, /attest, /attest_result,
- * /nonce, /appraise, /certify_ak, /qualify, /qualify_submit,
- * /certify_ak_of_attester -- is the same create-context, create-session,
- * build-PDU, send, wait, tear-down sequence, so it lives here once.
+ * /nonce, /appraise, /certify_ak, /certify_ak_of_attester -- is the same
+ * create-context, create-session, build-PDU, send, wait, tear-down
+ * sequence, so it lives here once.
  */
 
 #ifndef CHARRA_RP_COAP_H

@@ -1,5 +1,4 @@
 #include <coap3/coap.h>
-#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,7 +8,6 @@
 #include "common/charra_log.h"
 #include "common/charra_macro.h"
 #include "core/charra_dto.h"
-#include "core/charra_sdk.h"
 #include "util/coap_util.h"
 #include "util/crypto_util.h"
 #include "util/io_util.h"
@@ -18,38 +16,26 @@
 #include "rp/rp_identity.h"
 #include "rp/rp_config.h"
 #include "rp/rp_evidence.h"
-#include "rp/rp_qualification.h"
 #include "rp/rp_shared.h"
-#include "rp/rp_stats.h"
 
-bool rp_benchmark_mode = false;
-unsigned int rp_attestation_interval_s =
-        RP_DEFAULT_ATTESTATION_INTERVAL_S;
-unsigned int rp_qualify_renew_margin_s = RP_DEFAULT_QUALIFY_RENEW_MARGIN_S;
 time_t rp_ak_renew_margin_s = RP_DEFAULT_AK_RENEW_MARGIN_S;
 int rp_num_verifiers = RP_DEFAULT_NUM_VERIFIERS;
-/* Optional daemon stop conditions; 0 = unbounded (run until signalled).
- * Both exit through exactly the same path as a signal, so shutdown stays
- * one code path rather than three. */
-unsigned int rp_duration_s = 0;
-unsigned long rp_max_cycles = 0;
 
-/* logging and coap config (CHARRA_UNUSED comes from rp_shared.h) */
+/* logging and coap config */
 #define LOG_NAME "relying party"
 coap_log_t coap_log_level = LOG_INFO;
 charra_log_t charra_log_level = CHARRA_LOG_INFO;
-bool quit = false;
 
-/* trust manager config */ 
+/* trust manager config */
 char trust_manager_host[16] = "127.0.0.1"; 
 unsigned int trust_manager_port = 6000;
 uint16_t trust_manager_response_timeout = 30;  
 bool processing_trust_manager_response = false;
 
-/* Sized to MAX_VERIFIERS, not to the benchmark sweep's smaller
- * RP_MAX_SWEEP_VERIFIERS bound, so raising that bound can't silently
- * overflow this array. Every per-Verifier array below is sized the same
- * way for the same reason. */
+/* Sized to MAX_VERIFIERS -- the hard cap --verifiers is validated against
+ * -- not to rp_num_verifiers, so a smaller run never risks overflowing this
+ * array. Every per-Verifier array below is sized the same way for the same
+ * reason. */
 int verifier_list[MAX_VERIFIERS];
 bool attestation_results[MAX_VERIFIERS];
 /* Summary-report only: was_cached (cert reused vs. freshly /certify_ak'd)
@@ -62,8 +48,7 @@ verifier_info verifiers[MAX_VERIFIERS];
 uint16_t verifier_response_timeout = RP_DEFAULT_VERIFIER_TIMEOUT_S;
 bool processing_appraisal_response[MAX_VERIFIERS] = {false};
 
-/* attester config (the wait between attestations is --interval, see
- * rp_attestation_interval_s above) */
+/* attester config */
 bool processing_attestation_response = false;
 CHARRA_RC attestation_rc = CHARRA_RC_ERROR;
 const bool USE_TPM_FOR_RANDOM_NONCE_GENERATION = false;
@@ -117,17 +102,13 @@ const char* rp_ek_cert_not_after_utc = "20340101000000";
  *   identity/            the one TPM-resident EK/AK keypair (Verifier-agnostic)
  *   ak-certificates/     per-Verifier AK certificates for that keypair, named
  *                        rp-ak-certificate-<port>.der by
- *                        ensure_rp_ak_certificate()
- *   qualification-cache/ whether RP is still qualified -- a single file,
- *                        since qualifying is Verifier-agnostic */
+ *                        ensure_rp_ak_certificate() */
 char* rp_ek_cert_cache_path =
         "state/relying-party/identity/rp-ek-certificate.der";
 char* rp_ak_public_path =
         "state/relying-party/identity/rp-ak-public.bin";
 char* rp_ak_private_path =
         "state/relying-party/identity/rp-ak-private.bin";
-char* rp_qualification_cache_path =
-        "state/relying-party/qualification-cache/rp-qualification-until.txt";
 
 /* True once the TPM-resident EK+AK keypair exists and rp_public_key_der is
  * populated -- set once by ensure_rp_ak_keypair(), never per-Verifier. */
@@ -206,8 +187,7 @@ bool processing_ak_identity_response = false;
 msg_ak_identity_response_dto attester_identity_cached = {0};
 
 /* No payload to parse on the DELIVER_RP/DELIVER_VERIFIER leg -- this
- * handler only needs to know the round trip completed, same "ack-only"
- * shape /qualify/submit's response has. */
+ * handler only needs to know the round trip completed. */
 bool processing_certify_ak_of_attester_deliver_response = false;
 
 /* ACTIVATE leg: the secret the Attester recovered, relayed onward as that
@@ -236,38 +216,6 @@ uint32_t attester_ak_cert_by_verifier_der_len[MAX_VERIFIERS] = {0};
 pthread_mutex_t attester_identity_relay_mutex =
         PTHREAD_MUTEX_INITIALIZER;
 
-/* --- RP qualification handshake state (/qualify + /qualify/submit) ------
- * See charra_rp_qualification.h. The Verifier-side qualification ledger is
- * shared across all Verifier instances (see qualification_state_file_path
- * in verifier.c), so RP runs this handshake only once per validity window,
- * against whichever Verifier is reachable first -- unlike the per-Verifier
- * AK provisioning above. */
-uint8_t* qualify_challenge_log = NULL;
-uint32_t qualify_challenge_log_len = 0;
-/* Salt to redact qualify_challenge_log with, sent alongside it -- see
- * msg_qualify_response_dto's docstring in charra_dto.h for why sharing a
- * salt is safe here (and only here). */
-uint8_t qualify_challenge_salt[CHARRA_SDK_PATH_SALT_LEN] = {0};
-CHARRA_RC qualify_response_rc = CHARRA_RC_ERROR;
-bool processing_qualify_response = false;
-bool qualify_submit_qualified = false;
-/* Deadline the Verifier reported granting, straight off the wire --
- * authoritative, unlike the old "assume the same constant" approach. */
-time_t qualify_submit_expires_at = 0;
-bool processing_qualify_submit_response = false;
-/* RP's own client-side qualification cache: "qualified until when",
- * persisted to rp-qualification-until.txt so a fresh RP process doesn't
- * redo /qualify + /qualify/submit if a previous run's qualification is
- * still valid. Single value, not per-Verifier, since qualifying is now a
- * one-time, Verifier-agnostic fact. 0 means "unknown/not currently
- * valid". */
-time_t rp_qualified_until = 0;
-/* How many verifiers[] entries rp_perform_qualification_handshake_once()
- * may try, set once by get_attestation_results() before spawning threads --
- * threads themselves only know their own index (see get_attestation_
- * results_thread()'s arg), so the retry-on-rejection path reads this
- * instead of a parameter. */
-int rp_num_verifiers_this_cycle = 0;
 /* Guards every TPM connection RP opens (provisioning and, later, each
  * Quote_r signing operation): the TPM simulator this dev environment uses
  * accepts only one client connection at a time, and every other binary
@@ -286,13 +234,6 @@ pthread_mutex_t rp_tpm_mutex = PTHREAD_MUTEX_INITIALIZER;
  * It no longer guards the thundering herd it was written for -- threads
  * each own their rp_ak_cert_der[i] slot now, so that race is gone. */
 pthread_mutex_t rp_ak_reprovision_mutex = PTHREAD_MUTEX_INITIALIZER;
-/* Guards /qualify + /qualify/submit's shared response globals (above).
- * The handshake runs at most once per cycle, but the retry-on-rejection
- * path can still reach it from several threads at once: the first through
- * re-qualifies, the rest see the now-valid cache and short-circuit.
- * Separate from rp_ak_reprovision_mutex -- disjoint globals, so AK
- * certification and qualification may proceed concurrently. */
-pthread_mutex_t rp_qualification_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* Nonces received from each Verifier, indexed by verifier slot. */
 uint8_t verifier_nonces[MAX_VERIFIERS][sizeof(TPMU_HA)] = {{0}};
 uint32_t verifier_nonce_lens[MAX_VERIFIERS] = {0};
@@ -324,81 +265,20 @@ msg_attestation_request_dto last_request = {0};
 msg_attestation_response_dto last_response = {0};
 msg_certify_ak_response_dto certify_ak_response = {0};
 
-/** @brief SIGINT/SIGTERM handler: requests graceful termination. */
-static void handle_sigint(int signum CHARRA_UNUSED) { quit = true; }
-
-/**
- * @brief Renew any credential already inside its renewal margin.
- *
- * Every call is a cheap no-op unless something is actually due: each
- * ensure_* checks an in-memory expiry first and returns without I/O.
- */
-static void rp_renew_due_credentials(int num_verifiers) {
-    if (rp_qualify_renew_margin_s > 0) {
-        rp_perform_qualification_handshake_once(
-                num_verifiers, (time_t)rp_qualify_renew_margin_s);
-    }
-    for (int i = 0; i < num_verifiers; ++i) {
-        ensure_rp_ak_certificate(i);
-        ensure_attester_identity_certified_by_verifier(i);
-    }
-}
-
-/**
- * @brief When the next credential falls due for renewal, or 0 if none is
- * known yet. Used to size the idle nap so RP wakes exactly when something
- * needs doing instead of at the next loop iteration.
- */
-static time_t rp_next_renewal_due(int num_verifiers) {
-    time_t earliest = 0;
-    if (rp_qualify_renew_margin_s > 0 && rp_qualified_until > 0) {
-        earliest = rp_qualified_until - (time_t)rp_qualify_renew_margin_s;
-    }
-    const time_t m = rp_ak_renew_margin_s;
-    for (int i = 0; i < num_verifiers; ++i) {
-        const time_t due[] = {rp_ak_cert_expires_at[i] - m,
-                attester_ak_cert_by_verifier_expires_at[i] - m};
-        const time_t have[] = {
-                rp_ak_cert_expires_at[i], attester_ak_cert_by_verifier_expires_at[i]};
-        for (size_t k = 0; k < 2; ++k) {
-            if (have[k] > 0 && (earliest == 0 || due[k] < earliest)) {
-                earliest = due[k];
-            }
-        }
-    }
-    if (attester_ak_cert_rp_expires_at > 0) {
-        time_t d = attester_ak_cert_rp_expires_at - m;
-        if (earliest == 0 || d < earliest) {
-            earliest = d;
-        }
-    }
-    return earliest;
-}
-
 /* --- attestation cycle -------------------------------------------------- */
-
-/** Per-cycle phase timings, filled by run_one_attestation_cycle() for the
- * benchmark sweep. Daemon mode passes NULL -- it logs each phase's duration
- * but has no stats file to accumulate them into. */
-typedef struct {
-    double verifiers;
-    double evidence;
-    double appraisal;
-} rp_cycle_timing;
 
 /**
  * @brief One complete attestation cycle: resolve Verifiers, ensure the
  * Attester's identity, fetch and locally appraise its evidence, then
  * privacy-clean and submit to every Verifier.
  *
- * Shared by both modes so they can never drift apart -- the daemon runs
- * exactly the sequence the benchmark measures. Everything expensive inside
- * (RP AK keypair/certificates, Attester identity, qualification) is cached
- * by its own ensure_* or cache check, so repeat cycles skip straight to
+ * Everything expensive inside (RP AK keypair/certificates, Attester
+ * identity) is cached by its own ensure_* or cache check, so a rebuilt
+ * binary run again against still-valid credentials skips straight to
  * /attest -> /nonce -> /appraise.
  */
 static CHARRA_RC run_one_attestation_cycle(
-        int num_verifiers, const char* label, rp_cycle_timing* timing) {
+        int num_verifiers, const char* label) {
     CHARRA_RC result = CHARRA_RC_SUCCESS;
     struct timespec start_time, end_time;
     double duration = 0.0;
@@ -429,9 +309,6 @@ static CHARRA_RC run_one_attestation_cycle(
     clock_gettime(CLOCK_MONOTONIC, &end_time);
     duration = (end_time.tv_sec - start_time.tv_sec) +
                (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
-    if (timing != NULL) {
-        timing->verifiers = duration;
-    }
     charra_log_info("[" LOG_NAME "] Phase timing: get_verifiers took %.3fs.",
             duration);
 
@@ -463,9 +340,6 @@ static CHARRA_RC run_one_attestation_cycle(
     clock_gettime(CLOCK_MONOTONIC, &end_time);
     duration = (end_time.tv_sec - start_time.tv_sec) +
                (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
-    if (timing != NULL) {
-        timing->evidence = duration;
-    }
     charra_log_info("[" LOG_NAME "] Phase timing: get_evidence (Attester "
                     "round trip + local appraisal) took %.3fs.",
             duration);
@@ -481,9 +355,6 @@ static CHARRA_RC run_one_attestation_cycle(
     clock_gettime(CLOCK_MONOTONIC, &end_time);
     duration = (end_time.tv_sec - start_time.tv_sec) +
                (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
-    if (timing != NULL) {
-        timing->appraisal = duration;
-    }
     charra_log_info("[" LOG_NAME "] Phase timing: get_attestation_results "
                     "(all Verifiers) took %.3fs.",
             duration);
@@ -494,17 +365,6 @@ static CHARRA_RC run_one_attestation_cycle(
 /* --- main --------------------------------------------------------------- */
 
 int main(int argc, char** argv) {
-    /* Process exit status, not a CHARRA_RC: the two enums overlap only by
-     * accident (CHARRA_RC_SUCCESS and EXIT_SUCCESS are both 0) and mixing
-     * them made benchmark mode return a CHARRA_RC as its exit code. */
-    int result = EXIT_SUCCESS;
-
-    signal(SIGINT, handle_sigint);
-    /* Same handler for SIGTERM: `timeout`, `docker stop` and systemd all
-     * send SIGTERM, and without this they hard-kill the process past the
-     * clean shutdown below. */
-    signal(SIGTERM, handle_sigint);
-
     /* Environment first, so an explicit --log-level/-v on the command line
      * overrides it rather than the other way round. */
     charra_log_level_from_str(
@@ -516,18 +376,17 @@ int main(int argc, char** argv) {
     }
     charra_log_set_level(charra_log_level);
 
-    /* Before any setup output, so the top of a log file always states which
-     * mode this run is in and every value it will use. */
+    /* Before any setup output, so the top of a log file always states every
+     * value this run will use. */
     rp_log_effective_configuration();
 
-    /* RP's own runtime state (TPM identity, per-Verifier AK certificates,
-     * shared qualification cache) lives under state/relying-party/. All of
-     * it is shared mutable state keyed by nothing but the path, so exactly
-     * one RP may own it at a time. */
+    /* RP's own runtime state (TPM identity, per-Verifier AK certificates)
+     * lives under state/relying-party/. All of it is shared mutable state
+     * keyed by nothing but the path, so exactly one RP may own it at a
+     * time. */
     static const char* const state_dirs[] = {
             "state/relying-party/identity",
             "state/relying-party/ak-certificates",
-            "state/relying-party/qualification-cache",
             "state/relying-party/attester-ak-certificates",
             "state/relying-party/ak-provisioning", NULL};
     if (charra_io_claim_state_dir(state_dirs,
@@ -536,212 +395,14 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    if (rp_benchmark_mode) {
-        FILE* timing_file = fopen("timings_RP_multi_verifiers.txt", "w");
-        if (timing_file == NULL) {
-            perror("fopen");
-            return EXIT_FAILURE;
-        }
+    CHARRA_RC result = run_one_attestation_cycle(rp_num_verifiers, "run");
 
-        double verifier_durations[NUM_RUNS];
-        double evidence_durations[NUM_RUNS];
-        double appraisal_durations[NUM_RUNS];
-        double total_attestation_durations[NUM_RUNS];
-
-        for (int num_verifiers = 1; num_verifiers <= RP_MAX_SWEEP_VERIFIERS;
-                num_verifiers++) {
-            /* One discarded warm-up cycle per step, for a reason specific to
-             * this sweep: verifiers 1..k-1 are already certified by the time
-             * step k runs, but verifier k has never been seen, so its thread
-             * performs a full two-leg /certify_ak (plus the Attester AK relay
-             * and the qualification handshake) INSIDE the window
-             * timing->appraisal measures. Without this, every step's sample
-             * is "k-1 steady-state appraisals + one onboarding", and the
-             * step-to-step delta reads as per-verifier scaling when much of
-             * it is a one-off cost.
-             *
-             * The warm-up is not thrown away -- onboarding is the expensive
-             * TPM path and worth a number of its own, so it is reported
-             * separately below rather than blended into the steady state. */
-            rp_cycle_timing onboarding = {0};
-            {
-                char label[32] = {0};
-                snprintf(label, sizeof(label), "warm-up (onboarding)");
-                if (run_one_attestation_cycle(num_verifiers, label,
-                            &onboarding) != CHARRA_RC_SUCCESS) {
-                    result = EXIT_FAILURE;
-                    break;
-                }
-            }
-
-            for (int run = 0; run < NUM_RUNS; run++) {
-                char label[32] = {0};
-                snprintf(label, sizeof(label), "run %d/%d", run + 1, NUM_RUNS);
-
-                rp_cycle_timing timing = {0};
-                if (run_one_attestation_cycle(num_verifiers, label, &timing) !=
-                        CHARRA_RC_SUCCESS) {
-                    result = EXIT_FAILURE;
-                    break;
-                }
-                verifier_durations[run] = timing.verifiers;
-                evidence_durations[run] = timing.evidence;
-                appraisal_durations[run] = timing.appraisal;
-                total_attestation_durations[run] =
-                        timing.verifiers + timing.evidence + timing.appraisal;
-            }
-
-            if (result == EXIT_FAILURE) {
-                break;
-            }
-
-            double avg_verifier_duration, stddev_verifier_duration;
-            double avg_evidence_duration, stddev_evidence_duration;
-            double avg_appraisal_duration, stddev_appraisal_duration;
-            double avg_total_attestation_duration,
-                    stddev_total_attestation_duration;
-
-            calculate_stats(verifier_durations, NUM_RUNS,
-                    &avg_verifier_duration, &stddev_verifier_duration);
-            calculate_stats(evidence_durations, NUM_RUNS,
-                    &avg_evidence_duration, &stddev_evidence_duration);
-            calculate_stats(appraisal_durations, NUM_RUNS,
-                    &avg_appraisal_duration, &stddev_appraisal_duration);
-            calculate_stats(total_attestation_durations, NUM_RUNS,
-                    &avg_total_attestation_duration,
-                    &stddev_total_attestation_duration);
-
-            fprintf(timing_file, "Verifiers: %d\n", num_verifiers);
-            /* Steady state below; onboarding first so a reader sees which
-             * number is which before the averages. */
-            fprintf(timing_file,
-                    "Onboarding Getting verifiers: %f seconds\n",
-                    onboarding.verifiers);
-            fprintf(timing_file, "Onboarding Getting evidence: %f seconds\n",
-                    onboarding.evidence);
-            fprintf(timing_file,
-                    "Onboarding Appraising evidence: %f seconds\n",
-                    onboarding.appraisal);
-            fprintf(timing_file,
-                    "Onboarding Total Attestation Duration: %f seconds\n",
-                    onboarding.verifiers + onboarding.evidence +
-                            onboarding.appraisal);
-            fprintf(timing_file,
-                    "Average Getting verifiers: %f seconds (stddev: %f)\n",
-                    avg_verifier_duration, stddev_verifier_duration);
-            fprintf(timing_file,
-                    "Average Getting evidence: %f seconds (stddev: %f)\n",
-                    avg_evidence_duration, stddev_evidence_duration);
-            fprintf(timing_file,
-                    "Average Appraising evidence: %f seconds (stddev: %f)\n",
-                    avg_appraisal_duration, stddev_appraisal_duration);
-            fprintf(timing_file,
-                    "Average Total Attestation Duration: %f seconds (stddev: "
-                    "%f)\n",
-                    avg_total_attestation_duration,
-                    stddev_total_attestation_duration);
-        }
-
-        fclose(timing_file);
-        coap_cleanup();
-        return result;
-    }
-
-    /* --- daemon mode (default) ----------------------------------------- */
-    charra_log_info("[" LOG_NAME "] Entering attestation loop; Ctrl+C (SIGINT) "
-                    "to stop.");
-
-    time_t daemon_deadline =
-            (rp_duration_s > 0) ? time(NULL) + (time_t)rp_duration_s : 0;
-    const char* stop_reason = "signal";
-    unsigned long cycle = 0;
-    while (!quit) {
-        char label[32] = {0};
-        snprintf(label, sizeof(label), "cycle %lu", ++cycle);
-
-        /* A failed cycle is not fatal to the daemon: a Verifier or the
-         * Attester being briefly unreachable should cost one cycle, not the
-         * whole process. The failure is already logged in detail by
-         * whichever phase hit it. */
-        if (run_one_attestation_cycle(rp_num_verifiers, label, NULL) !=
-                CHARRA_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME "] Attestation cycle %lu failed; "
-                             "retrying after the usual interval.",
-                    cycle);
-        }
-        if (quit) {
-            break;
-        }
-
-        if (rp_max_cycles > 0 && cycle >= rp_max_cycles) {
-            stop_reason = "--cycles reached";
-            break;
-        }
-
-        /* Clamp the nap to whatever is left of --duration, so the deadline
-         * is honoured to within a second instead of being overshot by up to
-         * a full interval. */
-        unsigned int nap = rp_attestation_interval_s;
-        if (daemon_deadline > 0) {
-            time_t remaining = daemon_deadline - time(NULL);
-            if (remaining <= 0) {
-                stop_reason = "--duration elapsed";
-                break;
-            }
-            if ((time_t)nap > remaining) {
-                nap = (unsigned int)remaining;
-            }
-        }
-
-        charra_log_info("[" LOG_NAME "] Cycle %lu done; sleeping %us until the "
-                        "next attestation.",
-                cycle, nap);
-
-        /* Idle window. Renewals are driven by their own deadlines here, not
-         * by the loop's cadence: RP is doing nothing during this sleep, so
-         * anything that falls due mid-nap is renewed the moment it does
-         * rather than waiting for the next iteration to look. That is what
-         * decouples the renewal margins from --interval. Without it, a
-         * margin shorter than the interval lets the loop step straight over
-         * the renewal window, and the work lands inside the next attestation
-         * instead (get_attestation_results()'s margin-0 path), which is
-         * exactly what the margins exist to avoid. */
-        time_t idle_until = time(NULL) + nap;
-        while (!quit) {
-            time_t now = time(NULL);
-            if (now >= idle_until) {
-                break;
-            }
-            rp_renew_due_credentials(rp_num_verifiers);
-            if (quit) {
-                break;
-            }
-
-            time_t wake = idle_until;
-            time_t due = rp_next_renewal_due(rp_num_verifiers);
-            if (due > now && due < wake) {
-                wake = due;
-            }
-            now = time(NULL);
-            if (wake > now) {
-                rp_interruptible_sleep((unsigned int)(wake - now));
-            }
-        }
-
-        if (daemon_deadline > 0 && time(NULL) >= daemon_deadline) {
-            stop_reason = "--duration elapsed";
-            break;
-        }
-    }
-
-    charra_log_info("[" LOG_NAME "] Shutting down (%s) after %lu cycle(s).",
-            quit ? "signal" : stop_reason, cycle);
-
-    /* Release the last cycle's evidence buffers so a clean shutdown really
-     * is clean -- makes "still reachable" bytes at exit meaningful under
+    /* Release this cycle's evidence buffers so a clean shutdown really is
+     * clean -- makes "still reachable" bytes at exit meaningful under
      * valgrind rather than noise. */
     charra_free_attestation_response(&last_response);
     charra_rp_release_evidence();
     coap_cleanup();
-    return EXIT_SUCCESS;
+
+    return (result == CHARRA_RC_SUCCESS) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

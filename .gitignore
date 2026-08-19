@@ -21,19 +21,12 @@ obj/*
 #   state/verifier/ak-provisioning/attester/ -- same, for Attester identities
 #     relayed via RP (see attester_ak_state_file_path in verifier.c) -- kept
 #     separate from the RP ledger above, never the same identity kind
-#   state/verifier/qualification/         -- RP-qualification ledger, one
-#     file SHARED by every Verifier instance (see qualification_state_
-#     file_path in verifier.c) -- qualifying with one Verifier qualifies
-#     with all of them
 #   state/relying-party/identity/         -- RP's own TPM-resident EK
 #     certificate + AK keypair, verifier-agnostic (see rp_ek_cert_cache_path/
 #     rp_ak_public_path/rp_ak_private_path in relying_party.c)
 #   state/relying-party/ak-certificates/  -- per-Verifier AK certificates RP
 #     has been issued, one file per Verifier port (see rp_ak_cert_der in
 #     relying_party.c)
-#   state/relying-party/qualification-cache/ -- RP's own belief about
-#     whether it's still qualified, a single shared file (see
-#     rp_qualified_until in relying_party.c)
 #   state/relying-party/attester-ak-certificates/ -- cached AK certificate
 #     bytes for the Attester's identity: one from RP's own CA, one per
 #     Verifier from that Verifier's CA (see attester_ak_cert_rp_cache_path/

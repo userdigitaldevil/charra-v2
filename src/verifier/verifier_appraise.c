@@ -20,7 +20,6 @@
 #include "../core/charra_helper.h"
 #include "../core/charra_key_mgr.h"
 #include "../core/charra_marshaling.h"
-#include "../core/charra_qualification_state.h"
 #include "../util/charra_util.h"
 #include "../util/coap_util.h"
 #include "../util/crypto_util.h"
@@ -30,6 +29,67 @@
 #include "verifier_util.h"
 
 #define LOG_NAME "verifier"
+
+/** Source files this Verifier expects the RP's appraisal-and-redaction to
+ * run -- its own reference measurement, known independently rather than
+ * asked of the RP or of any TEE code: exactly as a real relying party holds
+ * its own copy of an expected enclave measurement, not one fetched from the
+ * device it is checking. Must name the same files RP's rp_evidence.c passes
+ * to its TEE (see rp_appraisal_code_files there); keep the two in sync by
+ * hand if either ever changes -- there is deliberately no shared symbol
+ * between them, since the Verifier does not call into RP's TEE code at
+ * all. */
+static const char* const expected_appraisal_code_files[] = {
+        "src/rp/rp_evidence.c",
+        "src/core/charra_sdk.c",
+        "src/core/charra_event_log.c",
+};
+
+/**
+ * @brief Independently hashes expected_appraisal_code_files together, in
+ * list order -- the same construction TEE.c's tee_hash_files() uses, but
+ * run here, by the Verifier itself against its own copy of the source, and
+ * never by calling into RP's TEE code.
+ */
+static CHARRA_RC verifier_hash_expected_appraisal_code(
+        uint8_t hash_out[TPM2_SHA256_DIGEST_SIZE]) {
+    uint8_t* combined = NULL;
+    size_t combined_len = 0;
+    CHARRA_RC result = CHARRA_RC_SUCCESS;
+
+    for (size_t i = 0; i < sizeof(expected_appraisal_code_files) /
+                                sizeof(expected_appraisal_code_files[0]);
+            i++) {
+        char* content = NULL;
+        size_t content_len = 0;
+        if (charra_io_read_file(expected_appraisal_code_files[i], &content,
+                    &content_len) != CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] Could not read expected appraisal file "
+                    "'%s'.",
+                    expected_appraisal_code_files[i]);
+            result = CHARRA_RC_ERROR;
+            break;
+        }
+
+        uint8_t* grown = realloc(combined, combined_len + content_len);
+        if (grown == NULL) {
+            charra_io_free_file_buffer(&content);
+            result = CHARRA_RC_ERROR;
+            break;
+        }
+        combined = grown;
+        memcpy(combined + combined_len, content, content_len);
+        combined_len += content_len;
+        charra_io_free_file_buffer(&content);
+    }
+
+    if (result == CHARRA_RC_SUCCESS) {
+        result = hash_sha256(combined_len, combined, hash_out);
+    }
+    free(combined);
+    return result;
+}
 
 void coap_appraise_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
@@ -153,6 +213,23 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         charra_log_error("[" LOG_NAME "] RP public key has an unusable "
                          "length.");
         early_fail_reason = "malformed request: RP public key length unusable";
+        goto cleanup;
+    }
+    /* TEE Attestation Document's fields (see TEE.h) -- same style as
+     * Quote_r's above. */
+    if (res.tee_signature_len != CHARRA_RSA_SIGNATURE_LEN) {
+        charra_log_error(
+                "[" LOG_NAME "] TEE signature is not exactly the expected "
+                "RSA-2048 signature size.");
+        early_fail_reason = "malformed request: TEE signature is not the "
+                            "expected RSA-2048 size";
+        goto cleanup;
+    }
+    if (res.tee_public_key_len == 0 ||
+            res.tee_public_key_len > sizeof(res.tee_public_key)) {
+        charra_log_error("[" LOG_NAME "] TEE public key has an unusable "
+                         "length.");
+        early_fail_reason = "malformed request: TEE public key length unusable";
         goto cleanup;
     }
 
@@ -296,71 +373,6 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         }
     }
 
-    /* Step 3a item 1b: RP qualification -- has THIS specific RP (identified
-     * by ek_fingerprint_rp, the same identity charra_ak_state.h tracks)
-     * passed /qualify + /qualify/submit recently enough? Looked up in the
-     * ledger shared with every sibling Verifier -- see
-     * qualification_state_file_path. */
-    bool attestation_result_qualified = false;
-    /* Distinguishes "never qualified" from "qualified once, since expired".
-     * Both are a NO and both need the same remedy, but saying which saves
-     * the reader from guessing. */
-    bool qualification_record_found = false;
-    time_t qualification_expires_at = 0;
-    /* Whether we resolved WHICH RP this is, which is all the qualification
-     * lookup needs -- a revoked certificate still identifies its owner, so
-     * this runs even when Step 3a item 1 failed on validity. Only a
-     * certificate we could not tie to any identity blocks it. */
-    bool rp_identity_known = false;
-    for (size_t i = 0; i < sizeof(ek_fingerprint_rp); ++i) {
-        if (ek_fingerprint_rp[i] != 0) {
-            rp_identity_known = true;
-            break;
-        }
-    }
-    if (rp_identity_known) {
-        charra_qualification_state_record* qual_records = NULL;
-        uint32_t qual_count = 0;
-        if (charra_qualification_state_load(qualification_state_file_path,
-                    &qual_records, &qual_count) == CHARRA_RC_SUCCESS) {
-            uint32_t qual_index = 0;
-            if (charra_qualification_state_find_by_ek_fingerprint(
-                        qual_records, qual_count, ek_fingerprint_rp,
-                        &qual_index)) {
-                qualification_record_found = true;
-                qualification_expires_at = qual_records[qual_index].expires_at;
-                attestation_result_qualified =
-                        charra_qualification_state_is_valid(
-                                &qual_records[qual_index], time(NULL));
-            }
-            free(qual_records);
-        } else {
-            charra_log_error(
-                    "[" LOG_NAME "] Could not load qualification state.");
-        }
-        char ek_fingerprint_rp_hex[17] = {0};
-        charra_hex_encode_prefix(ek_fingerprint_rp, sizeof(ek_fingerprint_rp),
-                ek_fingerprint_rp_hex, sizeof(ek_fingerprint_rp_hex));
-        if (attestation_result_qualified) {
-            charra_log_info(
-                    "[" LOG_NAME "]     => RP %s... is currently qualified "
-                    "(expires at %ld, in %ld second(s)).",
-                    ek_fingerprint_rp_hex, (long)qualification_expires_at,
-                    (long)(qualification_expires_at - time(NULL)));
-        } else if (qualification_record_found) {
-            charra_log_error(
-                    "[" LOG_NAME "]     => RP %s...'s qualification has "
-                    "EXPIRED (was valid until %ld)!",
-                    ek_fingerprint_rp_hex, (long)qualification_expires_at);
-        } else {
-            charra_log_error(
-                    "[" LOG_NAME "]     => RP %s... is NOT currently "
-                    "qualified (no passing /qualify/submit on record for "
-                    "this identity)!",
-                    ek_fingerprint_rp_hex);
-        }
-    }
-
     /* Step 3a item 2: verify Quote_r signature -- RSA-PSS/SHA-256 over
      * (PCR_r || verifier_nonce) under RP's AK public key (DER-encoded), NOT
      * a TPM quote verification: PCR_r is a software replay of log_r, so
@@ -475,7 +487,6 @@ void coap_appraise_handler(struct coap_resource_t* resource,
             verify_nonce_duration);
 
     bool step_3a_passed = attestation_result_ekak_rp &&
-                          attestation_result_qualified &&
                           attestation_result_signature_rp &&
                           attestation_result_nonce_rp;
 
@@ -485,6 +496,10 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     bool attestation_result_signature = false;
     bool attestation_result_signature_mbedtls = false;
     bool attestation_result_nonce = false;
+    bool attestation_result_tee = false;
+    /* Why the TEE Attestation Document check failed, for the reason list at
+     * the verdict. */
+    const char* tee_why = "not verified";
 
     /* Step 3b runs whatever Step 3a decided. Its three checks read only
      * fields of the received evidence (the Attester's certificate, Quote_a,
@@ -672,6 +687,132 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                     expected_attester_nonce_len, expected_nonce_hex,
                     attest_struct.extraData.size, received_nonce_hex);
         }
+
+        /* Step 3a item 4: simulated TEE Attestation Document (see TEE.h).
+         *
+         * Proves the RP's appraisal-and-redaction actually ran the code
+         * this Verifier itself expects, against exactly this evidence: the
+         * signed file_hash must match this Verifier's own hash of the
+         * appraisal/cleaning source, and the signed report_data must match
+         * hash(verifier_nonce || pcrdigest_a || log_r) recomputed here --
+         * not a log_r built from a different log_a, forwarded alongside a
+         * different Quote_r, or answering a different nonce. Placed here,
+         * after Quote_a's own nonce check above, because it needs
+         * attest_struct's pcrdigest_a, which that check already
+         * unmarshaled. */
+        charra_log_info(
+                "[" LOG_NAME "] Verifying TEE Attestation Document ...");
+        mbedtls_pk_context tee_pub_key_ctx;
+        mbedtls_pk_init(&tee_pub_key_ctx);
+        bool tee_signature_ok = false;
+        if (mbedtls_pk_parse_public_key(&tee_pub_key_ctx, res.tee_public_key,
+                    res.tee_public_key_len) != 0) {
+            tee_why = "MALFORMED -- could not parse the TEE's public key";
+            charra_log_error(
+                    "[" LOG_NAME "]     => could not parse the TEE's public "
+                    "key!");
+        } else if (mbedtls_pk_get_type(&tee_pub_key_ctx) != MBEDTLS_PK_RSA) {
+            tee_why = "MALFORMED -- the TEE's public key is not RSA";
+            charra_log_error(
+                    "[" LOG_NAME "]     => the TEE's public key is not "
+                    "RSA!");
+        } else if (mbedtls_rsa_set_padding(mbedtls_pk_rsa(tee_pub_key_ctx),
+                           MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA256) != 0) {
+            tee_why =
+                    "Verifier-side error: could not select RSA-PSS padding";
+            charra_log_error(
+                    "[" LOG_NAME "]     => could not select RSA-PSS "
+                    "padding!");
+        } else {
+            uint8_t tee_signed_data[sizeof(res.tee_file_hash) +
+                    sizeof(res.tee_report_data)] = {0};
+            memcpy(tee_signed_data, res.tee_file_hash,
+                    sizeof(res.tee_file_hash));
+            memcpy(tee_signed_data + sizeof(res.tee_file_hash),
+                    res.tee_report_data, sizeof(res.tee_report_data));
+            tee_signature_ok =
+                    charra_crypto_rsa_verify_signature(
+                            mbedtls_pk_rsa(tee_pub_key_ctx), MBEDTLS_MD_SHA256,
+                            tee_signed_data, sizeof(tee_signed_data),
+                            res.tee_signature) == CHARRA_RC_SUCCESS;
+            if (!tee_signature_ok) {
+                tee_why = "MISMATCH -- not a valid signature by the "
+                          "claimed TEE key over (file_hash || report_data)";
+                charra_log_error("[" LOG_NAME "]     => TEE Attestation "
+                                 "Document signature is NOT valid!");
+            }
+        }
+        mbedtls_pk_free(&tee_pub_key_ctx);
+
+        bool tee_file_hash_ok = false;
+        if (tee_signature_ok) {
+            uint8_t expected_file_hash[TPM2_SHA256_DIGEST_SIZE] = {0};
+            tee_file_hash_ok =
+                    verifier_hash_expected_appraisal_code(
+                            expected_file_hash) == CHARRA_RC_SUCCESS &&
+                    memcmp(expected_file_hash, res.tee_file_hash,
+                            sizeof(expected_file_hash)) == 0;
+            if (!tee_file_hash_ok) {
+                tee_why = "WRONG CODE -- the attested file_hash does not "
+                          "match this Verifier's own copy of the "
+                          "appraisal/cleaning code";
+                charra_log_error(
+                        "[" LOG_NAME "]     => file_hash does NOT match "
+                        "this Verifier's own hash of the appraisal/"
+                        "cleaning code!");
+            }
+        }
+
+        bool tee_report_data_ok = false;
+        if (tee_file_hash_ok) {
+            size_t expected_input_len = (size_t)res.verifier_nonce_len +
+                    attest_struct.attested.quote.pcrDigest.size +
+                    res.log_r_len;
+            uint8_t* expected_input = malloc(expected_input_len);
+            if (expected_input == NULL) {
+                tee_why = "Verifier-side error: out of memory recomputing "
+                          "REPORT_DATA";
+                charra_log_error(
+                        "[" LOG_NAME "]     => out of memory recomputing "
+                        "REPORT_DATA!");
+            } else {
+                size_t off = 0;
+                memcpy(expected_input + off, res.verifier_nonce,
+                        res.verifier_nonce_len);
+                off += res.verifier_nonce_len;
+                memcpy(expected_input + off,
+                        attest_struct.attested.quote.pcrDigest.buffer,
+                        attest_struct.attested.quote.pcrDigest.size);
+                off += attest_struct.attested.quote.pcrDigest.size;
+                memcpy(expected_input + off, res.log_r, res.log_r_len);
+
+                uint8_t expected_report_data[TPM2_SHA256_DIGEST_SIZE] = {0};
+                tee_report_data_ok =
+                        hash_sha256(expected_input_len, expected_input,
+                                expected_report_data) == CHARRA_RC_SUCCESS &&
+                        memcmp(expected_report_data, res.tee_report_data,
+                                sizeof(expected_report_data)) == 0;
+                free(expected_input);
+                if (!tee_report_data_ok) {
+                    tee_why = "WRONG BINDING -- the attested report_data "
+                              "does not match hash(verifier_nonce || "
+                              "pcrdigest_a || log_r) for this evidence";
+                    charra_log_error(
+                            "[" LOG_NAME "]     => report_data does NOT "
+                            "match hash(verifier_nonce || pcrdigest_a || "
+                            "log_r)!");
+                }
+            }
+        }
+
+        attestation_result_tee =
+                tee_signature_ok && tee_file_hash_ok && tee_report_data_ok;
+        if (attestation_result_tee) {
+            charra_log_info(
+                    "[" LOG_NAME "]     => TEE Attestation Document is "
+                    "valid: correct code, correctly bound to this "
+                    "evidence!");
+        }
     }
 
     /* --- output result --- */
@@ -679,7 +820,8 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     bool attestation_result = step_3a_passed && attestation_result_ekak &&
                               attestation_result_signature &&
                               attestation_result_signature_mbedtls &&
-                              attestation_result_nonce;
+                              attestation_result_nonce &&
+                              attestation_result_tee;
 
     char ek_fingerprint_rp_hex_result[17] = {0};
     charra_hex_encode_prefix(ek_fingerprint_rp, sizeof(ek_fingerprint_rp),
@@ -700,18 +842,6 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     } while (0)
         if (!attestation_result_ekak_rp) {
             LOG_REASON("RP AK certificate (Step 3a item 1): %s", ekak_rp_why);
-        }
-        if (!attestation_result_qualified) {
-            /* The lookup is keyed by ek_fingerprint_rp; without an identity
-             * it never ran and must not be reported as a real failure. */
-            LOG_REASON("RP qualification (Step 3a item 1b): %s",
-                    !rp_identity_known
-                            ? "NOT EVALUATED -- RP's certificate could not be "
-                              "tied to any known identity"
-                            : qualification_record_found
-                                    ? "EXPIRED -- RP must redo /qualify"
-                                    : "MISSING -- RP has never qualified "
-                                      "with this Verifier");
         }
         if (!attestation_result_signature_rp) {
             LOG_REASON("Quote_r signature (Step 3a item 2): MISMATCH -- not a "
@@ -734,6 +864,10 @@ void coap_appraise_handler(struct coap_resource_t* resource,
             LOG_REASON("Attester nonce (Step 3b item 3): WRONG -- Quote_a is "
                        "not bound to the expected nonce");
         }
+        if (!attestation_result_tee) {
+            LOG_REASON("TEE Attestation Document (Step 3a item 4): %s",
+                    tee_why);
+        }
 #undef LOG_REASON
     }
 
@@ -755,10 +889,6 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         message = "Attestation failed!    ";
         if (!attestation_result_ekak_rp) {
             charra_log_info("[" LOG_NAME "] | RP AK CERTIFICATE REJECTED |");
-        } else if (!attestation_result_qualified) {
-            charra_log_info(qualification_record_found
-                            ? "[" LOG_NAME "] |  RP QUALIFICATION EXPIRED  |"
-                            : "[" LOG_NAME "] |     RP NOT QUALIFIED       |");
         } else if (!attestation_result_ekak) {
             charra_log_info("[" LOG_NAME "] | ATTESTER AK CERT REJECTED  |");
         } else {

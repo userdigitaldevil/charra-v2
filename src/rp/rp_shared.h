@@ -39,16 +39,15 @@
  * it is this close to expiring, rather than waiting for it to lapse and be
  * rejected mid-cycle. Applies to all three AK certificates -- RP's own (per
  * Verifier), and the Attester's as issued by RP's CA and by each Verifier's
- * CA -- since RP makes all three renewal decisions. Seconds, matching
- * --qualify-renew-margin and the --ak-validity flags it has to be compared
- * against. 45s by default, against a 5-minute default certificate
- * lifetime.
+ * CA -- since RP makes all three renewal decisions. Seconds, matching the
+ * --ak-validity flags it has to be compared against. 45s by default,
+ * against a 5-minute default certificate lifetime.
  *
- * Note it cannot be validated at parse time the way --qualify-renew-margin is
- * against --interval: the certificate lifetime is chosen by whoever issues
- * it (--ak-validity on the Verifier, --attester-ak-validity on RP), so RP
- * only learns it when it parses an issued certificate. A margin larger than
- * the whole lifetime is satisfiable only by renewing on every cycle. */
+ * It cannot be validated at parse time: the certificate lifetime is chosen
+ * by whoever issues it (--ak-validity on the Verifier, --attester-ak-validity
+ * on RP), so RP only learns it when it parses an issued certificate. A
+ * margin larger than the whole lifetime is satisfiable only by renewing on
+ * every cycle. */
 #define RP_DEFAULT_AK_RENEW_MARGIN_S 45
 
 /** Default wait for a Verifier's reply, and for the Attester's. Both feed
@@ -65,49 +64,17 @@ extern time_t rp_ak_renew_margin_s;
 
 /** @brief Does a certificate expiring at expires_at need renewing now?
  * expires_at == 0 means "unknown", which counts as needing renewal. Kept in
- * memory and re-checked on EVERY call, exactly like rp_qualified_until: a
- * boolean "ready" flag consulted once at startup lets a daemon run past its
- * own certificate's expiry without ever noticing. */
+ * memory and re-checked on EVERY call rather than a boolean "ready" flag
+ * consulted once, which would let a certificate's expiry pass unnoticed. */
 static inline bool charra_cert_needs_renewal(time_t expires_at) {
     return expires_at <= time(NULL) + rp_ak_renew_margin_s;
 }
 
-/* --- daemon-mode config (see parse_rp_command_line()) -------------------
- * RP's default mode is a long-running loop: attest, renew qualification if
- * it is close to expiring, sleep, repeat -- until SIGINT. `--benchmark`
- * selects the original bounded 1..5-Verifier timing sweep instead, which is
- * what produces timings_RP_multi_verifiers.txt for plot_multi_verifiers.py.
- *
- * The renewal margins are deadline-driven, not tied to --interval: the
- * daemon's idle window wakes exactly when a credential falls due, so a
- * margin shorter than the interval is fine. The one bound that still
- * matters is margin < validity -- a margin at or above the whole validity
- * window is never satisfiable, so the credential would be renewed
- * continuously and its cache would stop meaning anything. */
-#define RP_DEFAULT_ATTESTATION_INTERVAL_S 15
-#define RP_DEFAULT_QUALIFY_RENEW_MARGIN_S 30
 #define RP_DEFAULT_NUM_VERIFIERS 1
-#define RP_MAX_SWEEP_VERIFIERS 5
 
-/* Benchmark mode: how many measured cycles each verifier count contributes,
- * after a discarded warm-up cycle -- see the sweep in relying_party.c's
- * main() for why a single sample per step measured the wrong thing. Lives
- * here rather than in relying_party.c so the startup configuration log can
- * report it. */
-#define NUM_RUNS 5
-
-/* --- daemon/benchmark configuration (set by parse_rp_command_line) ------ */
-extern bool rp_benchmark_mode;
-extern unsigned int rp_attestation_interval_s;
-extern unsigned int rp_qualify_renew_margin_s;
+/* --- config (set by parse_rp_command_line) ------------------------------ */
 extern int rp_num_verifiers;
-extern unsigned int rp_duration_s;
-extern unsigned long rp_max_cycles;
 extern time_t attester_ak_cert_validity_seconds;
-
-/* Set by the SIGINT/SIGTERM handler; polled by the daemon loop and by
- * rp_interruptible_sleep(). */
-extern bool quit;
 
 extern charra_log_t charra_log_level;
 
@@ -132,28 +99,14 @@ extern uint32_t rp_ak_cert_der_len[MAX_VERIFIERS];
 extern uint8_t rp_public_key_der[CHARRA_RSA_PUB_KEY_DER_MAX];
 extern uint32_t rp_public_key_der_len;
 
-/* --- qualification handshake state ------------------------------------- */
-extern uint8_t* qualify_challenge_log;
-extern uint32_t qualify_challenge_log_len;
-extern uint8_t qualify_challenge_salt[CHARRA_SDK_PATH_SALT_LEN];
-extern CHARRA_RC qualify_response_rc;
-extern bool processing_qualify_response;
-extern bool qualify_submit_qualified;
-extern time_t qualify_submit_expires_at;
-extern bool processing_qualify_submit_response;
-extern time_t rp_qualified_until;
-extern char* rp_qualification_cache_path;
-
 /* --- locks -------------------------------------------------------------
  * Ordering matters and is easy to lose sight of once the callers live in
- * different files: take rp_ak_reprovision_mutex (or
- * rp_qualification_mutex) *before* rp_tpm_mutex, and never hold one across
- * the other's critical section. rp_tpm_mutex is additionally kept
- * short-lived on purpose -- the dev TPM simulator serves one client at a
- * time, and an RP that held it across a CoAP wait once starved the
- * Verifier's own TPM work outright. */
+ * different files: take rp_ak_reprovision_mutex *before* rp_tpm_mutex, and
+ * never hold one across the other's critical section. rp_tpm_mutex is
+ * additionally kept short-lived on purpose -- the dev TPM simulator serves
+ * one client at a time, and an RP that held it across a CoAP wait once
+ * starved the Verifier's own TPM work outright. */
 extern pthread_mutex_t rp_tpm_mutex;
-extern pthread_mutex_t rp_qualification_mutex;
 
 
 /* --- evidence pipeline state (Steps 2a/2b) ----------------------------- */
@@ -260,7 +213,6 @@ extern bool processing_appraisal_response[MAX_VERIFIERS];
 extern bool processing_attestation_response;
 extern bool processing_nonce_response[MAX_VERIFIERS];
 extern bool processing_trust_manager_response;
-extern int rp_num_verifiers_this_cycle;
 extern char trust_manager_host[16];
 extern unsigned int trust_manager_port;
 extern uint16_t trust_manager_response_timeout;

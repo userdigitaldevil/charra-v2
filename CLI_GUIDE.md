@@ -20,6 +20,9 @@ is purely operational.
 passive responders — they never call anyone. Starting `bin/attester` alone
 does nothing until an RP talks to it.
 
+`bin/relying_party` runs **exactly one attestation cycle and exits** — it is
+not a long-running process. Restart it whenever you want another cycle.
+
 Start order: `trust_manager` → `attester` → `verifier`(s) → `relying_party`.
 
 ---
@@ -29,7 +32,7 @@ Start order: `trust_manager` → `attester` → `verifier`(s) → `relying_party
 ```bash
 make -j            # all binaries into bin/
 make clean && make -j
-make test          # 11 unit-test suites
+make test          # unit-test suites
 ```
 
 Everything runs from the **repository root** — paths to `keys/`, `state/`,
@@ -54,7 +57,7 @@ production.
 ## 3. Quickest way to run everything
 
 ```bash
-./run_live_test.sh        # Docker: fresh TPM, clean build, full stack, benchmark sweep
+./run_live_test.sh        # Docker: fresh TPM, clean build, full stack, one cycle
 ```
 
 Or by hand (each in its own shell, from the repo root):
@@ -62,19 +65,20 @@ Or by hand (each in its own shell, from the repo root):
 ```bash
 bin/trust_manager &
 bin/attester &
-./start_verifiers.sh                       # 5 verifiers on ports 5684-5688
-bin/relying_party --verifiers 5            # daemon; Ctrl+C to stop
+./start_verifiers.sh                       # 1 verifier on port 5684
+bin/relying_party                          # one attestation cycle, then exits
 ```
 
 For the same thing spelled out line by line, with every flag explained, see
-**§4.1** (daemon mode) and **§4.2** (benchmark mode).
+**§4.1**.
 
 ---
 
 ## 4. `bin/relying_party`
 
-Runs a **continuous attestation daemon by default**: attest → sleep, renewing
-any credential that falls due during the idle window → repeat, until stopped.
+Runs **one attestation cycle** -- resolve Verifiers, fetch and locally
+appraise the Attester's evidence, privacy-clean it, then forward to every
+Verifier and tally the majority vote -- and exits.
 
 ```bash
 bin/relying_party [OPTIONS]
@@ -85,67 +89,34 @@ bin/relying_party [OPTIONS]
 | `--help` | | Print help |
 | `-v`, `--verbose` | | CHARRA log-level → DEBUG |
 | `-l`, `--log-level=LEVEL` | INFO | `TRACE\|DEBUG\|INFO\|WARN\|ERROR\|FATAL`. Overrides `$LOG_LEVEL_CHARRA` |
-| `-n`, `--verifiers=COUNT` | 5 | Verifiers per attestation cycle (1..10), taken from `verifiers_config.txt` |
-| `-I`, `--interval=SECONDS` | 15 | Sleep **between** attestation cycles |
-| `-Q`, `--qualify-renew-margin=SECONDS` | 30 | Renew qualification when it expires within this, during idle time |
+| `-n`, `--verifiers=COUNT` | 1 | Verifiers to attest against (1..10), taken from `verifiers_config.txt` |
 | `-R`, `--ak-renew-margin=SECONDS` | 45 | Renew an **AK certificate** once it is within this long of expiring. Covers all three: RP's own (per Verifier), and the Attester's from RP's CA and from each Verifier's CA |
-| `-D`, `--duration=SECONDS` | 0 | Stop cleanly after ~N seconds. 0 = run until signalled |
-| `-C`, `--cycles=COUNT` | 0 | Stop cleanly after N attestation cycles. 0 = unbounded |
 | `-A`, `--attester-ak-validity=SECONDS` | 300 (5 min) | Lifetime of the Attester AK cert **RP** issues under its own CA |
-| `-B`, `--benchmark` | off | Run the bounded 1→5-Verifier timing sweep and exit instead |
-| `--verifier-timeout=SECONDS` | 6 | Wait for a Verifier's reply before giving up. Also bounds **every other** RP round trip — Trust Manager, `/certify_ak`, `/qualify`. A Verifier that times out counts against the majority exactly like a NO vote |
-| `--attester-timeout=SECONDS` | 6 | Wait for the Attester's evidence before giving up, which ends the cycle |
+| `--verifier-timeout=SECONDS` | 6 | Wait for a Verifier's reply before giving up. Also bounds **every other** RP round trip — Trust Manager, `/certify_ak`. A Verifier that times out counts against the majority exactly like a NO vote |
+| `--attester-timeout=SECONDS` | 6 | Wait for the Attester's evidence before giving up, which ends the run |
 
-Every run opens by naming its **mode** (`MODE: DAEMON` or `MODE: BENCHMARK`)
-and listing all of the above, tagging each value it took from the table rather
-than the command line with `(default)`. So a log file records what the run was
-actually configured with, without needing the command that started it. A flag
-that does not apply to the chosen mode — `--interval` under `--benchmark`, say
-— is called out as having no effect rather than being ignored silently.
+Every run opens by listing all of the above, tagging each value it took from
+the table rather than the command line with `(default)`. So a log file
+records what the run was actually configured with, without needing the
+command that started it.
 
-### Stopping it
+### `--ak-renew-margin`
 
-```bash
-Ctrl+C                                  # SIGINT
-kill -TERM <pid>                        # SIGTERM — also clean
-bin/relying_party --duration 300        # self-stops after ~5 min
-bin/relying_party --cycles 10           # self-stops after 10 attestation cycles
-```
-
-All four reach the same clean shutdown path; the final log line says which
-one ended it. Ctrl+C responds within ~1s (the sleep is interruptible).
-
-### `--interval` vs attestation-cycle duration
-
-`--interval` is a **sleep between attestation cycles, not a period**. Real
-spacing is *attestation-cycle duration + interval*. One attestation cycle
-costs roughly:
-
-```
-~0.4s  (Attester round trip + local appraisal)
-+ ~0.9s x --verifiers    (threads serialise on the TPM to sign each Quote_r)
-```
-
-≈ 1.3s for one Verifier, ≈ 5s for five. Keep `--interval` comfortably above
-that. The first attestation cycle is much slower (it pays `/certify_ak`,
-`ActivateCredential` and `/qualify`); later ones reuse caches.
-
-### Benchmark mode
-
-```bash
-bin/relying_party --benchmark      # writes timings_RP_multi_verifiers.txt, then exits
-python3 plot_multi_verifiers.py    # chart from that file
-```
-
-Ignores `--interval`, `--duration`, `--cycles` and `--verifiers` — the sweep
-is a fixed 1→5 Verifiers. See §4.2 for a full worked run.
+Checked once, synchronously, while this cycle is provisioning each
+certificate — not on a timer. If a cached AK certificate is already within
+the margin of expiring, this run re-provisions it via `/certify_ak` before
+using it, instead of using a certificate that would be rejected moments
+later. Must stay comfortably below whatever validity the issuer set
+(`--ak-validity` on the Verifier, `--attester-ak-validity` here), or every
+run re-provisions every certificate regardless of how recently it was
+issued.
 
 ---
 
-## 4.1 Worked example — daemon mode, from nothing to a running daemon
+## 4.1 Worked example — from nothing to one attestation cycle
 
 Every line below, in order, from a clean checkout. Run each in the repo root.
-Lines 1–2 are one-time setup; 3–6 are the stack.
+Lines 1–2 are one-time setup; 3–6 run one cycle.
 
 ```bash
 # 1. Build everything into bin/.
@@ -164,19 +135,16 @@ bin/trust_manager &
 #    /attest and /certify_ak_of_attester. Never calls anyone.
 bin/attester &
 
-# 5. Five passive appraisers on ports 5684-5688, each its own Privacy CA
-#    with its own CA key, ledger and nonce. Equivalent to running
-#    bin/verifier --port 5684 & ... --port 5688 & by hand.
+# 5. One passive appraiser on port 5684, its own Privacy CA with its own
+#    CA key, ledger and nonce. Pass a count to start more, e.g.
+#    ./start_verifiers.sh 3.
 ./start_verifiers.sh
 
-# 6. The only active party. Starts the attestation daemon.
+# 6. The only active party. Runs one attestation cycle and exits.
 bin/relying_party \
-    --verifiers 3 \
-    --interval 20 \
-    --qualify-renew-margin 40 \
+    --verifiers 1 \
     --ak-renew-margin 60 \
     --attester-ak-validity 600 \
-    --duration 300 \
     --log-level INFO
 ```
 
@@ -184,92 +152,26 @@ What each RP flag on line 6 does:
 
 | Flag | Effect here |
 |---|---|
-| `--verifiers 3` | Ask the Trust Manager for IDs 1,2,3 → ports 5684-5686. The other two Verifiers stay idle. Must be ≤ the number actually running, or RP waits on a dead port |
-| `--interval 20` | Sleep 20s **after** each attestation cycle finishes. At ~3s per attestation cycle with 3 Verifiers, cycles start roughly every 23s |
-| `--qualify-renew-margin 40` | During the idle sleep, re-run `/qualify` once the qualification grant is within 40s of expiring. Must be < the Verifier's `--qualification-validity` (default 180) |
-| `--ak-renew-margin 60` | Same idea for AK certificates — RP's own per Verifier, plus both of the Attester's. Must be < the shortest certificate lifetime in play (defaults: 300) |
+| `--verifiers 1` | Ask the Trust Manager for ID 1 → port 5684. Must be ≤ the number actually running, or RP waits on a dead port |
+| `--ak-renew-margin 60` | Re-provision an AK certificate (RP's own, plus both of the Attester's) if the cached one is within 60s of expiring. Must be < the shortest certificate lifetime in play (default: 300) |
 | `--attester-ak-validity 600` | The Attester AK certificate **RP itself** signs lives 10 min. Only affects RP's own CA leg; each Verifier's leg uses that Verifier's `--ak-validity` |
-| `--duration 300` | Exit cleanly after ~5 min. Drop it to run until Ctrl+C |
 | `--log-level INFO` | Default. Use `DEBUG` (or `-v`) to see CoAP and TPM detail |
 
 **What you should see.** Startup echoes the resolved configuration, so the
-log is self-describing about which flags actually took effect. Each
-attestation cycle then logs its phases (`get_verifiers`, `get_evidence`,
-`get_attestation_results`) with timings, a per-Verifier pass/fail line, the
-majority-vote tally, and the sleep before the next cycle.
+log is self-describing about which flags actually took effect. The run then
+logs its phases (`get_verifiers`, `get_evidence`, `get_attestation_results`)
+with timings, a per-Verifier pass/fail line, the majority-vote tally, and
+exits.
 
-The **first** attestation cycle is much slower and noisier than the rest — it
-pays for `/certify_ak` (CHALLENGE → `ActivateCredential` → CONFIRM) against
-each Verifier, provisions the Attester's identity under two CAs, and runs
-`/qualify`. Later attestation cycles hit caches and go straight to
-`/attest` → `/nonce` → `/appraise`. Renewals appear during the *sleep*, not
-inside an attestation cycle.
-
-To stop early: `Ctrl+C`, or `kill -TERM <pid>`. Both shut down cleanly.
+**The first run against a fresh `state/` is much slower and noisier than a
+later one** — it pays for `/certify_ak` (CHALLENGE → `ActivateCredential` →
+CONFIRM) against each Verifier and provisions the Attester's identity under
+two CAs. A second run reuses those cached credentials and goes straight to
+`/attest` → `/nonce` → `/appraise`.
 
 Tear the background processes down with `pkill -f '^bin/'` — anchored on
 purpose: an unanchored `pkill -f bin/verifier` also matches the command line
 of whatever shell or script you typed it from, and kills that too.
-
----
-
-## 4.2 Worked example — benchmark mode
-
-Benchmark mode replaces the daemon with a **bounded 1→5-Verifier timing
-sweep**, writes a stats file, and exits. It is what produced the CHES
-poster's scaling numbers.
-
-All five Verifiers must be running, since the sweep's last step asks for
-five:
-
-```bash
-# Same stack as above (steps 1-5); all 5 verifiers are required here.
-make -j
-bin/trust_manager &
-bin/attester &
-./start_verifiers.sh
-
-# The sweep: 1 Verifier, then 2, ... up to 5, timing each phase.
-bin/relying_party --benchmark
-
-# Turn the stats file into a chart. Takes no arguments — it reads
-# timings_RP_multi_verifiers.txt from the repo root. Needs matplotlib.
-python3 plot_multi_verifiers.py
-```
-
-| Flag | Effect |
-|---|---|
-| `--benchmark` (`-B`) | Run the fixed 1→5 sweep and **exit**, instead of the daemon. Writes `timings_RP_multi_verifiers.txt` |
-| `-v` / `--log-level` | The only other flags that still apply |
-
-`--verifiers`, `--interval`, `--duration` and `--cycles` are **ignored** —
-the sweep's shape is fixed. Passing `--verifiers 3` alongside `--benchmark`
-does nothing, which is the most common confusion here.
-
-**Output** — `timings_RP_multi_verifiers.txt`, one block per sweep step:
-
-```
-Verifiers: 1
-Average Getting verifiers: 0.014764 seconds (stddev: 0.000000)
-Average Getting evidence: 3.217283 seconds (stddev: 0.000000)
-Average Appraising evidence: 2.954350 seconds (stddev: 0.000000)
-Average Total Attestation Duration: 6.186398 seconds (stddev: 0.000000)
-Verifiers: 2
-...
-```
-
-Reading it: *Getting verifiers* is the Trust Manager lookup (flat, ~ms),
-*Getting evidence* is the Attester round trip plus RP's local Step 2a
-appraisal (flat in Verifier count), and *Appraising evidence* is the fan-out
-to N Verifiers — the term that actually scales. The **first block is
-inflated** by all the one-time provisioning; for clean numbers, run the sweep
-twice against a warm `state/` and keep the second.
-
-> `stddev` is computed over `NUM_RUNS` measured cycles per step (a
-> compile-time constant in `src/rp/rp_shared.h`, currently `5`), each step
-> preceded by a discarded warm-up cycle so one-off onboarding cost is not
-> blended into the steady state. Raise `NUM_RUNS` and rebuild for tighter
-> deviations.
 
 ---
 
@@ -288,7 +190,6 @@ bin/verifier --port 5684 [OPTIONS]
 | `-l`, `--log-level=LEVEL` | INFO | CHARRA log-level |
 | `-c`, `--coap-log-level=LEVEL` | INFO | libcoap log-level |
 | `--port=PORT` | 31415 | **Port to listen on** |
-| `--qualification-validity=SECONDS` | 180 (3 min) | How long a passed RP qualification stays valid |
 | `--ak-validity=SECONDS` | 300 (5 min) | Lifetime of AK certs **this Verifier** issues, from issuance |
 | `-f`, `--pcr-file=PATH` | `reference-pcrs.txt` | Reference PCRs. **Vestigial** — see below |
 | `-s`, `--pcr-selection=X1[,X2…]` | 0,1,2,3,4,5,6,7,10 | PCRs to check. **Vestigial** — see below |
@@ -395,60 +296,31 @@ LOG_LEVEL_CHARRA=DEBUG bin/verifier --port 5684
 
 ---
 
-## 10. Tuning the timing flags
+## 10. Tuning `--ak-renew-margin`
 
-Only **one** coupling matters:
-
-```
---qualify-renew-margin  <  --qualification-validity
-          30            <          180              (defaults)
-```
-
-A margin covering the whole window can never be satisfied, so RP would
-re-qualify on every idle pass.
-
-**The margin is deliberately *not* coupled to `--interval`.** Renewal is
-deadline-driven, not loop-driven: the idle window computes when the next
-credential falls due, sleeps exactly that long, renews, then sleeps out the
-remainder against a fixed deadline. So a margin *shorter* than the interval
-is fine — the daemon wakes for it mid-nap. (Before this, the check ran once
-per attestation cycle, a short margin let the loop step over the window
-entirely, and the renewal landed inside the next attestation instead.)
-
-RP cannot check this at startup — the window is the Verifier's to choose and
-arrives on the wire, so RP warns only once it has learned it from a
-`/qualify_submit` response.
-
-`--qualification-validity` lives on the **Verifier only** — it issues the
-grant, and reports the deadline to RP on the wire.
-
-AK validity is *per issuer*: `--ak-validity` on the Verifier,
-`--attester-ak-validity` on RP. Each certificate carries its own `notAfter`,
-so consumers read the real value.
-
-`--ak-renew-margin` (RP) is the certificate counterpart of
-`--qualify-renew-margin`, and the AK certificate durations mirror the
-qualification ones exactly:
+`--ak-renew-margin` (RP) must stay **smaller than the shortest AK certificate
+lifetime in play**:
 
 ```
 --ak-renew-margin  <  --ak-validity / --attester-ak-validity
        45           <              300                    (defaults)
 ```
 
-It must stay **smaller than the shortest AK certificate lifetime in play**,
-or every certificate is always "about to expire" and RP re-provisions on
-every single attestation cycle — a `/certify_ak` round trip per Verifier,
-forever.
+Otherwise every certificate is always "about to expire" and RP re-provisions
+it on every single run — a `/certify_ak` round trip per Verifier, every time.
 
-RP cannot check this for you at startup either: the lifetime is chosen by
-whoever issues the certificate, so RP only learns it on parsing one. A margin
-noticeably below the validity is the rule of thumb.
+AK validity is *per issuer*: `--ak-validity` on the Verifier,
+`--attester-ak-validity` on RP. Each certificate carries its own `notAfter`,
+so consumers read the real value; RP cannot check the margin against it at
+startup, only once it has actually parsed an issued certificate.
 
 ### Short-lived setup, to watch renewal happen
 
 ```bash
-bin/verifier --port 5684 --qualification-validity 90 --ak-validity 600 &
-bin/relying_party --verifiers 1 --interval 15 --qualify-renew-margin 40 --duration 300
+bin/verifier --port 5684 --ak-validity 90 &
+bin/relying_party --verifiers 1 --ak-renew-margin 60
+# run it again a minute later -- the cached cert is now within the margin,
+# so this run re-provisions it instead of reusing it
 ```
 
 ---
@@ -461,7 +333,6 @@ re-provisioning:
 ```
 state/verifier/ak-provisioning/rp/        AK issuance ledger, RP identities
 state/verifier/ak-provisioning/attester/  AK issuance ledger, Attester identities
-state/verifier/qualification/             RP qualification ledger (shared)
 state/relying-party/identity/             RP's EK cert + AK keypair
 state/relying-party/ak-certificates/      RP's AK cert, per Verifier port
 state/relying-party/attester-ak-certificates/  Attester certs RP holds
@@ -493,12 +364,10 @@ Inside: `cd ~/charra && make -j`. The TPM simulator starts automatically;
 
 | Symptom | Cause |
 |---|---|
-| RP exits immediately after one sweep | `--benchmark` is set; drop it for daemon mode |
 | RP hangs, no verifier answers | Fewer Verifiers running than `--verifiers` |
 | Every attestation fails after a TPM reset | Stale `state/` — delete it |
 | `Esys_Create: 0x921`, Attester cannot create its AK | TPM is in dictionary-attack lockout; run `tpm2_dictionarylockout --clear-lockout`. Every later step fails in a confusing cascade from this one cause |
 | `could not read keys/verifier-ca-<port>.crt` | Port not in `verifiers_config.txt` when `gen-ak-pki.sh` ran |
-| RP re-qualifies every idle pass | `--qualify-renew-margin` ≥ the Verifier's validity window |
-| RP re-provisions AK certs every attestation cycle | `--ak-renew-margin` ≥ the certificate lifetime (`--ak-validity` / `--attester-ak-validity`) |
-| `timeout`/`docker stop` kills RP mid-attestation-cycle | Fixed — SIGTERM now shuts down cleanly |
+| RP re-provisions AK certs every run | `--ak-renew-margin` ≥ the certificate lifetime (`--ak-validity` / `--attester-ak-validity`) |
+| `timeout`/`docker stop` kills RP mid-run | Expected — a single cycle installs no signal handler, so SIGTERM terminates immediately, same as any short-lived CLI command. Give it longer than `--verifier-timeout` + `--attester-timeout` if you need it to finish cleanly |
 | A Verifier votes NO and RP doesn't say why | By design. `/appraise` always answers `2.05` with `Attestation successful!`/`Attestation failed!` — any failed check is just a NO. **The reasons are logged on the Verifier**, so read that Verifier's log, not RP's |

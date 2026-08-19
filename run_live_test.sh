@@ -17,16 +17,15 @@
 #      (NVChip) and restarts it fresh, then TPM2_Startup(CLEAR) -- a genuine
 #      cold TPM, nothing measured yet.
 #   4. Deletes all of state/ -- RP's own cached TPM identity
-#      (state/relying-party/identity/), its per-Verifier AK certificates and
-#      qualification cache, and both Verifier-side ledgers
-#      (state/verifier/). This step matters: step 3 just re-randomized the
-#      TPM simulator's storage-hierarchy seeds, so any *old* cached AK
-#      private blob no longer loads under the *new* TPM state (Esys_Load
-#      fails) -- skipping this step is what made the first run of this
-#      script fail every single attestation, cascading from one TPM load
-#      error into "no AK certificate" into every evidence build failing. A
-#      stale ledger would be similarly meaningless against a freshly-reset
-#      TPM's identities.
+#      (state/relying-party/identity/), its per-Verifier AK certificates,
+#      and both Verifier-side ledgers (state/verifier/). This step matters:
+#      step 3 just re-randomized the TPM simulator's storage-hierarchy
+#      seeds, so any *old* cached AK private blob no longer loads under the
+#      *new* TPM state (Esys_Load fails) -- skipping this step is what made
+#      the first run of this script fail every single attestation,
+#      cascading from one TPM load error into "no AK certificate" into
+#      every evidence build failing. A stale ledger would be similarly
+#      meaningless against a freshly-reset TPM's identities.
 #   5. Sanity-checks that PCRs 0-7 and 10 read back all-zero -- confirms the
 #      TPM really is freshly reset before anything starts touching it.
 #   6. Clean rebuild (make clean && make -j).
@@ -35,20 +34,14 @@
 #      one-off script with a different naming scheme (that's how
 #      rp_run1.log/rp_run2.log/rp_run3.log/verifier_5684_restarted.log
 #      ended up sitting there stale after unrelated scratch-test scripts).
-#   8. Launches trust_manager, attester, and verifier instances on ports
-#      5684-5688 (all 5, matching relying_party's own num_verifiers=1..5
-#      benchmark loop -- with fewer than 5 real Verifiers running, that loop
-#      hangs waiting on whichever ports aren't listening, see
-#      CHARRA_V2_NOTES.md), all backgrounded with DEBUG logging to logs/.
+#   8. Launches trust_manager, attester, and 5 verifier instances on ports
+#      5684-5688, all backgrounded with DEBUG logging to logs/.
 #   9. Runs relying_party in the foreground (tee'd to logs/relying_party.log
-#      too), which is the actual multi-verifier attestation run.
-#      --benchmark is required, not cosmetic: relying_party's default mode
-#      is now a daemon that loops until signalled, so without it this script
-#      would never return. --benchmark runs the bounded 1..5-verifier sweep
-#      and exits, which is what this script has always meant to do (and it
-#      is what writes timings_RP_multi_verifiers.txt for
-#      plot_multi_verifiers.py). For a bounded *daemon* smoke test instead,
-#      swap it for e.g. --duration 120.
+#      too) with --verifiers 5, so this stays a genuine 5-Verifier
+#      attestation run rather than silently degrading to relying_party's
+#      own single-Verifier default. relying_party runs exactly one
+#      attestation cycle and exits on its own -- nothing here needs to wait
+#      or be bounded.
 #
 # Logs land in logs/*.log either way; Ctrl-C stops relying_party, the
 # container itself is --rm'd on exit but the background bin/* processes
@@ -122,8 +115,8 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
     # Regenerate verifiers_config.txt for exactly the five ports started
     # below. start_verifiers.sh writes this file too, so a previous
     # "./start_verifiers.sh 3" would otherwise leave a three-row config here
-    # and the sweep would fail at 4 and 5 Verifiers with "Verifier ID not
-    # found" rather than anything pointing at the config.
+    # and --verifiers 5 below would fail with "Verifier ID not found" for
+    # IDs 4 and 5 rather than anything pointing at the config.
     for i in 1 2 3 4 5; do
       echo "$i 127.0.0.1 $((5683 + i))"
     done > verifiers_config.txt
@@ -135,7 +128,7 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
     done
     sleep 2
 
-    LOG_LEVEL_CHARRA=DEBUG bin/relying_party --benchmark 2>&1 \
+    LOG_LEVEL_CHARRA=DEBUG bin/relying_party --verifiers 5 2>&1 \
         | tee logs/relying_party.log
 
     # A log that is mostly NUL bytes means two processes shared the file:
@@ -149,8 +142,4 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
             echo "         wrote it. Treat this run as contaminated."
         fi
     done
-
-    echo "--- timings written to timings_RP_multi_verifiers.txt"
-    echo "--- plot them on the HOST (matplotlib is not in this image):"
-    echo "      python3 plot_multi_verifiers.py"
   '

@@ -44,11 +44,11 @@ void coap_nonce_handler(struct coap_resource_t* resource,
     int coap_r = 0;
 
     /* Round delimiter. /nonce is the best anchor for "a new round started":
-     * from an RP's second round on, its AK certificate and qualification are
-     * both cached, so /certify_ak and /qualify don't run at all and /nonce
-     * genuinely is the round's first request. Only a first round prints the
-     * delimiter late, and that round is self-evident in the log anyway.
-     * Mirrors relying_party.c's "Starting new attestation run". */
+     * from an RP's second round on, its AK certificate is cached, so
+     * /certify_ak doesn't run at all and /nonce genuinely is the round's
+     * first request. Only a first round prints the delimiter late, and that
+     * round is self-evident in the log anyway. Mirrors relying_party.c's
+     * "Starting new attestation run". */
     attestation_round_counter++;
     charra_log_info("[" LOG_NAME
                     "] ============================================================");

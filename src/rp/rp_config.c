@@ -1,6 +1,6 @@
 /**
  * @file rp_config.c
- * @brief Relying Party command-line parsing and the daemon's sleep helper.
+ * @brief Relying Party command-line parsing.
  *        See rp_config.h.
  */
 
@@ -17,16 +17,9 @@
 #include <unistd.h>
 
 #include "../common/charra_log.h"
-#include "../core/charra_rp_qualification.h"
 #include "rp_shared.h"
 
 #define LOG_NAME "relying party"
-
-void rp_interruptible_sleep(unsigned int seconds) {
-    for (unsigned int i = 0; i < seconds && !quit; i++) {
-        sleep(1);
-    }
-}
 
 /* Identifiers for options with no short letter. Outside ASCII so they can
  * never collide with a typeable short flag, but inside cli_util's flag range
@@ -38,14 +31,9 @@ void rp_interruptible_sleep(unsigned int seconds) {
 static const struct option rp_long_options[] = {{"help", no_argument, 0, '0'},
         {"verbose", no_argument, 0, 'v'},
         {"log-level", required_argument, 0, 'l'},
-        {"benchmark", no_argument, 0, 'B'},
-        {"interval", required_argument, 0, 'I'},
-        {"qualify-renew-margin", required_argument, 0, 'Q'},
         {"ak-renew-margin", required_argument, 0, 'R'},
         {"verifiers", required_argument, 0, 'n'},
         {"attester-ak-validity", required_argument, 0, 'A'},
-        {"duration", required_argument, 0, 'D'},
-        {"cycles", required_argument, 0, 'C'},
         {"verifier-timeout", required_argument, 0, RP_OPT_VERIFIER_TIMEOUT},
         {"attester-timeout", required_argument, 0, RP_OPT_ATTESTER_TIMEOUT},
         {0}};
@@ -72,7 +60,7 @@ int parse_rp_command_line(int argc, char** argv) {
     for (;;) {
         int index = -1;
         int identifier =
-                getopt_long(argc, argv, "vl:BI:Q:R:n:A:D:C:", rp_long_options, &index);
+                getopt_long(argc, argv, "vl:R:n:A:", rp_long_options, &index);
         if (identifier == -1) {
             break;
         }
@@ -94,20 +82,6 @@ int parse_rp_command_line(int argc, char** argv) {
             printf(" -l, --log-level=LEVEL:        Set CHARRA log-level "
                    "(TRACE, DEBUG, INFO, WARN, ERROR, FATAL). Overrides "
                    "$LOG_LEVEL_CHARRA.\n");
-            printf(" -B, --benchmark:              Run the bounded 1..%d-"
-                   "Verifier timing sweep and exit, writing "
-                   "timings_RP_multi_verifiers.txt, instead of the default "
-                   "attestation daemon.\n",
-                    RP_MAX_SWEEP_VERIFIERS);
-            printf(" -I, --interval=SECONDS:       Daemon mode: seconds "
-                   "between attestation cycles. Default %d.\n",
-                    RP_DEFAULT_ATTESTATION_INTERVAL_S);
-            printf(" -Q, --qualify-renew-margin=SECONDS: Daemon mode: renew "
-                   "qualification once it expires within SECONDS, from the "
-                   "idle window rather than inside an attestation. Must stay "
-                   "below the Verifier's --qualification-validity. Default "
-                   "%d.\n",
-                    RP_DEFAULT_QUALIFY_RENEW_MARGIN_S);
             printf("     --ak-renew-margin=SECONDS: Renew an AK "
                "certificate once it is within this long of "
                "expiring.\n");
@@ -115,29 +89,22 @@ int parse_rp_command_line(int argc, char** argv) {
                "and to both of the Attester's. Default: %ds "
                "\n",
                 RP_DEFAULT_AK_RENEW_MARGIN_S);
-        printf(" -n, --verifiers=COUNT:        Daemon mode: attest against "
-                   "COUNT Verifiers per attestation cycle (1..%d). "
-                   "Default %d.\n",
+        printf(" -n, --verifiers=COUNT:        Attest against COUNT "
+                   "Verifiers (1..%d). Default %d.\n",
                     MAX_VERIFIERS, RP_DEFAULT_NUM_VERIFIERS);
             printf(" -A, --attester-ak-validity=SECONDS:\n");
             printf("                               Lifetime of the Attester AK "
                    "certificate RP issues under its own CA, measured from "
                    "issuance. Default %ld.\n",
                     (long)attester_ak_cert_validity_seconds);
-            printf(" -D, --duration=SECONDS:       Daemon mode: stop cleanly "
-                   "after roughly SECONDS. Default 0 (run until "
-                   "SIGINT/SIGTERM).\n");
-            printf(" -C, --cycles=COUNT:           Daemon mode: stop cleanly "
-                   "after COUNT attestation cycles. Default 0 "
-                   "(unbounded).\n");
             printf("     --verifier-timeout=SECONDS: How long to wait for a "
                    "Verifier's reply before giving up. Also bounds every "
-                   "other RP round trip (Trust Manager, /certify_ak, "
-                   "/qualify). A Verifier that times out counts against the "
-                   "majority exactly like a NO vote. Default %d.\n",
+                   "other RP round trip (Trust Manager, /certify_ak). A "
+                   "Verifier that times out counts against the majority "
+                   "exactly like a NO vote. Default %d.\n",
                     RP_DEFAULT_VERIFIER_TIMEOUT_S);
             printf("     --attester-timeout=SECONDS: How long to wait for the "
-                   "Attester's evidence before giving up, ending the cycle. "
+                   "Attester's evidence before giving up, ending the run. "
                    "Default %d.\n",
                     RP_DEFAULT_ATTESTER_TIMEOUT_S);
             return 1;
@@ -151,23 +118,6 @@ int parse_rp_command_line(int argc, char** argv) {
                         "[" LOG_NAME "] Invalid --log-level '%s'.", optarg);
                 return -1;
             }
-            break;
-        case 'B':
-            rp_benchmark_mode = true;
-            break;
-        case 'I':
-            if (!charra_cli_parse_uint_arg(
-                        LOG_NAME, "--interval", optarg, 1, 86400, &value)) {
-                return -1;
-            }
-            rp_attestation_interval_s = (unsigned int)value;
-            break;
-        case 'Q':
-            if (!charra_cli_parse_uint_arg(LOG_NAME,
-                        "--qualify-renew-margin", optarg, 0, 86400, &value)) {
-                return -1;
-            }
-            rp_qualify_renew_margin_s = (unsigned int)value;
             break;
         case 'R':
             /* Upper bound is a year: a margin beyond that exceeds any
@@ -200,20 +150,6 @@ int parse_rp_command_line(int argc, char** argv) {
             }
             attester_response_timeout = (uint16_t)value;
             break;
-        case 'D':
-            if (!charra_cli_parse_uint_arg(
-                        LOG_NAME, "--duration", optarg, 1, LONG_MAX, &value)) {
-                return -1;
-            }
-            rp_duration_s = (unsigned int)value;
-            break;
-        case 'C':
-            if (!charra_cli_parse_uint_arg(
-                        LOG_NAME, "--cycles", optarg, 1, LONG_MAX, &value)) {
-                return -1;
-            }
-            rp_max_cycles = (unsigned long)value;
-            break;
         case 'A':
             if (!charra_cli_parse_uint_arg(LOG_NAME,
                         "--attester-ak-validity", optarg, 1, LONG_MAX,
@@ -229,87 +165,18 @@ int parse_rp_command_line(int argc, char** argv) {
         }
     }
 
-        /* The other bound: a margin covering the whole validity window can
-     * never be satisfied, so every idle pass would re-qualify. */
-    /* No margin-vs-validity check here: the window is the Verifier's to
-     * choose (--qualification-validity there) and arrives on the wire, so
-     * it is checked where it is actually learned -- see the warning beside
-     * qualify_submit_expires_at. */
     return 0;
 }
 
-
-/** Renders an "unlimited when zero" setting, e.g. --duration/--cycles. */
-static const char* rp_limit_str(
-        unsigned long value, char* buf, size_t buf_len, const char* unit) {
-    if (value == 0) {
-        return "unlimited";
-    }
-    snprintf(buf, buf_len, "%lu%s", value, unit);
-    return buf;
-}
-
-/** Warns about a flag that was given but does not apply to this mode --
- * silently ignoring it is how a flag comes to look like it works. */
-static void rp_warn_if_ignored(int identifier, const char* flag_name) {
-    if (charra_cli_flag_was_given(identifier)) {
-        charra_log_warn("[" LOG_NAME "]   --%s was given but has NO EFFECT in "
-                        "benchmark mode.",
-                flag_name);
-    }
-}
-
 void rp_log_effective_configuration(void) {
-    char buf_duration[32] = {0};
-    char buf_cycles[32] = {0};
-
-    charra_log_info("[" LOG_NAME
-                    "] ============================================================");
-    if (rp_benchmark_mode) {
-        charra_log_info("[" LOG_NAME "] MODE: BENCHMARK -- fixed 1..%d "
-                        "Verifier sweep, then exit (--benchmark).",
-                RP_MAX_SWEEP_VERIFIERS);
-    } else {
-        charra_log_info("[" LOG_NAME "] MODE: DAEMON -- continuous attestation "
-                        "until stopped (default; pass --benchmark for the "
-                        "timing sweep).");
-    }
     charra_log_info("[" LOG_NAME
                     "] ============================================================");
     charra_log_info("[" LOG_NAME "] Settings for this run -- \"(default)\" "
                     "means the flag was not given; pass it to change the "
                     "value.");
 
-    if (rp_benchmark_mode) {
-        charra_log_info("[" LOG_NAME "]   %-22s 1..%d  (fixed, not settable)",
-                "verifier sweep", RP_MAX_SWEEP_VERIFIERS);
-        charra_log_info("[" LOG_NAME "]   %-22s %d  (fixed, not settable; "
-                        "plus 1 discarded warm-up)",
-                "measured runs/step", NUM_RUNS);
-        /* Named individually rather than in a loop: each is a real flag a
-         * user could reasonably expect to apply here, and saying so beats
-         * ignoring it. */
-        rp_warn_if_ignored('n', "verifiers");
-        rp_warn_if_ignored('I', "interval");
-        rp_warn_if_ignored('D', "duration");
-        rp_warn_if_ignored('C', "cycles");
-    } else {
-        charra_log_info("[" LOG_NAME "]   %-22s %d%s", "--verifiers",
-                rp_num_verifiers, charra_cli_default_tag('n'));
-        charra_log_info("[" LOG_NAME "]   %-22s %us%s", "--interval",
-                rp_attestation_interval_s, charra_cli_default_tag('I'));
-        charra_log_info("[" LOG_NAME "]   %-22s %s%s", "--duration",
-                rp_limit_str(rp_duration_s, buf_duration, sizeof(buf_duration),
-                        "s"),
-                charra_cli_default_tag('D'));
-        charra_log_info("[" LOG_NAME "]   %-22s %s%s", "--cycles",
-                rp_limit_str(rp_max_cycles, buf_cycles, sizeof(buf_cycles), ""),
-                charra_cli_default_tag('C'));
-    }
-
-    /* Renewal margins and log level apply to both modes. */
-    charra_log_info("[" LOG_NAME "]   %-22s %us%s", "--qualify-renew-margin",
-            rp_qualify_renew_margin_s, charra_cli_default_tag('Q'));
+    charra_log_info("[" LOG_NAME "]   %-22s %d%s", "--verifiers",
+            rp_num_verifiers, charra_cli_default_tag('n'));
     charra_log_info("[" LOG_NAME "]   %-22s %lds%s", "--ak-renew-margin",
             (long)rp_ak_renew_margin_s, charra_cli_default_tag('R'));
     charra_log_info("[" LOG_NAME "]   %-22s %lds%s", "--attester-ak-validity",

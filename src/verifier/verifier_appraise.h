@@ -11,9 +11,9 @@
 /**
  * @brief Appraises one evidence bundle and answers with the verdict.
  *
- * Runs Step 3a (the RP's own identity and qualification) before Step 3b
- * (the Attester's evidence proper), so evidence relayed by an unqualified
- * or unidentified RP is rejected before it is ever examined.
+ * Runs Step 3a (the RP's own identity) before Step 3b (the Attester's
+ * evidence proper), so evidence relayed by an unidentified RP is rejected
+ * before it is ever examined.
  */
 void coap_appraise_handler(struct coap_resource_t* resource,
         struct coap_session_t* session, const struct coap_pdu_t* request,

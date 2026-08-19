@@ -2340,3 +2340,134 @@ Verified via a full clean rebuild plus a live 1-through-5-verifier sweep in
 the Docker/TPM-simulator environment after each fix, confirming zero
 regressions and the run summary's per-verifier fields (result, cache
 status, latency, reason) staying accurate across repeated runs.
+
+### RP qualification handshake and daemon/benchmark modes removed
+
+Reversed on request, on the `single-verifier` branch, as the first step of a
+broader simplification pass. Two independent removals:
+
+**The RP qualification handshake (`/qualify` + `/qualify_submit`) is gone
+entirely** — every dedicated file
+(`charra_rp_qualification.{h,c}`, `charra_qualification_state.{h,c}`,
+`rp_qualification.{h,c}`, `verifier_qualify.{h,c}`,
+`tests/test_rp_qualification.c`), its three DTOs and their marshal/unmarshal
+functions, its CLI flags (`--qualify-renew-margin` on the RP,
+`--qualification-validity` on the Verifier), its state (both ledgers, the
+mutex, the client-side cache), and the Step 3a item 1b gate in
+`coap_appraise_handler()`. `charra_sdk_redact_ima_log()`'s `salt` parameter
+-- which existed solely so the RP's redaction of a qualification challenge
+could be reproduced byte-for-byte against the Verifier's own "golden"
+answer -- is gone with it; real redaction always uses a fresh random salt
+per entry now, unconditionally. The Verifier will next test whether the RP
+applied the correct cleaning logic a different way; nothing has replaced
+this yet.
+
+**The RP is single-shot again.** `bin/relying_party` runs one attestation
+cycle and exits, the way it did before this fork added a continuous
+daemon loop and a `--benchmark` 1→5-Verifier timing sweep. Gone with the
+loop: `--interval`/`--duration`/`--cycles`/`--benchmark` and their defaults,
+the idle-window renewal functions (`rp_renew_due_credentials()`,
+`rp_next_renewal_due()`), `rp_interruptible_sleep()`, the SIGINT/SIGTERM
+handler (nothing in the single-shot path ever polled `quit`, so it was
+already inert once the loop it served was gone), and the whole
+`rp_stats.{h,c}` module (`calculate_stats()`, `NUM_RUNS`,
+`RP_MAX_SWEEP_VERIFIERS`). `run_one_attestation_cycle()` -- the function
+both modes shared -- survives unchanged in shape, just called once from
+`main()` instead of from a loop or a sweep; its now-unused `rp_cycle_timing`
+timing-accumulator parameter is gone too. `--ak-renew-margin` and the
+proactive re-provisioning it drives **still work**: they are checked
+synchronously while a cycle provisions each certificate, not on the deleted
+idle timer, so a cached AK certificate close to expiry is still renewed
+before use rather than only on rejection.
+
+**Kept, deliberately:** the certificate-checking logic (EK/AK validation,
+`/certify_ak`, `/certify_ak_of_attester`, per-Verifier independent CAs) and
+the `src/rp/`, `src/verifier/`, `src/attester/` module split are both
+untouched -- this was a targeted reversal of two specific features, not a
+rollback of the broader refactor.
+
+**Docs**: `CLI_GUIDE.md` rewritten for single-shot RP usage (no more §4.1
+daemon / §4.2 benchmark split); `DATA_FLOW.md`'s entire `/qualify` +
+`/qualify_submit` section (§2) removed along with every cross-reference
+(state table, lock table, message catalogue, the Step 3a item 1b row);
+`run_live_test.sh` updated to pass `--verifiers 5` explicitly (relying_party
+now defaults to 1) instead of the deleted `--benchmark`, and to stop
+promising a `timings_RP_multi_verifiers.txt` that no longer gets written.
+`timings_RP_multi_verifiers.txt` and `plot_multi_verifiers.py` themselves
+are left in place as orphaned artifacts from the old benchmark mode, not
+deleted.
+
+### Simulated TEE closes the "different cleaning logic" gap
+
+The gap the previous entry left open -- nothing proved to the Verifier that
+the RP's redaction actually ran against the Attester's genuine, TPM-signed
+log, or that it ran the correct redaction code at all -- is now closed with
+a software-simulated TEE, `src/core/TEE.{h,c}`.
+
+**What it simulates.** A real TEE (SGX enclave, AWS Nitro Enclave, ...) can
+attest, to a remote party, both a measurement of the exact code it is
+running and a caller-supplied `REPORT_DATA` value, bound together in one
+signed Attestation Document, under a key that never leaves the enclave.
+`TEE.c` approximates this in software, for this PoC only: "the enclave
+image" is a SHA-256 hash over the concatenated bytes of whichever files the
+*caller* passes to `tee_hash_files()`/`tee_attestation()` -- `TEE.c` itself
+has no built-in notion of which files matter, exactly as a real TEE's
+measurement mechanism covers whatever image its loader was handed rather
+than a list the TEE hardware maintains; "the key that never leaves the
+enclave" is an RSA-2048/PSS/SHA-256 keypair generated lazily, once per
+process, held only in `TEE.c`'s own static storage -- nothing outside that
+file ever sees the private half, and there is no key file on disk. This
+proves nothing against an attacker able to modify `TEE.c` itself (a real
+TEE's guarantee comes from hardware isolation this PoC does not have); the
+point is narrower, closing exactly the gap above.
+
+**RP side (`rp_evidence.c`).** Owns the list of files it is vouching for --
+`rp_appraisal_code_files` (`src/rp/rp_evidence.c`, `src/core/charra_sdk.c`,
+`src/core/charra_event_log.c`: the appraisal gate plus the actual
+redaction/replay/policy logic it gates) -- and passes it to the TEE as an
+argument; the TEE never owns or infers this list itself.
+`charra_rp_appraise_evidence()` captures `pcrdigest_a` -- the TPM-signed PCR
+digest from the Attester's own quote, `attest_struct.attested.quote.pcrDigest`
+-- into a file-static variable the moment it is unmarshaled, the same value
+check 5 (PCR replay) already appraises against. `charra_rp_build_evidence_
+message()` then computes `REPORT_DATA = hash(verifier_nonce || pcrdigest_a
+|| log_r)` per Verifier (nonce differs per Verifier, so this cannot be
+hoisted out of the per-cycle redaction step), calls `tee_attestation(rp_
+appraisal_code_files, ..., report_data, &doc)` to fill in a `{file_hash,
+report_data}` Attestation Document, `tee_sign()`s it, and forwards both the
+document and the TEE's DER public key (`tee_public_key_der()`) alongside the
+rest of the evidence -- the same "ship the public key with the signature"
+convention `rp_public_key` already uses for Quote_r.
+
+**Wire format.** `msg_rp_evidence_dto` gains four fixed-size fields --
+`tee_file_hash`, `tee_report_data` (32 B each), `tee_signature` (256 B),
+`tee_public_key` (≤512 B, DER) -- marshaled/unmarshaled as the last four
+positional CBOR items, after `log_r`.
+
+**Verifier side (`verifier_appraise.c`) never calls into `TEE.c` at all.**
+It holds its own independent copy of the expected file list --
+`expected_appraisal_code_files`, deliberately a second, unshared declaration
+of the same three paths RP's `rp_appraisal_code_files` names, kept in sync
+by hand -- and its own local `verifier_hash_expected_appraisal_code()`
+(same read-and-concatenate-and-hash construction `TEE.c`'s `tee_hash_files()`
+uses, duplicated rather than called into) so that "what code is correct" is
+never something the Verifier learns from the RP's own tooling, only from its
+own copy of the source. The check itself is filed as "Step 3a item 4" though
+computed inside the Step 3b code block (it needs `attest_struct`'s
+`pcrDigest`, which Step 3b item 3 already unmarshals): parses `tee_public_
+key`, verifies `tee_signature` over `(tee_file_hash || tee_report_data)`
+under it (same DER-parse-and-verify pattern Step 3a item 2 already uses for
+Quote_r), then independently recomputes both halves and compares --
+`verifier_hash_expected_appraisal_code()` against `tee_file_hash` (proves
+"the correct code ran"), and `hash(verifier_nonce || pcrdigest_a || log_r)`
+against `tee_report_data` using the Verifier's own received copies of all
+three inputs (proves "this exact log_r came from this exact pcrdigest_a and
+this exact challenge", not a fabricated log or a replayed document). All
+three sub-checks, and the existing seven, are ANDed into one fail-closed
+`attestation_result` --
+eight booleans total now, up from seven.
+
+**Not done, on purpose:** no attempt to make the "enclave" isolation real
+(no SGX/Nitro/etc. integration) and no attempt to protect `TEE.c` against
+an attacker who can edit the running binary -- both are out of scope for a
+software PoC and were never the gap this closes.

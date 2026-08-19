@@ -2,11 +2,11 @@
  * @file charra_record_file.h
  * @brief The line-oriented record files the Verifier keeps under state/.
  *
- * Both ledgers -- issued AK certificates and passed RP qualifications --
- * are the same thing on disk: a comment header, then one whitespace-
- * separated record per line, rewritten wholesale under a `<path>.lock`
- * companion lock. Only the fields differ, so only the per-line parse and
- * format belong to each module; everything around them lives here.
+ * Every AK-provisioning ledger is the same thing on disk: a comment header,
+ * then one whitespace-separated record per line, rewritten wholesale under
+ * a `<path>.lock` companion lock. Only the fields differ, so only the
+ * per-line parse and format belong to each module; everything around them
+ * lives here.
  */
 
 #ifndef CHARRA_RECORD_FILE_H

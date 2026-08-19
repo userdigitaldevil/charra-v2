@@ -8,14 +8,12 @@
 
 #include "common/charra_log.h"
 #include "common/charra_macro.h"
-#include "core/charra_rp_qualification.h"
 #include "util/cli_util.h"
 #include "util/coap_util.h"
 #include "util/io_util.h"
 #include "verifier/verifier_appraise.h"
 #include "verifier/verifier_certify_ak.h"
 #include "verifier/verifier_nonce.h"
-#include "verifier/verifier_qualify.h"
 #include "verifier/verifier_shared.h"
 
 /* --- config ------------------------------------------------------------- */
@@ -59,9 +57,9 @@ char* verifier_ca_key_path = "keys/verifier-ca.key";
  * fixed absolute window: with a fixed not_after every certificate this
  * process ever issues would expire at the same instant, so one issued
  * late would live for less time than one issued early. Settable with
- * --ak-validity. Five minutes by default, matching the qualification
- * window: short-lived credentials keep the renewal path exercised on every
- * run instead of lying dormant behind a multi-year default. Must stay
+ * --ak-validity. Five minutes by default: short-lived credentials keep the
+ * renewal path exercised on every run instead of lying dormant behind a
+ * multi-year default. Must stay
  * comfortably above RP's --ak-renew-margin, or RP re-provisions on every
  * cycle. */
 #define CHARRA_AK_CERT_VALIDITY_SECONDS_DEFAULT (5 * 60)
@@ -79,8 +77,7 @@ time_t ak_cert_validity_seconds =
  * one, so if every Verifier's issuance shared one ledger, one Verifier
  * certifying RP would immediately revoke every OTHER Verifier's own,
  * separately-issued certificate for the same RP in that shared file.
- * Keyed by this process's own port, same mechanism (and same comment) as
- * qualification_state_file_path below.
+ * Keyed by this process's own port.
  *
  * Two separate ledgers, one per CHARRA_CERTIFY_AK_SUBJECT_* value -- an RP
  * AK and a relayed Attester AK must never be tracked (or revoked) as if
@@ -97,27 +94,11 @@ static char attester_ak_state_file_path_buf[96] = {0};
 char* attester_ak_state_file_path = "state/verifier/ak-provisioning/"
                                            "attester/attester-ak-provisioning-state.txt";
 
-/* Persisted, per-RP-identity record of who has passed /qualify +
- * /qualify/submit -- see charra_qualification_state.h. Unlike
- * rp_ak_state_file_path above, ONE FILE SHARED by every `bin/verifier`
- * instance: qualifying with one Verifier qualifies with all of them.
- * Safe because charra_qualification_state_renew() only appends (never
- * revokes-on-write like charra_ak_state_renew()), and ek_fingerprint is
- * already Verifier-agnostic (one RP EK/AK keypair, reused everywhere). */
-char* qualification_state_file_path =
-        "state/verifier/qualification/rp-qualification-state.txt";
-
 /* Per-round /appraise timings, appended by coap_appraise_handler(). Per
  * port, same reason as the ledgers above: sibling Verifiers share one
  * working directory and would otherwise interleave into one file. */
 static char durations_file_path_buf[64] = {0};
 char* durations_file_path = "durations_verifier.txt";
-
-/* Qualification window this Verifier grants, settable with
- * --qualification-validity. Pushed into charra_rp_qualification.c after
- * CLI parsing; must match the RP's own flag (see that module's header). */
-static time_t qualification_validity_seconds =
-        CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS;
 
 /**
  * @brief SIGINT handler: set quit to 1 for graceful termination.
@@ -165,8 +146,6 @@ int main(int argc, char** argv) {
         },
         .verifier_config = {
             .dtls_psk_identity = &dtls_config.psk_identity,
-            .qualification_validity_seconds =
-                    &qualification_validity_seconds,
             .ak_cert_validity_seconds = &ak_cert_validity_seconds,
         },
     };
@@ -182,17 +161,10 @@ int main(int argc, char** argv) {
     charra_log_set_level(charra_log_level);
     coap_set_log_level(coap_log_level);
 
-    /* The shared module is what actually stamps expires_at into the
-     * ledger, so hand it the effective window now that CLI parsing is
-     * done. */
-    charra_rp_qualification_set_validity_seconds(
-            qualification_validity_seconds);
-
     /* rp_ak_state_file_path/attester_ak_state_file_path are per-port (see
      * their own comments above) -- port is only final once command-line
      * parsing above has run, so this has to happen here, not at
-     * static-initialization time (qualification_state_file_path is shared,
-     * not per-port, so it needs no such assignment). */
+     * static-initialization time. */
 
     /* The lock is per-port, matching the ledgers below: two Verifiers on
      * different ports are meant to share state/verifier/, but two on the
@@ -203,8 +175,7 @@ int main(int argc, char** argv) {
             "state/verifier/verifier-%u.lock", port);
     static const char* const state_dirs[] = {
             "state/verifier/ak-provisioning/rp",
-            "state/verifier/ak-provisioning/attester",
-            "state/verifier/qualification", NULL};
+            "state/verifier/ak-provisioning/attester", NULL};
     if (charra_io_claim_state_dir(state_dirs, state_lock_path, "verifier") !=
             CHARRA_RC_SUCCESS) {
         return EXIT_FAILURE;
@@ -222,9 +193,6 @@ int main(int argc, char** argv) {
             "attester-ak-provisioning-state-%u.txt",
             port);
     attester_ak_state_file_path = attester_ak_state_file_path_buf;
-
-    /* qualification_state_file_path stays at its shared, non-per-port
-     * default (see its own comment) -- no snprintf() here. */
 
     snprintf(verifier_ca_cert_path_buf, sizeof(verifier_ca_cert_path_buf),
             "keys/verifier-ca-%u.crt", port);
@@ -254,9 +222,6 @@ int main(int argc, char** argv) {
                     "value.");
     charra_log_info("[" LOG_NAME "]   %-26s %u%s", "--port", port,
             charra_cli_default_tag('b'));
-    charra_log_info("[" LOG_NAME "]   %-26s %lds%s",
-            "--qualification-validity", (long)qualification_validity_seconds,
-            charra_cli_default_tag('5'));
     charra_log_info("[" LOG_NAME "]   %-26s %lds%s", "--ak-validity",
             (long)ak_cert_validity_seconds, charra_cli_default_tag('6'));
     charra_log_info("[" LOG_NAME "]   %-26s %s%s", "--log-level",
@@ -292,8 +257,6 @@ int main(int argc, char** argv) {
             rp_ak_state_file_path);
     charra_log_info("[" LOG_NAME "]   %-26s '%s'", "Attester AK ledger",
             attester_ak_state_file_path);
-    charra_log_info("[" LOG_NAME "]   %-26s '%s' (shared)",
-            "qualification ledger", qualification_state_file_path);
     charra_log_info("[" LOG_NAME "]   %-26s '%s'", "manufacturer root",
             manufacturer_root_cert_path);
     charra_log_info("[" LOG_NAME "]   %-26s '%s'", "this Verifier's CA",
@@ -337,10 +300,6 @@ int main(int argc, char** argv) {
             coap_context, COAP_REQUEST_FETCH, "nonce", coap_nonce_handler);
     charra_coap_add_resource(coap_context, COAP_REQUEST_FETCH, "certify_ak",
             coap_certify_ak_handler);
-    charra_coap_add_resource(
-            coap_context, COAP_REQUEST_FETCH, "qualify", coap_qualify_handler);
-    charra_coap_add_resource(coap_context, COAP_REQUEST_FETCH,
-            "qualify_submit", coap_qualify_submit_handler);
 
     if (charra_coap_server_run(coap_context, LOG_NAME, &quit) !=
             CHARRA_RC_SUCCESS) {

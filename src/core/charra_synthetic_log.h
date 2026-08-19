@@ -1,17 +1,14 @@
 /**
  * @file charra_synthetic_log.h
- * @brief Synthetic IMA event log generation, for the Verifier's RP
- * qualification check.
+ * @brief Synthetic IMA event log generation, for exercising redaction and
+ * replay logic without real Attester data.
  *
- * Per the "RP Access Check Process": before trusting an RP to redact real
- * evidence, the Verifier fabricates a log containing realistic-looking
- * sensitive content, runs its own redaction logic on it to record the
- * expected ("golden") result, then sends the RAW fabricated log to the RP.
- * If the RP's own redaction produces the same result, it has proven its
- * pipeline works without ever having touched real Attester data.
+ * Produces realistic-looking fabricated log content -- plausible paths and
+ * file digests -- so tests can drive the real redaction/replay pipeline
+ * without ever touching a genuine device's evidence.
  *
- * This module only produces the raw, unredacted synthetic log -- the input
- * side of that check. It knows nothing about redaction.
+ * This module only produces the raw, unredacted synthetic log. It knows
+ * nothing about redaction.
  *
  * The generated log is genuinely well-formed: it uses the exact same binary
  * TLV layout charra_event_log.c parses, with a valid template_digest for

@@ -7,8 +7,8 @@
  *   get_verifiers()          -- resolve Verifier IDs via the Trust Manager
  *   get_evidence()           -- /attest, then Step 2a locally; a hard gate,
  *                               nothing is forwarded if it fails
- *   get_attestation_results()-- Step 2b once, qualify once, then one thread
- *                               per Verifier for /nonce and /appraise
+ *   get_attestation_results()-- Step 2b once, then one thread per Verifier
+ *                               for /nonce and /appraise
  */
 
 #ifndef CHARRA_RP_ATTESTATION_H
@@ -24,13 +24,13 @@ CHARRA_RC get_verifiers(int* requested_ids, int num_verifiers);
  * Also reports the verdict back to the Attester. */
 CHARRA_RC get_evidence(void);
 
-/** @brief Privacy-clean once (Step 2b), qualify once, then fan out to every
- * Verifier in parallel and tally the majority vote. */
+/** @brief Privacy-clean once (Step 2b), then fan out to every Verifier in
+ * parallel and tally the majority vote. */
 CHARRA_RC get_attestation_results(int num_verifiers);
 
 /** @brief One Verifier's thread body: ensure both AK certificates, get a
  * nonce, build this Verifier's evidence, /appraise, retry once on an
- * AK-certificate or qualification rejection. */
+ * AK-certificate rejection. */
 void* get_attestation_results_thread(void* arg);
 
 #endif /* CHARRA_RP_ATTESTATION_H */

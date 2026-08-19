@@ -191,6 +191,22 @@ typedef struct {
     /* --- log_r itself --- */
     uint32_t log_r_len;
     uint8_t* log_r;
+
+    /* --- simulated TEE Attestation Document (see TEE.h) ---
+     * Proves the RP's appraisal-and-redaction ran the expected code
+     * (tee_file_hash) against this exact (verifier_nonce, pcrdigest_a,
+     * log_r) triple (tee_report_data = hash of those three, in that order),
+     * signed under the TEE's own key -- forwarded below, same convention as
+     * rp_public_key above, since the Verifier has no other way to learn
+     * it. pcrdigest_a itself is not repeated here: it is
+     * attestation_data's attested.quote.pcrDigest field, already present
+     * above. */
+    uint8_t tee_file_hash[TPM2_SHA256_DIGEST_SIZE];
+    uint8_t tee_report_data[TPM2_SHA256_DIGEST_SIZE];
+    uint32_t tee_signature_len;
+    uint8_t tee_signature[CHARRA_RSA_SIGNATURE_LEN];
+    uint32_t tee_public_key_len;
+    uint8_t tee_public_key[CHARRA_RSA_PUB_KEY_DER_MAX];
 } msg_rp_evidence_dto;
 
 /**
@@ -397,75 +413,6 @@ typedef struct {
     uint32_t secret_len;
     uint8_t secret[CHARRA_CERTIFY_AK_SECRET_LEN];
 } msg_activate_credential_response_dto;
-
-/**
- * /qualify response: Verifier -> RP, the raw fabricated log to redact plus
- * the salt to redact it with -- see charra_rp_qualification.h for the full
- * handshake this and msg_qualify_submit_request_dto below implement the
- * wire side of.
- *
- * salt is the one deliberate exception to redaction's usual "salt is never
- * transmitted" rule (see charra_sdk.h): the RP's redaction of this
- * challenge log has to come out byte-identical to the Verifier's own
- * golden-log redaction of it, which is only possible if both sides use the
- * same salt. Safe here specifically because challenge_log is synthetic
- * (fabricated paths, not a real device's) -- never do this for real
- * evidence.
- */
-typedef struct {
-    uint32_t challenge_log_len;
-    uint8_t* challenge_log;
-    uint8_t salt[CHARRA_SDK_PATH_SALT_LEN];
-} msg_qualify_response_dto;
-
-/**
- * /qualify/submit request: RP -> Verifier, proof that this RP's own
- * redaction pipeline was run against the /qualify challenge.
- *
- * submitted_redacted_log is the RP's own redaction of that challenge log;
- * submitted_pcr_digest is the PCR composite digest a replay of it produces.
- * rp_signature is an RSA-PSS/SHA-256 signature over submitted_pcr_digest,
- * produced by RP's TPM-resident AK (charra_identity_key_mgr_sign()) -- proving
- * *this* already-certified RP produced the submission, not an
- * unauthenticated third party relaying bytes. rp_public_key/
- * ak_certificate_rp are the same DER-encoded key + AK certificate
- * msg_rp_evidence_dto carries, checked the same way (chain to the
- * Verifier's CA, then confirm the certified key matches rp_public_key).
- */
-typedef struct {
-    uint32_t submitted_redacted_log_len;
-    uint8_t* submitted_redacted_log;
-    uint8_t submitted_pcr_digest[TPM2_SHA256_DIGEST_SIZE];
-
-    uint32_t rp_signature_len;
-    uint8_t rp_signature[CHARRA_RSA_SIGNATURE_LEN];
-    uint32_t rp_public_key_len;
-    uint8_t rp_public_key[CHARRA_RSA_PUB_KEY_DER_MAX];
-    uint32_t ak_certificate_rp_len;
-    uint8_t* ak_certificate_rp;
-} msg_qualify_submit_request_dto;
-
-/**
- * /qualify/submit response: the Verifier's verdict plus the deadline it
- * actually granted.
- *
- * expires_at is on the wire deliberately. The Verifier is the sole issuer
- * of a qualification grant -- it is what writes expires_at into its own
- * ledger -- so the window is its parameter to choose
- * (--qualification-validity). Previously this response was a bare status
- * string, which forced the RP to *assume* the same window from a
- * compile-time constant in order to size its own client-side cache: a
- * silent contract between two separate binaries that broke the moment
- * either side changed it. Carrying the deadline here removes the
- * assumption, and with it the need for any matching flag on the RP.
- */
-typedef struct {
-    /** 1 = qualified, 0 = not qualified. */
-    uint32_t qualified;
-    /** Absolute epoch seconds the grant is valid until; 0 when not
-     * qualified. */
-    uint64_t expires_at;
-} msg_qualify_submit_response_dto;
 
 /**
  * /get_verifiers request: RP -> Trust Manager, which Verifier IDs (the
