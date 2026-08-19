@@ -130,8 +130,8 @@ SOURCES = $(shell find $(SRCDIR) -name '*.c')
 INCLUDE = -I$(INCDIR)
 
 OBJECTS =  $(addsuffix .o, $(addprefix $(OBJDIR)/common/, charra_log))
-OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log charra_synthetic_log charra_sdk charra_rp_qualification charra_ak_state charra_qualification_state charra_identity_key_mgr))
-OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/util/, cbor_util charra_util coap_util crypto_util io_util tpm2_util cli_util parser_util))
+OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log charra_synthetic_log charra_sdk charra_rp_qualification charra_ak_state charra_qualification_state charra_record_file charra_identity_key_mgr))
+OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/util/, cbor_util charra_util coap_util crypto_util hex_util io_util tpm2_util cli_util parser_util))
 
 # Relying-Party-only modules (src/rp/). Kept out of $(OBJECTS) on purpose:
 # that list is linked into every binary, and these carry RP-specific state

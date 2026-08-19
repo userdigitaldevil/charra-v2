@@ -1,5 +1,8 @@
 #include "charra_qualification_state.h"
 
+#include "../util/hex_util.h"
+#include "charra_record_file.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,129 +14,58 @@
 
 /** Writes data_len*2 lowercase hex chars + NUL into out (out must be at
  * least data_len*2 + 1 bytes). */
-static void hex_encode(const uint8_t* data, size_t data_len, char* out) {
-    static const char digits[] = "0123456789abcdef";
-    for (size_t i = 0; i < data_len; i++) {
-        out[2 * i] = digits[(data[i] >> 4) & 0xf];
-        out[2 * i + 1] = digits[data[i] & 0xf];
-    }
-    out[2 * data_len] = '\0';
-}
+/* One line of the qualification ledger; field layout and validation are
+ * unchanged from when this loop was open-coded. */
+static bool parse_qualification_state_line(const char* line, void* record_out) {
+    charra_qualification_state_record* rec = record_out;
+    char ek_fingerprint_hex[65] = {0};
+    long long qualified_at = 0;
+    long long expires_at = 0;
 
-/** Decodes exactly byte_len*2 hex chars from hex into out. Returns false on
- * any non-hex character or if hex is shorter than byte_len*2 chars. */
-static bool hex_decode(const char* hex, size_t byte_len, uint8_t* out) {
-    for (size_t i = 0; i < byte_len; i++) {
-        unsigned int byte = 0;
-        if (sscanf(hex + 2 * i, "%2x", &byte) != 1) {
-            return false;
-        }
-        out[i] = (uint8_t)byte;
+    int matched = sscanf(line, "%64s %lld %lld", ek_fingerprint_hex,
+            &qualified_at, &expires_at);
+    if (matched != 3 ||
+            strlen(ek_fingerprint_hex) != sizeof(rec->ek_fingerprint) * 2) {
+        charra_log_error("[" LOG_NAME "] Skipping unparseable "
+                         "qualification state line.");
+        return false;
     }
+    if (!charra_hex_decode(ek_fingerprint_hex, sizeof(rec->ek_fingerprint),
+                rec->ek_fingerprint)) {
+        charra_log_error("[" LOG_NAME "] Skipping qualification state "
+                         "line with bad hex.");
+        return false;
+    }
+    rec->qualified_at = (time_t)qualified_at;
+    rec->expires_at = (time_t)expires_at;
     return true;
 }
 
 CHARRA_RC charra_qualification_state_load(const char* path,
         charra_qualification_state_record** records_out,
         uint32_t* count_out) {
-    if (path == NULL || records_out == NULL || count_out == NULL) {
-        return CHARRA_RC_BAD_ARGUMENT;
-    }
-    *records_out = NULL;
-    *count_out = 0;
+    return charra_record_file_load(path, "qualification state",
+            sizeof(charra_qualification_state_record),
+            parse_qualification_state_line, (void**)records_out, count_out);
+}
 
-    FILE* f = fopen(path, "r");
-    if (f == NULL) {
-        /* no state file yet -- nobody has qualified against this Verifier
-         * instance yet */
-        charra_log_info(
-                "[" LOG_NAME "] No qualification state file at '%s' yet.",
-                path);
-        return CHARRA_RC_SUCCESS;
-    }
+static void format_qualification_state_line(
+        const void* record, FILE* out) {
+    const charra_qualification_state_record* rec = record;
+    char ek_fingerprint_hex[65] = {0};
+    charra_hex_encode(
+            rec->ek_fingerprint, sizeof(rec->ek_fingerprint), ek_fingerprint_hex);
 
-    charra_qualification_state_record* records = NULL;
-    uint32_t count = 0;
-    uint32_t capacity = 0;
-    char line[256];
-    while (fgets(line, sizeof(line), f) != NULL) {
-        char* p = line;
-        while (*p == ' ' || *p == '\t') {
-            p++;
-        }
-        if (*p == '#' || *p == '\n' || *p == '\0') {
-            continue; /* comment or blank line */
-        }
-
-        charra_qualification_state_record rec = {0};
-        char ek_fingerprint_hex[65] = {0};
-        long long qualified_at = 0;
-        long long expires_at = 0;
-
-        int matched = sscanf(p, "%64s %lld %lld", ek_fingerprint_hex,
-                &qualified_at, &expires_at);
-        if (matched != 3 ||
-                strlen(ek_fingerprint_hex) != sizeof(rec.ek_fingerprint) * 2) {
-            charra_log_error("[" LOG_NAME "] Skipping unparseable "
-                             "qualification state line.");
-            continue;
-        }
-        if (!hex_decode(ek_fingerprint_hex, sizeof(rec.ek_fingerprint),
-                    rec.ek_fingerprint)) {
-            charra_log_error("[" LOG_NAME "] Skipping qualification state "
-                             "line with bad hex.");
-            continue;
-        }
-        rec.qualified_at = (time_t)qualified_at;
-        rec.expires_at = (time_t)expires_at;
-
-        if (count == capacity) {
-            uint32_t new_capacity = (capacity == 0) ? 8 : capacity * 2;
-            charra_qualification_state_record* grown = realloc(records,
-                    new_capacity * sizeof(charra_qualification_state_record));
-            if (grown == NULL) {
-                free(records);
-                fclose(f);
-                return CHARRA_RC_ERROR;
-            }
-            records = grown;
-            capacity = new_capacity;
-        }
-        records[count++] = rec;
-    }
-    fclose(f);
-
-    *records_out = records;
-    *count_out = count;
-    return CHARRA_RC_SUCCESS;
+    fprintf(out, "%s %lld %lld\n", ek_fingerprint_hex,
+            (long long)rec->qualified_at, (long long)rec->expires_at);
 }
 
 CHARRA_RC charra_qualification_state_save(const char* path,
         const charra_qualification_state_record* records, uint32_t count) {
-    if (path == NULL || (records == NULL && count != 0)) {
-        return CHARRA_RC_BAD_ARGUMENT;
-    }
-
-    FILE* f = fopen(path, "w");
-    if (f == NULL) {
-        charra_log_error(
-                "[" LOG_NAME "] Could not open '%s' for writing.", path);
-        return CHARRA_RC_ERROR;
-    }
-
-    fprintf(f, "# ek_fingerprint qualified_at expires_at\n");
-    for (uint32_t i = 0; i < count; i++) {
-        const charra_qualification_state_record* rec = &records[i];
-        char ek_fingerprint_hex[65] = {0};
-        hex_encode(rec->ek_fingerprint, sizeof(rec->ek_fingerprint),
-                ek_fingerprint_hex);
-
-        fprintf(f, "%s %lld %lld\n", ek_fingerprint_hex,
-                (long long)rec->qualified_at, (long long)rec->expires_at);
-    }
-
-    fclose(f);
-    return CHARRA_RC_SUCCESS;
+    return charra_record_file_save(path,
+            "ek_fingerprint qualified_at expires_at", records,
+            sizeof(charra_qualification_state_record), count,
+            format_qualification_state_line);
 }
 
 bool charra_qualification_state_find_by_ek_fingerprint(
@@ -169,22 +101,10 @@ CHARRA_RC charra_qualification_state_renew(const char* path,
         return CHARRA_RC_BAD_ARGUMENT;
     }
 
-    char lock_path[512];
-    if (snprintf(lock_path, sizeof(lock_path), "%s.lock", path) >=
-            (int)sizeof(lock_path)) {
-        return CHARRA_RC_ERROR;
-    }
-    FILE* lock_file = fopen(lock_path, "w");
-    if (lock_file == NULL) {
-        charra_log_error(
-                "[" LOG_NAME "] Could not open lock file '%s'.", lock_path);
-        return CHARRA_RC_ERROR;
-    }
-    if (flock(fileno(lock_file), LOCK_EX) != 0) {
-        charra_log_error(
-                "[" LOG_NAME "] Could not acquire lock on '%s'.", lock_path);
-        fclose(lock_file);
-        return CHARRA_RC_ERROR;
+    FILE* lock_file = NULL;
+    CHARRA_RC lock_rc = charra_record_file_lock(path, &lock_file);
+    if (lock_rc != CHARRA_RC_SUCCESS) {
+        return lock_rc;
     }
 
     CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
@@ -210,8 +130,7 @@ CHARRA_RC charra_qualification_state_renew(const char* path,
 cleanup:
     free(records);
 unlock:
-    flock(fileno(lock_file), LOCK_UN);
-    fclose(lock_file);
+    charra_record_file_unlock(lock_file);
     return charra_r;
 }
 
