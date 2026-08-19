@@ -3,7 +3,6 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/stat.h>
 #include <time.h>
 #include <tss2/tss2_tpm2_types.h>
 
@@ -196,26 +195,20 @@ int main(int argc, char** argv) {
      * their own comments above) -- port is only final once command-line
      * parsing above has run, so this has to happen here, not at
      * static-initialization time (qualification_state_file_path is shared,
-     * not per-port, so it needs no such assignment). mkdir() the
-     * subfolders first: fopen(path, "w") fails outright if any parent
-     * directory is missing, and nothing else in this codebase creates them
-     * (they're gitignored, runtime-only state, not checked in). Ignore
-     * EEXIST -- all are expected to already exist on every run after the
-     * first. */
-    mkdir("state", 0755);
-    mkdir("state/verifier", 0755);
-    mkdir("state/verifier/ak-provisioning", 0755);
-    mkdir("state/verifier/ak-provisioning/rp", 0755);
-    mkdir("state/verifier/ak-provisioning/attester", 0755);
-    mkdir("state/verifier/qualification", 0755);
+     * not per-port, so it needs no such assignment). */
 
-    /* Per-port, matching the ledgers below: two Verifiers on different ports
-     * are meant to share state/verifier/, but two on the SAME port are two
-     * owners of one issuance ledger, each revoking the other's records. */
+    /* The lock is per-port, matching the ledgers below: two Verifiers on
+     * different ports are meant to share state/verifier/, but two on the
+     * SAME port are two owners of one issuance ledger, each revoking the
+     * other's records. */
     char state_lock_path[80] = {0};
     snprintf(state_lock_path, sizeof(state_lock_path),
             "state/verifier/verifier-%u.lock", port);
-    if (charra_io_lock_state_dir(state_lock_path, "verifier") !=
+    static const char* const state_dirs[] = {
+            "state/verifier/ak-provisioning/rp",
+            "state/verifier/ak-provisioning/attester",
+            "state/verifier/qualification", NULL};
+    if (charra_io_claim_state_dir(state_dirs, state_lock_path, "verifier") !=
             CHARRA_RC_SUCCESS) {
         return EXIT_FAILURE;
     }

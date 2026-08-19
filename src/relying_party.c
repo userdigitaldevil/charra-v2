@@ -3,7 +3,6 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/stat.h>
 #include <tss2/tss2_tpm2_types.h>
 #include <pthread.h>
 
@@ -113,7 +112,7 @@ const char* rp_ek_cert_not_before_utc = "20240101000000";
 const char* rp_ek_cert_not_after_utc = "20340101000000";
 /* Cache files -- written on first successful provisioning, reused (skipping
  * the /certify_ak round trip) on every later run. All of RP's runtime state
- * lives under state/relying-party/, mkdir'd by main() and split by purpose
+ * lives under state/relying-party/, created by main() and split by purpose
  * the same way verifier.c splits state/verifier/:
  *   identity/            the one TPM-resident EK/AK keypair (Verifier-agnostic)
  *   ak-certificates/     per-Verifier AK certificates for that keypair, named
@@ -519,21 +518,17 @@ int main(int argc, char** argv) {
     rp_log_effective_configuration();
 
     /* RP's own runtime state (TPM identity, per-Verifier AK certificates,
-     * shared qualification cache) lives under state/relying-party/ --
-     * mkdir() it once, up front, same reasoning verifier.c's main() already
-     * documents: fopen(path, "w") fails outright if a parent directory is
-     * missing, and nothing else creates these (gitignored, runtime-only). */
-    mkdir("state", 0755);
-    mkdir("state/relying-party", 0755);
-    mkdir("state/relying-party/identity", 0755);
-    mkdir("state/relying-party/ak-certificates", 0755);
-    mkdir("state/relying-party/qualification-cache", 0755);
-    mkdir("state/relying-party/attester-ak-certificates", 0755);
-    mkdir("state/relying-party/ak-provisioning", 0755);
-
-    /* Everything above is shared mutable state keyed by nothing but the path,
-     * so exactly one RP may own it at a time. */
-    if (charra_io_lock_state_dir("state/relying-party/relying-party.lock",
+     * shared qualification cache) lives under state/relying-party/. All of
+     * it is shared mutable state keyed by nothing but the path, so exactly
+     * one RP may own it at a time. */
+    static const char* const state_dirs[] = {
+            "state/relying-party/identity",
+            "state/relying-party/ak-certificates",
+            "state/relying-party/qualification-cache",
+            "state/relying-party/attester-ak-certificates",
+            "state/relying-party/ak-provisioning", NULL};
+    if (charra_io_claim_state_dir(state_dirs,
+                "state/relying-party/relying-party.lock",
                 "relying_party") != CHARRA_RC_SUCCESS) {
         return EXIT_FAILURE;
     }

@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 void charra_print_hex(const charra_log_t level, const size_t buf_len,
@@ -387,4 +388,37 @@ CHARRA_RC charra_io_lock_state_dir(
             lock_file_path);
     atexit(charra_io_release_state_lock);
     return CHARRA_RC_SUCCESS;
+}
+
+/* Walks the path creating each component, so "a/b/c" works even when none of
+ * a, b or c exist. EEXIST is the expected case on every run after the first;
+ * any other failure surfaces when the first file under the directory is
+ * opened. */
+static void mkdir_parents(const char* const path) {
+    char buf[256] = {0};
+    if (strlen(path) >= sizeof(buf)) {
+        return;
+    }
+    strcpy(buf, path);
+
+    for (char* p = buf + 1; *p != '\0'; ++p) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(buf, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(buf, 0755);
+}
+
+CHARRA_RC charra_io_claim_state_dir(const char* const* const dirs,
+        const char* const lock_file_path, const char* const role) {
+    for (size_t i = 0; dirs[i] != NULL; ++i) {
+        mkdir_parents(dirs[i]);
+    }
+
+    if (lock_file_path == NULL) {
+        return CHARRA_RC_SUCCESS;
+    }
+    return charra_io_lock_state_dir(lock_file_path, role);
 }

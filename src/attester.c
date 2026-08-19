@@ -25,7 +25,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <tinydtls/session.h>
 #include <tss2/tss2_mu.h>
 #include <tss2/tss2_tctildr.h>
@@ -170,12 +169,11 @@ int main(int argc, char** argv) {
 
     /* Attester's own runtime state (TPM identity, delivered AK
      * certificates) -- mirrors how relying_party.c organizes state/
-     * relying-party/. Ignore EEXIST -- both are expected to already exist
-     * on every run after the first. */
-    mkdir("state", 0755);
-    mkdir("state/attester", 0755);
-    mkdir("state/attester/identity", 0755);
-    mkdir("state/attester/ak-certificates", 0755);
+     * relying-party/. No lock: unlike the RP and the Verifier, the Attester
+     * writes nothing here that a second instance would revoke. */
+    static const char* const state_dirs[] = {"state/attester/identity",
+            "state/attester/ak-certificates", NULL};
+    (void)charra_io_claim_state_dir(state_dirs, NULL, LOG_NAME);
 
     /* register CoAP resource and resource handler */
     charra_log_info("[" LOG_NAME "] Registering CoAP resources.");

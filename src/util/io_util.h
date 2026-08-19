@@ -169,4 +169,25 @@ void charra_io_free_continuous_file_buffer(uint8_t** const file_content);
 CHARRA_RC charra_io_lock_state_dir(
         const char* const lock_file_path, const char* const role);
 
+/**
+ * @brief Creates a role's runtime state directories, then claims its lock
+ * inside them.
+ *
+ * The two belong in one call because of the order: charra_io_lock_state_dir()
+ * needs its parent directory to already exist, and nothing else in this
+ * codebase creates these (they are gitignored, runtime-only state). Missing
+ * parents are created too, and an existing directory is not an error -- after
+ * the first run every one of them already exists.
+ *
+ * @param[in] dirs NULL-terminated array of paths, each created parent-first.
+ * @param[in] lock_file_path lock to claim, or NULL for a role with no
+ * exclusively-owned state.
+ * @param[in] role name used in the error message, e.g. "relying_party".
+ * @return whatever charra_io_lock_state_dir() returns, or CHARRA_RC_SUCCESS
+ * when lock_file_path is NULL. A directory that cannot be created is not
+ * reported here; the first file opened under it fails instead.
+ */
+CHARRA_RC charra_io_claim_state_dir(const char* const* const dirs,
+        const char* const lock_file_path, const char* const role);
+
 #endif /* IO_UTIL_H */
