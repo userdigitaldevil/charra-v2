@@ -82,6 +82,11 @@ void coap_attest_handler(struct coap_resource_t* resource,
     TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
     TPM2B_ATTEST* attest_buf = NULL;
     TPMT_SIGNATURE* signature = NULL;
+    /* Here for the same reason: charra_unmarshal_attestation_request()
+     * heap-allocates req.event_log_path, which the cleanup below frees, and
+     * the 'goto error's above this point would otherwise skip the
+     * initializer and leave that pointer indeterminate. */
+    msg_attestation_request_dto req = {0};
     /* Set true only right before falling through to the cleanup label on
      * the success path below -- every 'goto error' skips that line, so
      * this distinguishes "evidence actually sent" from any of the many
@@ -139,7 +144,6 @@ void coap_attest_handler(struct coap_resource_t* resource,
 
     /* unmarshal data */
     charra_log_info("[" LOG_NAME "] Parsing received CBOR data.");
-    msg_attestation_request_dto req = {0};
     if ((charra_r = charra_unmarshal_attestation_request(
                  data_len, data, &req)) != CHARRA_RC_SUCCESS) {
         charra_log_error(
@@ -484,6 +488,7 @@ error:
     charra_log_info("[" LOG_NAME "] +----------------------------+");
 
     /* free heap objects */
+    charra_free_if_not_null(req.event_log_path);
     charra_free_if_not_null(signature);
     charra_free_if_not_null(attest_buf);
     charra_free_if_not_null(public_key);
