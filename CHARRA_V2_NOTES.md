@@ -371,8 +371,12 @@ actual order `run_one_attestation_cycle()` runs things in, for one cycle
    rather than attesting against endpoints it never resolved.
 2. **Attester identity provisioning, once ever** —
    `ensure_attester_identity_provisioned()`: FETCH the Attester's EK
-   cert/AK public key/AK name, validate the EK chain locally, sign +
-   deliver an AK certificate under RP's own CA (DELIVER_RP). Gated by a
+   cert/AK public key/AK name, validate the EK chain locally, then
+   **challenge TPM_a before issuing anything** — MakeCredential a fresh
+   32-byte secret against EK_a bound to AK_a's name, ACTIVATE it at the
+   Attester, and compare the echoed secret in constant time. Only on a
+   match does the RP sign, record the issuance, and DELIVER_RP the
+   certificate (in the clear; possession is already proven). Gated by a
    cache file; every call after the first no-ops. (The Verifier-CA leg is
    deferred to step 4's per-Verifier phase — see "RP AK certification is
    now independent per-Verifier" / "`/certify_ak_of_attester`" above.)

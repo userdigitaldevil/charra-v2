@@ -146,11 +146,13 @@ void coap_certify_ak_of_attester_handler(
         }
         response_code = COAP_RESPONSE_CODE_CONTENT;
     } else if (req.kind == CHARRA_CERTIFY_AK_OF_ATTESTER_ACTIVATE) {
-        /* A Verifier's /certify_ak CHALLENGE, relayed. Activating it proves
-         * this TPM holds the EK/AK; the RP relays the secret back as that
-         * Verifier's CONFIRM. */
+        /* A CA's challenge: either a Verifier's /certify_ak CHALLENGE that
+         * the RP relayed, or the RP's own as CA. The two are
+         * indistinguishable here and deliberately so -- activating proves
+         * this TPM holds the EK/AK, and the recovered secret goes back to
+         * whichever CA asked. */
         charra_log_info("[" LOG_NAME "] /certify_ak_of_attester: ACTIVATE -- "
-                        "recovering the Verifier's challenge secret.");
+                        "recovering the CA's challenge secret.");
 
         ESYS_CONTEXT* esys_ctx = NULL;
         TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
@@ -217,58 +219,12 @@ void coap_certify_ak_of_attester_handler(
                         "persisting delivered AK certificate.",
                 leg_name);
 
-        uint8_t* ak_cert_der = NULL;
-
-        if (is_rp_leg) {
-            /* RP is the CA on this leg and still uses the one-shot wrapped
-             * form, so unwrapping here is what proves EK/AK possession. */
-            ESYS_CONTEXT* esys_ctx = NULL;
-            TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
-            ESYS_TR ek_handle = ESYS_TR_NONE;
-            ESYS_TR ak_handle = ESYS_TR_NONE;
-            TPM2B_NAME* ak_name = NULL;
-            if ((charra_r = attester_open_tpm_and_load_ak(&esys_ctx, &tcti_ctx,
-                         &ek_handle, &ak_handle, &ak_name, NULL)) !=
-                    CHARRA_RC_SUCCESS) {
-                charra_log_error(
-                        "[" LOG_NAME "] /certify_ak_of_attester: could not "
-                        "open TPM connection for ActivateCredential.");
-                goto cleanup;
-            }
-            Esys_Free(ak_name);
-
-            TPM2B_DIGEST* credential = NULL;
-            charra_r = charra_identity_key_mgr_activate_credential(esys_ctx,
-                    ak_handle, ek_handle, (TPM2B_ID_OBJECT*)req.credential_blob,
-                    (TPM2B_ENCRYPTED_SECRET*)req.wrapped_secret, &credential);
-            Esys_FlushContext(esys_ctx, ak_handle);
-            Esys_FlushContext(esys_ctx, ek_handle);
-            Esys_Finalize(&esys_ctx);
-            Tss2_TctiLdr_Finalize(&tcti_ctx);
-            if (charra_r != CHARRA_RC_SUCCESS) {
-                charra_log_error("[" LOG_NAME
-                                 "] /certify_ak_of_attester: ActivateCredential "
-                                 "failed -- this AK is not genuinely bound to "
-                                 "this EK.");
-                response_code = COAP_RESPONSE_CODE_UNAUTHORIZED;
-                goto cleanup;
-            }
-
-            charra_r = charra_crypto_aes256gcm_decrypt(credential->buffer,
-                    req.ak_certificate, req.ak_certificate_len,
-                    req.aes_gcm_nonce, req.aes_gcm_tag, &ak_cert_der);
-            Esys_Free(credential);
-            if (charra_r != CHARRA_RC_SUCCESS) {
-                charra_log_error("[" LOG_NAME "] /certify_ak_of_attester: could "
-                                 "not decrypt delivered AK certificate.");
-                goto cleanup;
-            }
-        }
-
-        charra_r = charra_io_write_file(out_path,
-                is_rp_leg ? ak_cert_der : req.ak_certificate,
-                req.ak_certificate_len);
-        free(ak_cert_der);
+        /* Both legs now deliver the certificate in the clear: each CA
+         * proved possession on its own ACTIVATE leg before signing, so
+         * there is nothing left for an unwrap here to establish. */
+        (void)is_rp_leg;
+        charra_r = charra_io_write_file(
+                out_path, req.ak_certificate, req.ak_certificate_len);
         if (charra_r != CHARRA_RC_SUCCESS) {
             charra_log_error("[" LOG_NAME "] /certify_ak_of_attester: could "
                              "not persist delivered AK certificate.");

@@ -27,6 +27,7 @@
 #include "../core/charra_identity_key_mgr.h"
 #include "../core/charra_key_mgr.h"
 #include "../core/charra_marshaling.h"
+#include "../util/charra_util.h"
 #include "../util/crypto_util.h"
 #include "../util/coap_util.h"
 #include "../util/io_util.h"
@@ -35,6 +36,18 @@
 #include "rp_shared.h"
 
 #define LOG_NAME "relying party"
+
+/** Constant-time equality -- the secret is a shared authenticator, so its
+ * comparison must not leak how far it matched. Mirrors the Verifier's own
+ * check on the CONFIRM leg (verifier_certify_ak.c). */
+static bool constant_time_equal(
+        const uint8_t* a, const uint8_t* b, size_t len) {
+    uint8_t diff = 0;
+    for (size_t i = 0; i < len; i++) {
+        diff |= (uint8_t)(a[i] ^ b[i]);
+    }
+    return diff == 0;
+}
 
 
 
@@ -248,7 +261,144 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
             (TPM2B_PUBLIC*)identity.ak_public_key;
     TPM2B_NAME* attester_ak_name = (TPM2B_NAME*)identity.ak_name;
 
-    /* --- 3. RP-CA track: sign, wrap, deliver -------------------------- */
+    /* --- 3. RP-CA track: challenge the Attester's TPM BEFORE issuing.
+     *
+     * The RP is the CA on this leg, so it runs the same shape the Verifier
+     * runs on /certify_ak: MakeCredential a fresh random secret against
+     * EK_a, bound to AK_a's name; only TPM_a can recover it; the Attester
+     * echoes it back. Nothing is signed until that echo matches, so the RP
+     * -- not just the Attester -- learns whether possession was proven, and
+     * its issuance ledger can never record a certificate that no TPM ever
+     * proved a claim to.
+     *
+     * (Previously this leg sealed the finished certificate to EK_a instead:
+     * cryptographically equivalent binding, but the proof was observable
+     * only to the Attester, and the ledger write happened first regardless.)
+     * ------------------------------------------------------------------ */
+    uint8_t rp_challenge_secret[CHARRA_CERTIFY_AK_SECRET_LEN] = {0};
+    if ((result = charra_random_bytes(
+                 sizeof(rp_challenge_secret), rp_challenge_secret)) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not generate the RP-CA "
+                         "challenge secret.");
+        charra_free_if_not_null(identity.ek_certificate);
+        pthread_mutex_unlock(&attester_identity_provision_mutex);
+        return result;
+    }
+
+    {
+        pthread_mutex_lock(&rp_tpm_mutex);
+        ESYS_CONTEXT* mk_esys_ctx = NULL;
+        TSS2_TCTI_CONTEXT* mk_tcti_ctx = NULL;
+        if (Tss2_TctiLdr_Initialize(getenv("CHARRA_TCTI"), &mk_tcti_ctx) !=
+                        TSS2_RC_SUCCESS ||
+                Esys_Initialize(&mk_esys_ctx, mk_tcti_ctx, NULL) !=
+                        TSS2_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Could not open a TPM connection "
+                             "for the RP-CA MakeCredential.");
+            if (mk_esys_ctx != NULL) {
+                Esys_Finalize(&mk_esys_ctx);
+            }
+            if (mk_tcti_ctx != NULL) {
+                Tss2_TctiLdr_Finalize(&mk_tcti_ctx);
+            }
+            pthread_mutex_unlock(&rp_tpm_mutex);
+            charra_free_if_not_null(identity.ek_certificate);
+            pthread_mutex_unlock(&attester_identity_provision_mutex);
+            return CHARRA_RC_ERROR;
+        }
+
+        TPM2B_DIGEST rp_credential = {0};
+        rp_credential.size = sizeof(rp_challenge_secret);
+        memcpy(rp_credential.buffer, rp_challenge_secret,
+                sizeof(rp_challenge_secret));
+
+        TPM2B_ID_OBJECT* rp_credential_blob = NULL;
+        TPM2B_ENCRYPTED_SECRET* rp_wrapped_secret = NULL;
+        result = charra_tpm_make_credential_for_ak(mk_esys_ctx,
+                &attester_ek_public_key, attester_ak_name, &rp_credential,
+                &rp_credential_blob, &rp_wrapped_secret);
+        Esys_Finalize(&mk_esys_ctx);
+        Tss2_TctiLdr_Finalize(&mk_tcti_ctx);
+        pthread_mutex_unlock(&rp_tpm_mutex);
+        if (result != CHARRA_RC_SUCCESS) {
+            charra_log_error(
+                    "[" LOG_NAME "] Esys_MakeCredential (RP-CA leg) failed.");
+            charra_free_if_not_null(identity.ek_certificate);
+            pthread_mutex_unlock(&attester_identity_provision_mutex);
+            return result;
+        }
+
+        /* Same ACTIVATE leg the Verifier relay uses -- the Attester's
+         * handler does not care which CA built the challenge. */
+        msg_certify_ak_of_attester_request_dto activate_req = {0};
+        activate_req.kind = CHARRA_CERTIFY_AK_OF_ATTESTER_ACTIVATE;
+        activate_req.credential_blob_len = sizeof(*rp_credential_blob);
+        memcpy(activate_req.credential_blob, rp_credential_blob,
+                activate_req.credential_blob_len);
+        activate_req.wrapped_secret_len = sizeof(*rp_wrapped_secret);
+        memcpy(activate_req.wrapped_secret, rp_wrapped_secret,
+                activate_req.wrapped_secret_len);
+        Esys_Free(rp_credential_blob);
+        Esys_Free(rp_wrapped_secret);
+
+        uint8_t* activate_buf = NULL;
+        uint32_t activate_buf_len = 0;
+        result = charra_marshal_certify_ak_of_attester_request(
+                &activate_req, &activate_buf_len, &activate_buf);
+        if (result != CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Could not marshal the RP-CA "
+                             "ACTIVATE request.");
+            charra_free_if_not_null(identity.ek_certificate);
+            pthread_mutex_unlock(&attester_identity_provision_mutex);
+            return result;
+        }
+
+        activate_credential_rc = CHARRA_RC_ERROR;
+        memset(&activate_credential_response, 0,
+                sizeof(activate_credential_response));
+        result = rp_coap_exchange(&(rp_coap_request){
+                .host = attester_host, .port = attester_port,
+                .uri_path = "certify_ak_of_attester",
+                .body = activate_buf, .body_len = activate_buf_len,
+                .on_response = coap_activate_credential_response_handler,
+                .response_pending = &processing_activate_credential_response,
+                .timeout_seconds = attester_response_timeout,
+                .dtls_rpk_peer_public_key_path =
+                        dtls_rpk_attester_public_key_path,
+            });
+        free(activate_buf);
+        if (result == CHARRA_RC_SUCCESS &&
+                activate_credential_rc != CHARRA_RC_SUCCESS) {
+            result = activate_credential_rc;
+        }
+        if (result != CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Attester could not activate the "
+                             "RP-CA challenge.");
+            charra_free_if_not_null(identity.ek_certificate);
+            pthread_mutex_unlock(&attester_identity_provision_mutex);
+            return result;
+        }
+
+        /* Fail-closed: a wrong length is a mismatch, not a short compare. */
+        if (activate_credential_response.secret_len !=
+                        sizeof(rp_challenge_secret) ||
+                !constant_time_equal(activate_credential_response.secret,
+                        rp_challenge_secret, sizeof(rp_challenge_secret))) {
+            charra_log_error(
+                    "[" LOG_NAME "] Attester did NOT echo the RP-CA challenge "
+                    "secret -- AK_a is not bound to EK_a in that TPM. "
+                    "Refusing to certify it.");
+            charra_free_if_not_null(identity.ek_certificate);
+            pthread_mutex_unlock(&attester_identity_provision_mutex);
+            return CHARRA_RC_VERIFICATION_FAILED;
+        }
+        charra_log_info("[" LOG_NAME "] Attester echoed the RP-CA challenge "
+                        "secret; ActivateCredential proves AK_a lives in the "
+                        "TPM that owns EK_a.");
+    }
+
+    /* --- 4. Possession proven: now sign and deliver -------------------- */
     /* Validity runs from now, so a long-running RP always issues a full
      * window rather than an ever-shrinking one. */
     time_t rp_cert_issued_at = time(NULL);
@@ -324,93 +474,6 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
             "(%u byte(s)).",
             rp_signed_cert_der_len);
 
-    uint8_t rp_aes_key[CHARRA_AES256GCM_KEY_LEN] = {0};
-    {
-        mbedtls_ctr_drbg_context ctr_drbg;
-        mbedtls_entropy_context entropy;
-        if ((result = charra_crypto_seeded_rng_init(&ctr_drbg, &entropy)) !=
-                CHARRA_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME "] Could not seed RNG.");
-            charra_free_if_not_null(rp_signed_cert_der);
-            charra_free_if_not_null(identity.ek_certificate);
-            pthread_mutex_unlock(&attester_identity_provision_mutex);
-            return result;
-        }
-        int mbedtls_r = mbedtls_ctr_drbg_random(
-                &ctr_drbg, rp_aes_key, sizeof(rp_aes_key));
-        charra_crypto_seeded_rng_free(&ctr_drbg, &entropy);
-        if (mbedtls_r != 0) {
-            charra_log_error(
-                    "[" LOG_NAME "] Could not generate AES key.");
-            charra_free_if_not_null(rp_signed_cert_der);
-            charra_free_if_not_null(identity.ek_certificate);
-            pthread_mutex_unlock(&attester_identity_provision_mutex);
-            return CHARRA_RC_CRYPTO_ERROR;
-        }
-    }
-
-    uint8_t rp_aes_gcm_nonce[CHARRA_AES256GCM_NONCE_LEN] = {0};
-    uint8_t rp_aes_gcm_tag[CHARRA_AES256GCM_TAG_LEN] = {0};
-    uint8_t* rp_cert_ciphertext = NULL;
-    if ((result = charra_crypto_aes256gcm_encrypt(rp_aes_key, rp_signed_cert_der,
-                 rp_signed_cert_der_len, rp_aes_gcm_nonce, rp_aes_gcm_tag,
-                 &rp_cert_ciphertext)) != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not encrypt RP-signed AK "
-                         "certificate.");
-        charra_free_if_not_null(rp_signed_cert_der);
-        charra_free_if_not_null(identity.ek_certificate);
-        pthread_mutex_unlock(&attester_identity_provision_mutex);
-        return result;
-    }
-
-    pthread_mutex_lock(&rp_tpm_mutex);
-    ESYS_CONTEXT* esys_ctx = NULL;
-    TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
-    TSS2_RC tss_r = 0;
-    if ((tss_r = Tss2_TctiLdr_Initialize(getenv("CHARRA_TCTI"), &tcti_ctx)) !=
-            TSS2_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Tss2_TctiLdr_Initialize.");
-        pthread_mutex_unlock(&rp_tpm_mutex);
-        charra_free_if_not_null(rp_cert_ciphertext);
-        charra_free_if_not_null(rp_signed_cert_der);
-        charra_free_if_not_null(identity.ek_certificate);
-        pthread_mutex_unlock(&attester_identity_provision_mutex);
-        return CHARRA_RC_ERROR;
-    }
-    if ((tss_r = Esys_Initialize(&esys_ctx, tcti_ctx, NULL)) !=
-            TSS2_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Esys_Initialize.");
-        Tss2_TctiLdr_Finalize(&tcti_ctx);
-        pthread_mutex_unlock(&rp_tpm_mutex);
-        charra_free_if_not_null(rp_cert_ciphertext);
-        charra_free_if_not_null(rp_signed_cert_der);
-        charra_free_if_not_null(identity.ek_certificate);
-        pthread_mutex_unlock(&attester_identity_provision_mutex);
-        return CHARRA_RC_ERROR;
-    }
-
-    TPM2B_DIGEST rp_credential = {0};
-    rp_credential.size = sizeof(rp_aes_key);
-    memcpy(rp_credential.buffer, rp_aes_key, sizeof(rp_aes_key));
-
-    TPM2B_ID_OBJECT* rp_credential_blob = NULL;
-    TPM2B_ENCRYPTED_SECRET* rp_wrapped_secret = NULL;
-    result = charra_tpm_make_credential_for_ak(esys_ctx, &attester_ek_public_key,
-            attester_ak_name, &rp_credential, &rp_credential_blob,
-            &rp_wrapped_secret);
-    Esys_Finalize(&esys_ctx);
-    Tss2_TctiLdr_Finalize(&tcti_ctx);
-    pthread_mutex_unlock(&rp_tpm_mutex);
-    if (result != CHARRA_RC_SUCCESS) {
-        charra_log_error(
-                "[" LOG_NAME "] Esys_MakeCredential (RP-CA leg) failed.");
-        charra_free_if_not_null(rp_cert_ciphertext);
-        charra_free_if_not_null(rp_signed_cert_der);
-        charra_free_if_not_null(identity.ek_certificate);
-        pthread_mutex_unlock(&attester_identity_provision_mutex);
-        return result;
-    }
-
     /* --- record issuance in RP's own ledger, independent of any
      * Verifier's ------------------------------------------------------- */
     uint8_t attester_ek_fingerprint[32] = {0};
@@ -436,26 +499,16 @@ CHARRA_RC ensure_attester_identity_provisioned(void) {
     /* --- deliver to the Attester via /certify_ak_of_attester DELIVER_RP */
     msg_certify_ak_of_attester_request_dto deliver_rp_req = {0};
     deliver_rp_req.kind = CHARRA_CERTIFY_AK_OF_ATTESTER_DELIVER_RP;
-    deliver_rp_req.credential_blob_len = sizeof(*rp_credential_blob);
-    memcpy(deliver_rp_req.credential_blob, rp_credential_blob,
-            deliver_rp_req.credential_blob_len);
-    deliver_rp_req.wrapped_secret_len = sizeof(*rp_wrapped_secret);
-    memcpy(deliver_rp_req.wrapped_secret, rp_wrapped_secret,
-            deliver_rp_req.wrapped_secret_len);
-    memcpy(deliver_rp_req.aes_gcm_nonce, rp_aes_gcm_nonce,
-            sizeof(rp_aes_gcm_nonce));
-    memcpy(deliver_rp_req.aes_gcm_tag, rp_aes_gcm_tag, sizeof(rp_aes_gcm_tag));
+    /* In the clear, like DELIVER_VERIFIER: possession was already proven by
+     * the ACTIVATE leg above, so sealing the certificate a second time would
+     * add nothing. A certificate is public data. */
     deliver_rp_req.ak_certificate_len = rp_signed_cert_der_len;
-    deliver_rp_req.ak_certificate = rp_cert_ciphertext;
-
-    Esys_Free(rp_credential_blob);
-    Esys_Free(rp_wrapped_secret);
+    deliver_rp_req.ak_certificate = rp_signed_cert_der;
 
     uint8_t* deliver_rp_buf = NULL;
     uint32_t deliver_rp_buf_len = 0;
     result = charra_marshal_certify_ak_of_attester_request(
             &deliver_rp_req, &deliver_rp_buf_len, &deliver_rp_buf);
-    charra_free_if_not_null(rp_cert_ciphertext);
     if (result != CHARRA_RC_SUCCESS) {
         charra_log_error(
                 "[" LOG_NAME "] Could not marshal DELIVER_RP request.");
