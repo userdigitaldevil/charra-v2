@@ -272,6 +272,12 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
         CHARRA_TCTI="$ATTESTER_TCTI" ./keys/gen-trusted-keys.sh
     fi
 
+    # Wipe logs/ and recreate it, every run. Not tidiness: the per-Verifier
+    # files are named by port, so a 3-Verifier run would otherwise leave
+    # verifier_5687.log and verifier_5688.log lying around from an earlier
+    # 5-Verifier one, looking exactly like part of this run. It also means
+    # logs/ exists at all on a fresh clone, which the redirects below need.
+    rm -rf logs && mkdir -p logs
 
 
     export LOG_LEVEL_CHARRA="$LOG_LEVEL"
