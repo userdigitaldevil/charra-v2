@@ -30,7 +30,10 @@
 #   VERIFIER_QUALIFICATION_VALIDITY=20 RP_CYCLES=8 ./run_daemon.sh
 #
 # Options:
-#   --keep-state   do NOT reset the TPMs (see RESET_TPM below)
+#   --keep-state   keep each TPM NVChip instead of wiping it, so both AKs --
+#                  and therefore keys/trusted_keys.txt -- survive the run.
+#                  State lives in .tpm-state/ under this checkout, not in the
+#                  container, so it outlives the --rm container.
 #   -h, --help     this message
 #
 set -euo pipefail
@@ -73,6 +76,11 @@ VERIFIER_QUALIFICATION_VALIDITY="${VERIFIER_QUALIFICATION_VALIDITY:-180}"  # --q
 TWO_TPMS="${TWO_TPMS:-1}"
 ATTESTER_TPM_PORT="${ATTESTER_TPM_PORT:-2321}"
 RP_TPM_PORT="${RP_TPM_PORT:-2325}"
+# Each simulator keeps its NVChip here, under the bind-mounted checkout rather
+# than in the container /tmp. The container is --rm, so /tmp dies with it --
+# state kept there could not survive a run, which made --keep-state
+# meaningless. Repo-relative, and gitignored.
+TPM_STATE_DIR="${TPM_STATE_DIR:-.tpm-state}"
 
 # --- Topology ---------------------------------------------------------------
 VERIFIER_START_PORT="${VERIFIER_START_PORT:-5684}"   # first Verifier port; rest follow
@@ -92,10 +100,11 @@ ATTESTER_EXTRA_ARGS="${ATTESTER_EXTRA_ARGS:-}"
 IMAGE="${IMAGE:-fraunhofer-sit/charra-dev-env:1.9.0}"
 CONTAINER_NAME="${CONTAINER_NAME:-charra-daemon}"
 REBUILD="${REBUILD:-1}"          # 1 = make clean && make -j inside the container
-# 1 = wipe each TPM's NVChip and TPM2_Startup(CLEAR) it. Note this changes
-# every AK, which is why the trust anchor is regenerated afterwards,
-# in-container. (TPM2_Startup alone would NOT change them -- deleting the
-# NVChip is what re-randomizes the hierarchy seeds.)
+# 1 = wipe each TPM's NVChip, which re-randomizes the hierarchy seeds and so
+# changes every AK -- which is why the trust anchor is regenerated afterwards.
+# 0 (--keep-state) keeps NVChip, so the AKs come back identical.
+# TPM2_Startup(CLEAR) runs either way and does NOT affect this: it resets PCRs
+# and leaves the seeds alone.
 RESET_TPM="${RESET_TPM:-1}"
 
 # =============================================================================
@@ -121,6 +130,18 @@ warn() { printf '\033[33mWARNING:\033[0m %s\n' "$1" >&2; warned=1; }
 
 if [ "$RP_VERIFIERS" -lt 1 ] || [ "$RP_VERIFIERS" -gt 10 ]; then
     echo "ERROR: RP_VERIFIERS must be 1..10 (got $RP_VERIFIERS)." >&2; exit 1
+fi
+# Each tpm_server binds PORT and PORT+1, so the two must differ by at least 2.
+# Overlapping them makes the second simulator die with "Address already in use"
+# and the run then fails much later, against a TPM that is simply not there.
+if [ "$TWO_TPMS" -eq 1 ]; then
+    gap=$(( ATTESTER_TPM_PORT > RP_TPM_PORT \
+            ? ATTESTER_TPM_PORT - RP_TPM_PORT : RP_TPM_PORT - ATTESTER_TPM_PORT ))
+    if [ "$gap" -lt 2 ]; then
+        echo "ERROR: ATTESTER_TPM_PORT ($ATTESTER_TPM_PORT) and RP_TPM_PORT ($RP_TPM_PORT) must" >&2
+        echo "       differ by at least 2 -- each simulator binds PORT and PORT+1." >&2
+        exit 1
+    fi
 fi
 if [ "$RP_INTERVAL" -gt "$VERIFIER_QUALIFICATION_VALIDITY" ]; then
     warn "RP_INTERVAL ($RP_INTERVAL s) is longer than the qualification window
@@ -196,6 +217,7 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
   -e TWO_TPMS="$TWO_TPMS" \
   -e ATTESTER_TPM_PORT="$ATTESTER_TPM_PORT" \
   -e RP_TPM_PORT="$RP_TPM_PORT" \
+  -e TPM_STATE_DIR="$TPM_STATE_DIR" \
   -e VERIFIER_START_PORT="$VERIFIER_START_PORT" \
   -e VERIFIER_HOST="$VERIFIER_HOST" \
   -e LOG_LEVEL="$LOG_LEVEL" \
@@ -219,29 +241,52 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
         RP_TCTI="$ATTESTER_TCTI"
     fi
 
-    # Each simulator gets its own directory: tpm_server writes NVChip into
-    # its working directory, so a shared one means the two corrupt each
-    # other -- surfacing much later as keys that stop matching the anchor.
+    # NVChip lives under the mounted checkout, so it outlives this --rm
+    # container and RESET_TPM=0 can genuinely keep the AKs across runs.
+    ATT_DIR="$HOME/charra/$TPM_STATE_DIR/attester"
+    RP_DIR="$HOME/charra/$TPM_STATE_DIR/rp"
+    [ "$TWO_TPMS" = "1" ] || RP_DIR="$ATT_DIR"
+
     start_tpm() {   # $1 = port, $2 = state dir
         mkdir -p "$2"
+        # Deleting NVChip is what discards the hierarchy seeds, and therefore
+        # the AKs. TPM2_Startup(CLEAR) below does NOT -- it resets PCRs and
+        # leaves the seeds alone -- so this line, not that one, is what
+        # RESET_TPM actually controls.
         [ "$RESET_TPM" = "1" ] && rm -f "$2/NVChip"
         ( cd "$2" && tpm_server -port "$1" > "/tmp/tpm_server_$1.log" 2>&1 & )
     }
 
-    if [ "$RESET_TPM" = "1" ] || ! pgrep tpm_server >/dev/null; then
-        pkill tpm_server || true
-        sleep 1
-        start_tpm "$ATTESTER_TPM_PORT" /tmp/tpm_attester
-        [ "$TWO_TPMS" = "1" ] && start_tpm "$RP_TPM_PORT" /tmp/tpm_rp
-        sleep 3
-        # Every TPM needs its own TPM2_Startup: one that has power but was
-        # never started rejects everything with 0x100 (TPM_RC_INITIALIZE),
-        # and the tools report that as an ordinary command failure.
-        TPM2TOOLS_TCTI="$ATTESTER_TCTI" tpm2_startup --clear
-        if [ "$TWO_TPMS" = "1" ]; then
-            TPM2TOOLS_TCTI="$RP_TCTI" tpm2_startup --clear
-        fi
+    # The image entrypoint starts its OWN tpm_server on the default port,
+    # with its own NVChip in /tmp, and never issues TPM2_Startup. It is never
+    # the simulator we want, so it always goes. Killing it is unrelated to
+    # keeping state: that is decided by whether NVChip is deleted above.
+    #
+    # The previous guard asked "is A tpm_server running" and so concluded, on
+    # every single run, that ours were already up -- they never were.
+    pkill tpm_server || true
+    sleep 1
+
+    start_tpm "$ATTESTER_TPM_PORT" "$ATT_DIR"
+    [ "$TWO_TPMS" = "1" ] && start_tpm "$RP_TPM_PORT" "$RP_DIR"
+    sleep 3
+
+    # Every TPM needs its own TPM2_Startup: one with power but no startup
+    # rejects everything with 0x100 (TPM_RC_INITIALIZE), which the tools
+    # report as an ordinary command failure. CLEAR resets PCRs but preserves
+    # the seeds, so it is correct whether or not NVChip was kept.
+    TPM2TOOLS_TCTI="$ATTESTER_TCTI" tpm2_startup --clear
+    if [ "$TWO_TPMS" = "1" ]; then
+        TPM2TOOLS_TCTI="$RP_TCTI" tpm2_startup --clear
     fi
+
+    # Refuse to continue on a TPM that cannot answer -- otherwise the failure
+    # surfaces much later as an unexplained provisioning error.
+    for p in $ATTESTER_TPM_PORT $([ "$TWO_TPMS" = "1" ] && echo $RP_TPM_PORT); do
+        TPM2TOOLS_TCTI="mssim:host=127.0.0.1,port=$p" tpm2_pcrread sha256:0 >/dev/null 2>&1 \
+            || { echo "ERROR: TPM on port $p is not answering." >&2; exit 1; }
+    done
+
     cd ~/charra
 
     if [ "$REBUILD" = "1" ]; then

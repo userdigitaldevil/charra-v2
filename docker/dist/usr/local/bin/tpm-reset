@@ -1,25 +1,51 @@
 #!/bin/sh
-cd /tmp
+# Reset a TPM simulator: kill it, wipe its NVChip, restart, TPM2_Startup.
+#
+# Takes an optional PORT (default 2321). CHARRA runs one simulator per role
+# -- attester on 2321, RP on 2325 -- so a bare `tpm-reset` resets only the
+# first of them. Pass the port to reach the other:
+#
+#     tpm-reset          # attester TPM on 2321
+#     tpm-reset 2325     # RP TPM on 2325
+#
+# Note this resets the simulator started by THIS image's entrypoint, whose
+# NVChip lives in /tmp. run_daemon.sh does not use it: it keeps each NVChip
+# under the checkout so state can survive the container, and starts and
+# resets both simulators itself.
 
-## kill TPM simulator
-/usr/bin/pkill tpm_server
+PORT="${1:-2321}"
+DIR="${2:-/tmp}"
+
+cd "$DIR" || exit 1
+
+## kill only the simulator on this port, so resetting one does not take the
+## other down with it
+/usr/bin/pkill -f "tpm_server -port $PORT" 2>/dev/null
+[ "$PORT" = "2321" ] && /usr/bin/pkill -x tpm_server 2>/dev/null
 
 ## remove state file of TPM simulator
 /bin/rm -f NVChip
 
 ## start TPM simulator in background
-(/usr/local/bin/tpm_server > /dev/null &)
+if [ "$PORT" = "2321" ]; then
+    (/usr/local/bin/tpm_server > /dev/null &)
+else
+    (/usr/local/bin/tpm_server -port "$PORT" > /dev/null &)
+fi
 
-## wait for TPM simulator to start
-while ! pidof tpm_server >> /dev/null ; do
+## wait for it to accept connections
+i=0
+while [ $i -lt 20 ]; do
+    if /usr/bin/env TPM2TOOLS_TCTI_NAME=socket \
+        TPM2TOOLS_SOCKET_ADDRESS=127.0.0.1 \
+        TPM2TOOLS_SOCKET_PORT="$PORT" \
+        /usr/local/bin/tpm2_startup --clear 2>/dev/null; then
+        echo "TPM simulator on port $PORT reset and started."
+        exit 0
+    fi
+    i=$((i + 1))
     sleep 1
 done
-## additional sleep to compensate for the starting time of the TPM simulator
-sleep 1 
 
-## execute TPM startup
-/usr/bin/env TPM2TOOLS_TCTI_NAME=socket \
-    TPM2TOOLS_SOCKET_ADDRESS=127.0.0.1 \
-    TPM2TOOLS_SOCKET_PORT=2321 \
-    /usr/local/bin/tpm2_startup --clear
-
+echo "tpm-reset: TPM on port $PORT did not come up." >&2
+exit 1

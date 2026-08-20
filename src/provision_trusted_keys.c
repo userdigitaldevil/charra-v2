@@ -158,7 +158,12 @@ int main(int argc, char** argv) {
                 print_usage(argv[0]);
                 return EXIT_FAILURE;
             }
+        } else if (strcmp(argv[i], "--help") == 0 ||
+                   strcmp(argv[i], "-h") == 0) {
+            print_usage(argv[0]);
+            return EXIT_SUCCESS;
         } else {
+            fprintf(stderr, "unrecognised option '%s'\n\n", argv[i]);
             print_usage(argv[0]);
             return EXIT_FAILURE;
         }

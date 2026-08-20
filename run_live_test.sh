@@ -138,14 +138,22 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
     # "./start_verifiers.sh 3" would otherwise leave a three-row config here
     # and the sweep would fail at 4 and 5 Verifiers with "Verifier ID not
     # found" rather than anything pointing at the config.
-    for i in 1 2 3 4 5; do
+    # Derived from the RP binary itself, not hardcoded: the sweep runs
+    # 1..RP_MAX_SWEEP_VERIFIERS, and starting fewer Verifiers than that makes
+    # the sweep hang on ports nobody is listening on.
+    SWEEP=$(grep -oE "define RP_MAX_SWEEP_VERIFIERS [0-9]+" src/rp/rp_shared.h \
+            | grep -oE "[0-9]+$")
+    : "${SWEEP:=5}"
+    echo "--- sweep width from rp_shared.h: $SWEEP Verifier(s)"
+    for i in $(seq 1 "$SWEEP"); do
       echo "$i 127.0.0.1 $((5683 + i))"
     done > verifiers_config.txt
 
     LOG_LEVEL_CHARRA=DEBUG bin/trust_manager > logs/trust_manager.log 2>&1 &
     LOG_LEVEL_CHARRA=DEBUG CHARRA_TCTI="$ATTESTER_TCTI" \
         bin/attester > logs/attester.log 2>&1 &
-    for p in 5684 5685 5686 5687 5688; do
+    for i in $(seq 1 "$SWEEP"); do
+      p=$((5683 + i))
       LOG_LEVEL_CHARRA=DEBUG bin/verifier --port $p > logs/verifier_$p.log 2>&1 &
     done
     sleep 2

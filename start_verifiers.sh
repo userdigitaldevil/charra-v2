@@ -115,6 +115,15 @@ if [ ${#VERIFIER_ARGS[@]} -gt 0 ]; then
     echo "Passing to every Verifier: ${VERIFIER_ARGS[*]}"
 fi
 
+# Per-Verifier logs are named by port, so a 3-Verifier run would otherwise
+# leave verifier_5687.log and verifier_5688.log lying around from an earlier
+# 5-Verifier one, looking exactly like part of this run. run_daemon.sh wipes
+# logs/ wholesale before calling this, but this script is also run directly.
+if [ -n "$LOGDIR" ]; then
+    mkdir -p "$LOGDIR"
+    rm -f "$LOGDIR"/verifier_*.log
+fi
+
 for ((i = 0; i < COUNT; i++)); do
     PORT=$((START_PORT + i))
     if [ -n "$LOGDIR" ]; then

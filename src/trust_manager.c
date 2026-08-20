@@ -44,8 +44,33 @@ static void coap_handler(struct coap_resource_t* resource,
                                 const struct coap_string_t* query,
                                 struct coap_pdu_t* response);
 
-int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED) {
+int main(int argc, char** argv) {
     int result = EXIT_SUCCESS;
+
+    /* No options to parse, but --help must still answer. Without this it
+     * fell through and started the server, so `trust_manager --help` hung
+     * at a prompt that never returns -- the one thing --help must not do.
+     * Any unrecognised argument is rejected rather than ignored, so a typo
+     * is not silently swallowed by a daemon that then runs anyway. */
+    for (int i = 1; i < argc; i++) {
+        bool asked_for_help = strcmp(argv[i], "--help") == 0 ||
+                              strcmp(argv[i], "-h") == 0;
+        printf("\nUsage: trust_manager\n"
+               "\n"
+               "Resolves Verifier IDs to host:port from ./verifiers_config.txt\n"
+               "and serves them on /get_verifiers. Takes no options: the port\n"
+               "is compiled in (%d) and the file path is fixed.\n"
+               "\n"
+               "     --help, -h    Print this message.\n"
+               "\n"
+               "Opens no TPM.\n",
+                port);
+        if (!asked_for_help) {
+            fprintf(stderr, "\ntrust_manager: unrecognised option '%s'.\n",
+                    argv[i]);
+        }
+        return asked_for_help ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
 
     coap_context_t* coap_context = NULL;
     coap_endpoint_t* coap_endpoint = NULL;
