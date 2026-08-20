@@ -44,9 +44,10 @@ charra_dtls_config dtls_config = {
 };
 
 /* The trust anchor both /appraise and /qualify_submit consult lives at
- * charra_trusted_keys.h's default path. This Verifier issues nothing, so
- * it holds no CA key and keeps no issuance ledger; the one thing it does
- * write is the shared qualified-RP list below. */
+ * charra_trusted_keys.h's default path. It is read-only here and written
+ * offline by bin/provision_trusted_keys; the one file this Verifier
+ * writes that its siblings also read is the shared qualified-RP list
+ * below. */
 
 /* Per-round /appraise timings, appended by coap_appraise_handler(). Per
  * port: sibling Verifiers share one working directory and would otherwise
@@ -60,7 +61,8 @@ char* qualified_rps_file_path = VERIFIER_QUALIFIED_RPS_DEFAULT_PATH;
 
 /* Qualification window this Verifier grants, settable with
  * --qualification-validity. Pushed into charra_rp_qualification.c after
- * CLI parsing; must match the RP's own flag (see that module's header). */
+ * CLI parsing, which stamps it into the deadline recorded in
+ * qualified_rps.txt and echoed to the RP (see that module's header). */
 static time_t qualification_validity_seconds =
         CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS;
 
@@ -132,10 +134,11 @@ int main(int argc, char** argv) {
     charra_rp_qualification_set_validity_seconds(
             qualification_validity_seconds);
 
-    /* No state/ directory to claim any more: this Verifier issues nothing
-     * and holds no CA key. The only file it writes that siblings also
-     * touch is the shared qualified-RP list, which is append-only and
-     * needs no lock -- see verifier_qualified_rps.h. */
+    /* Nothing to provision at startup: this Verifier issues no
+     * credentials and holds no CA key. The only file it writes that
+     * siblings also read is the shared qualified-RP list, published by
+     * rename() rather than edited in place -- see
+     * verifier_qualified_rps.h. */
 
     snprintf(durations_file_path_buf, sizeof(durations_file_path_buf),
             "durations_verifier-%u.txt", port);
@@ -168,26 +171,6 @@ int main(int argc, char** argv) {
     charra_log_info("[" LOG_NAME "]   %-26s %s%s", "DTLS",
             dtls_config.use_psk ? "PSK" : (dtls_config.use_rpk ? "RPK" : "off (plain UDP)"),
             (dtls_config.use_psk || dtls_config.use_rpk) ? "" : " (default)");
-
-    /* Warn rather than ignore: these four are parsed and validated but no
-     * code reads them, so passing one and seeing nothing happen is exactly
-     * how a flag comes to look like it works. */
-    {
-        const struct {
-            int identifier;
-            const char* name;
-        } unimplemented[] = {{'a', "ip"}, {'f', "pcr-file"},
-                {'s', "pcr-selection"}, {'m', "ima"}};
-        for (size_t i = 0; i < sizeof(unimplemented) / sizeof(*unimplemented);
-                ++i) {
-            if (charra_cli_flag_was_given(unimplemented[i].identifier)) {
-                charra_log_warn("[" LOG_NAME "]   --%s was given but is NOT "
-                                "IMPLEMENTED -- it is parsed and then "
-                                "discarded, and changes nothing.",
-                        unimplemented[i].name);
-            }
-        }
-    }
 
     charra_log_info("[" LOG_NAME "]   %-26s '%s'", "trust anchor",
             CHARRA_TRUSTED_KEYS_DEFAULT_PATH);

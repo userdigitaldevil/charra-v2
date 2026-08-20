@@ -21,6 +21,7 @@
 #include "cli_util.h"
 
 #include "../common/charra_log.h"
+#include "../core/charra_rp_qualification.h"
 #include "coap_util.h"
 #include "io_util.h"
 #include <errno.h>
@@ -42,8 +43,7 @@ static const struct option verifier_options[] = {
         {"peer-public-key", required_argument, 0, '3'},
         {"verify-peer", required_argument, 0, '4'},
         {"port", required_argument, 0, 'b'},
-        {"qualification-validity", required_argument, 0, '5'},
-        {"ak-validity", required_argument, 0, '6'}, {0}};
+        {"qualification-validity", required_argument, 0, '5'}, {0}};
 
 static const struct option attester_options[] = {
         {"verbose", no_argument, 0, 'v'},
@@ -158,16 +158,30 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
                 printf("     --port=PORT:                Connect to PORT "
                        "instead of default port %u.\n",
                         *(variables->common_config.port));
+                /* Guarded: a VERIFIER caller that forgets this pointer
+                 * would otherwise turn --help into a NULL dereference,
+                 * which is exactly how this crashed before. */
                 printf("     --qualification-validity=SECONDS: How long a\n"
-                       "                                 passed RP qualification stays "
-                       "valid. Must match the RP's own flag. Default %ld.\n",
-                        (long)*(variables->verifier_config
-                                        .qualification_validity_seconds));
-                printf("     --ak-validity=SECONDS:      Lifetime of AK "
-                       "certificates this Verifier issues, measured from "
-                       "issuance. Default %ld.\n",
-                        (long)*(variables->verifier_config
-                                        .ak_cert_validity_seconds));
+                       "                                 passed RP "
+                       "qualification stays valid. The RP learns the "
+                       "resulting deadline from the /qualify/submit "
+                       "response, so it needs no matching flag. Default "
+                       "%ld.\n",
+                        (variables->verifier_config
+                                        .qualification_validity_seconds !=
+                                NULL)
+                                ? (long)*(variables->verifier_config
+                                                  .qualification_validity_seconds)
+                                : (long)CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS);
+                printf("                                 WARNING: the Relying "
+                       "Party is the only client in this system and it speaks "
+                       "plain UDP only -- it has no --psk or --rpk flag of "
+                       "its own (see src/rp/rp_config.c).\n");
+                printf("                                 Enabling DTLS below "
+                       "therefore makes this role unreachable, and an RP "
+                       "request that times out counts as a NO vote rather "
+                       "than an error -- so the run degrades quietly "
+                       "instead of failing.\n");
                 printf("DTLS-PSK Options:\n");
                 printf(" -p, --psk:                      Enable DTLS protocol "
                        "with PSK. By default the key '%s' and identity '%s' "
@@ -182,6 +196,15 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
                 printf("     --port=PORT:                Open PORT instead of "
                        "port %u.\n",
                         *(variables->common_config.port));
+                printf("                                 WARNING: the Relying "
+                       "Party is the only client in this system and it speaks "
+                       "plain UDP only -- it has no --psk or --rpk flag of "
+                       "its own (see src/rp/rp_config.c).\n");
+                printf("                                 Enabling DTLS below "
+                       "therefore makes this role unreachable, and an RP "
+                       "request that times out counts as a NO vote rather "
+                       "than an error -- so the run degrades quietly "
+                       "instead of failing.\n");
                 printf("DTLS-PSK Options:\n");
                 printf(" -p, --psk:                      Enable DTLS protocol "
                        "with PSK. By default the key '%s' and hint '%s' are "
@@ -348,21 +371,19 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
             continue;
         }
 
-        if (caller == VERIFIER && identifier == '6') {
-            // set AK certificate lifetime
-            long value = 0;
-            if (!charra_cli_parse_uint_arg(log_name, "--ak-validity", optarg, 1,
-                        LONG_MAX, &value)) {
-                return -1;
-            }
-            *(variables->verifier_config.ak_cert_validity_seconds) =
-                    (time_t)value;
-        } else if (caller == VERIFIER && identifier == '5') {
+        if (caller == VERIFIER && identifier == '5') {
             // set qualification validity window
             long value = 0;
             if (!charra_cli_parse_uint_arg(log_name,
                         "--qualification-validity", optarg, 1, LONG_MAX,
                         &value)) {
+                return -1;
+            }
+            if (variables->verifier_config.qualification_validity_seconds ==
+                    NULL) {
+                charra_log_error("[%s] --qualification-validity is not "
+                                 "wired up in this binary.",
+                        log_name);
                 return -1;
             }
             *(variables->verifier_config.qualification_validity_seconds) =

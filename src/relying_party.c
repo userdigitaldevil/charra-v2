@@ -78,13 +78,13 @@ char* whitelist_hashes_path = "whitelist-hashes.txt";
 char* blacklist_hashes_path = "blacklist-hashes.txt";
 
 /* --- privacy-cleaning state, produced once per attestation -------------- */
-/* log_r: the redacted log, and PCR_r: the composite digest over a replay of
- * it. Shared by every verifier thread -- the redaction is randomised, so
- * redacting once per verifier would hand each of them a different log_r for
- * the same attestation. */
+/* The redacted log, shared by every verifier thread: the redaction is
+ * randomised, so redacting once per verifier would hand each of them a
+ * different log_r for the same attestation. There is no PCR_r global to go
+ * with it -- the PCR now lives in the RP's TPM, replayed once per cycle by
+ * rp_replay_log_into_pcr(). */
 uint8_t* rp_log_r = NULL;
 uint32_t rp_log_r_len = 0;
-uint8_t rp_pcr_r[TPM2_SHA256_DIGEST_SIZE] = {0};
 /* Quote_r's signing key is RP's TPM-resident unrestricted signing primary.
  * It has no global here on purpose: it is derived fresh for each signature
  * and discarded, so the public key that goes on the wire always comes from
@@ -294,9 +294,10 @@ int main(int argc, char** argv) {
     rp_log_effective_configuration();
 
     /* No state/ directory to claim: RP's signing key is derived from the
-     * TPM on demand, its certificate lives in the read-only trust anchor,
-     * and qualification is remembered only in memory. Nothing on disk means
-     * nothing for a second RP instance to corrupt. */
+     * TPM on demand, its public half is already named in the read-only
+     * trust anchor, and the qualification deadline the Verifier granted is
+     * remembered only in memory. Nothing on disk means nothing for a
+     * second RP instance to corrupt. */
 
     if (rp_benchmark_mode) {
         FILE* timing_file = fopen("timings_RP_multi_verifiers.txt", "w");

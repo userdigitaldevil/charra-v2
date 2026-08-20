@@ -108,32 +108,35 @@ typedef struct {
  * @brief RP -> Verifier message: the redacted log plus everything needed to
  * check who produced it.
  *
- * Quote_r's PCR_r is computed in software by replaying log_r (not a real
- * TPM2_Quote over live PCRs), but rp_signature is produced by RP's own
- * TPM-resident AK (an unrestricted signing key, since PCR_r||nonce is
- * caller-supplied data a *restricted* signing key could not sign without a
- * validation ticket) rather than a throwaway software keypair. The
- * Verifier's Step 3a item 1 looks rp_public_key up in the trust anchor
- * (charra_trusted_keys.h) to decide whether that identity is one it
- * trusts. Quote_r therefore proves "a TPM-held identity we trust signed
- * this PCR_r for this nonce" -- still not "the TPM itself attests this
- * PCR_r", which would need PCR_r to come from a genuine TPM2_Quote instead
- * of a software replay of log_r. That remaining gap is tracked in
- * CHARRA_V2_NOTES.md.
+ * Quote_r is a genuine TPM2_Quote, taken by the RP's own TPM over the PCR
+ * it replayed log_r into (RP_REPLAY_PCR_INDEX, see rp_signing_key.h). The
+ * RP does not assemble the signed bytes: the TPM reads the PCR itself and
+ * builds rp_attestation_data -- magic, type, extraData = the Verifier's
+ * nonce, pcrDigest = the composite over that one PCR -- then signs it.
+ * Both the nonce and the PCR digest therefore live INSIDE the signed
+ * structure, which is why neither travels as a field of its own.
+ *
+ * The Verifier's Step 3a checks all three halves: rp_public_key must be in
+ * the trust anchor (charra_trusted_keys.h), the signature must verify
+ * under it, and -- the part that ties the quote to the log -- replaying
+ * log_r must reproduce the pcrDigest inside rp_attestation_data. Without
+ * that last check the quote would only prove some PCR held some value.
  *
  * The Attester's raw event log is deliberately absent: log_r replaces it,
  * and forwarding the raw one would defeat the redaction entirely.
  */
 typedef struct {
-    /* --- Quote_r: the signed (PCR_r, nonce) pair --- */
-    /** PCR composite digest over a replay of log_r. */
-    uint8_t pcr_r[TPM2_SHA256_DIGEST_SIZE];
-    /** Nonce the Verifier issued, proving freshness to the Verifier. */
-    uint32_t verifier_nonce_len;
-    uint8_t verifier_nonce[sizeof(TPMU_HA)];
-    /** RSA-PSS/SHA-256 over (pcr_r || verifier_nonce), produced by RP's
-     * unrestricted TPM signing primary (see
-     * tpm2_create_primary_key_rsa2048_unrestricted()). */
+    /* --- Quote_r: the TPM's own signed attestation --- */
+    /** TPMS_ATTEST the RP's TPM produced, carrying extraData (the
+     * Verifier's nonce) and pcrDigest (the composite over the replay
+     * PCR). Same shape and same bound as the Attester's
+     * attestation_data below -- both are TPM2_Quote output now. */
+    uint32_t rp_attestation_data_len;
+    uint8_t rp_attestation_data[sizeof(TPMS_ATTEST)];
+    /** RSA-PSS/SHA-256 over rp_attestation_data, produced by RP's TPM
+     * signing primary (see
+     * tpm2_create_primary_key_rsa2048_unrestricted()). Raw signature
+     * bytes, not a marshaled TPMT_SIGNATURE. */
     uint32_t rp_signature_len;
     uint8_t rp_signature[CHARRA_RSA_SIGNATURE_LEN];
 
@@ -211,11 +214,19 @@ typedef struct {
  * /qualify/submit request: RP -> Verifier, proof that this RP's own
  * redaction pipeline was run against the /qualify challenge.
  *
- * submitted_redacted_log is the RP's own redaction of that challenge log;
- * submitted_pcr_digest is the PCR composite digest a replay of it produces.
- * rp_signature is an RSA-PSS/SHA-256 signature over submitted_pcr_digest,
- * produced by RP's TPM-resident AK -- proving *this* RP produced the
- * submission, not an unauthenticated third party relaying bytes.
+ * submitted_redacted_log is the RP's own redaction of that challenge log,
+ * and comparing it byte-for-byte against the Verifier's own redaction is
+ * the entire test. No PCR and no replay are involved: two identical logs
+ * replay to the same PCR by construction, so a PCR check would only
+ * restate the log check.
+ *
+ * rp_signature is an RSA-PSS/SHA-256 signature over
+ * (submitted_redacted_log || salt), produced by RP's TPM-resident AK. It
+ * is not part of the redaction test -- it answers a different question:
+ * WHO is submitting. The grant is recorded against a key fingerprint, so
+ * an unsigned submission could win a grant in another RP's name. Binding
+ * in the salt ties the signature to THIS challenge, so a submission
+ * captured from an earlier round cannot be replayed into a later one.
  * rp_public_key is the same TPM2B_PUBLIC msg_rp_evidence_dto carries,
  * and is checked the same way: looked up in the trust anchor (see
  * charra_trusted_keys.h).
@@ -223,7 +234,6 @@ typedef struct {
 typedef struct {
     uint32_t submitted_redacted_log_len;
     uint8_t* submitted_redacted_log;
-    uint8_t submitted_pcr_digest[TPM2_SHA256_DIGEST_SIZE];
 
     uint32_t rp_signature_len;
     uint8_t rp_signature[CHARRA_RSA_SIGNATURE_LEN];

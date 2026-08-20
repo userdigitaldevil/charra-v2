@@ -30,6 +30,36 @@
 #include "../common/charra_error.h"
 #include "../common/charra_log.h"
 
+TSS2_RC tpm2_pcr_reset(ESYS_CONTEXT* ctx, const uint32_t pcr_idx) {
+    TSS2_RC r = TSS2_RC_SUCCESS;
+    char* error_msg = NULL;
+
+    if (ctx == NULL) {
+        error_msg = "Bad ESAPI context.";
+        r = TSS2_ESYS_RC_BAD_VALUE;
+        goto error;
+    }
+
+    r = Esys_PCR_Reset(
+            ctx, pcr_idx, ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE);
+    if (r != TSS2_RC_SUCCESS) {
+        /* A non-resettable PCR fails here with TPM_RC_LOCALITY, which reads
+         * as an ordinary command failure. Name the likely cause. */
+        error_msg = "Esys_PCR_Reset (is this PCR resettable from locality 0? "
+                    "only 16 and 23 are)";
+        goto error;
+    }
+
+    return TSS2_RC_SUCCESS;
+
+error:
+    if (error_msg != NULL) {
+        charra_log_error("%s", error_msg);
+    }
+
+    return r;
+}
+
 /**
  * @brief The body behind both primary-key entry points below.
  *
@@ -37,13 +67,13 @@
  * stylistic one: a RESTRICTED signing key may only sign digests the TPM
  * produced itself, which is exactly what TPM2_Quote needs and exactly what
  * forbids signing a caller-supplied buffer. The Attester quotes, so it
- * needs the restricted key; the RP signs (PCR_r || nonce) it computed in
- * software, so it needs the unrestricted one.
+ * needs the restricted key; the RP additionally signs caller-supplied
+ * digests (rp_sign_with_ak), which only the unrestricted one may do.
  *
  * Because TPM2_CreatePrimary derives its key deterministically from the
  * hierarchy seed and the template, the two flags yield two different but
  * individually stable keys -- reproduced identically on every call and
- * every process restart, which is what lets a certificate minted once
+ * every process restart, which is what lets a trust anchor written once
  * offline keep matching (see charra_trusted_keys.h).
  */
 static TSS2_RC create_primary_key_rsa2048(ESYS_CONTEXT* ctx, bool restricted,

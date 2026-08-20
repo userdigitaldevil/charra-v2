@@ -20,7 +20,6 @@
 #include "../core/charra_marshaling.h"
 #include "../core/charra_sdk.h"
 #include "../util/charra_util.h"
-#include "../util/crypto_util.h"
 #include "../util/io_util.h"
 #include "rp_signing_key.h"
 #include "rp_shared.h"
@@ -173,30 +172,39 @@ CHARRA_RC charra_rp_prepare_evidence(void) {
                     "redaction took %.3fs.",
             rp_log_r_len, last_response.event_log_len, redact_duration);
 
-    /* --- replay log_r into the same PCR selection, then composite ------ */
-    charra_pcr_accumulator replayed[TPM2_MAX_PCRS] = {{{0}}};
-    charra_r = charra_replay_ima_log_pcrs(rp_log_r, rp_log_r_len,
-            tpm_pcr_selection, tpm_pcr_selection_len, replayed);
-    if (charra_r != CHARRA_RC_SUCCESS) {
+    /* A software replay, kept only for the log line below: it predicts the
+     * value the TPM is about to arrive at, which is what makes a Verifier's
+     * later "does NOT match" report diagnosable. Local, not global -- no
+     * other module reads it. */
+    uint8_t rp_pcr_r[TPM2_SHA256_DIGEST_SIZE] = {0};
+    if (charra_replay_ima_log(rp_log_r, rp_log_r_len, CHARRA_IMA_PCR_INDEX,
+                rp_pcr_r) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Replay of log_r failed.");
-        return charra_r;
-    }
-    uint8_t* pcr_values[TPM2_MAX_PCRS] = {NULL};
-    for (uint32_t i = 0; i < tpm_pcr_selection_len; i++) {
-        pcr_values[i] = replayed[i].value;
-    }
-    if (hash_sha256_array(pcr_values, tpm_pcr_selection_len, rp_pcr_r) !=
-            CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not compute PCR_r.");
-        return CHARRA_RC_CRYPTO_ERROR;
+        return CHARRA_RC_ERROR;
     }
     charra_print_hex(CHARRA_LOG_INFO, sizeof(rp_pcr_r), rp_pcr_r,
-            "                        PCR_r: 0x", "\n", false);
+            "                        expected PCR_r: 0x", "\n", false);
 
-    /* Nothing to prepare for the signing key: it is derived fresh inside
-     * each per-Verifier signature (see rp_signing_key.h), never ahead of
-     * time and never held. A TPM that cannot produce it fails that
-     * Verifier's evidence, which is already a NO vote. */
+    /* Replay log_r into the RP's own TPM, ONCE for the whole cycle. Every
+     * Verifier's quote reads this same PCR -- quoting does not consume it
+     * -- so repeating the replay per Verifier would multiply the most
+     * expensive part of the cycle by the Verifier count for no benefit.
+     *
+     * The signing key is still derived fresh inside each quote and never
+     * held here; only the PCR is prepared ahead. */
+    struct timespec replay_start, replay_end;
+    clock_gettime(CLOCK_MONOTONIC, &replay_start);
+    charra_r = rp_replay_log_into_pcr(rp_log_r, rp_log_r_len);
+    clock_gettime(CLOCK_MONOTONIC, &replay_end);
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not replay log_r into the "
+                         "TPM; no Verifier can be answered this cycle.");
+        return charra_r;
+    }
+    charra_log_info("[" LOG_NAME "] TPM replay of log_r took %.3fs.",
+            (replay_end.tv_sec - replay_start.tv_sec) +
+                    (replay_end.tv_nsec - replay_start.tv_nsec) / 1e9);
+
     return CHARRA_RC_SUCCESS;
 }
 
@@ -231,39 +239,32 @@ void charra_free_attestation_response(
  * @brief Builds Quote_r for one Verifier and marshals the whole RP evidence
  * message for it.
  *
- * Quote_r's signature covers (PCR_r || that Verifier's nonce), so each
- * Verifier gets a signature bound to the challenge it issued -- which is
- * what makes the exchange fresh from the Verifier's point of view.
+ * Quote_r is taken per Verifier, not once per cycle, because each carries
+ * that Verifier's own nonce as qualifyingData -- which is what makes the
+ * exchange fresh from that Verifier's point of view. Each therefore costs
+ * its own reset/replay/quote against the RP's TPM.
  */
 CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
         uint32_t* marshaled_len, uint8_t** marshaled) {
 
     msg_rp_evidence_dto ev = {0};
-    memcpy(ev.pcr_r, rp_pcr_r, sizeof(ev.pcr_r));
 
-    ev.verifier_nonce_len = verifier_nonce_lens[verifier_index];
-    if (ev.verifier_nonce_len > sizeof(ev.verifier_nonce)) {
-        charra_log_error("[" LOG_NAME "] Verifier nonce too long.");
+    uint32_t nonce_len = verifier_nonce_lens[verifier_index];
+    if (nonce_len == 0) {
+        charra_log_error("[" LOG_NAME "] No nonce from this Verifier.");
         return CHARRA_RC_ERROR;
     }
-    memcpy(ev.verifier_nonce, verifier_nonces[verifier_index],
-            ev.verifier_nonce_len);
 
-    /* Sign (PCR_r || nonce) with RP's TPM key, and take that key's public
-     * half back from the same call. rp_sign_with_ak() derives the key,
-     * uses it and discards it, opening its own short-lived TPM connection
-     * and taking rp_tpm_mutex itself -- see rp_signing_key.h. */
-    uint8_t signed_data[sizeof(ev.pcr_r) + sizeof(ev.verifier_nonce)] = {0};
-    memcpy(signed_data, ev.pcr_r, sizeof(ev.pcr_r));
-    memcpy(signed_data + sizeof(ev.pcr_r), ev.verifier_nonce,
-            ev.verifier_nonce_len);
-
+    /* Quote the PCR charra_rp_prepare_evidence() already replayed log_r
+     * into, under this Verifier's nonce. The key is derived, used and
+     * discarded inside this call -- see rp_signing_key.h. */
     TPM2B_PUBLIC ak_public_key = {0};
-    CHARRA_RC charra_r = rp_sign_with_ak(signed_data,
-            sizeof(ev.pcr_r) + ev.verifier_nonce_len, ev.rp_signature,
-            &ak_public_key);
+    CHARRA_RC charra_r = rp_quote_pcr_with_ak(
+            verifier_nonces[verifier_index], nonce_len,
+            ev.rp_attestation_data, sizeof(ev.rp_attestation_data),
+            &ev.rp_attestation_data_len, ev.rp_signature, &ak_public_key);
     if (charra_r != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not sign Quote_r.");
+        charra_log_error("[" LOG_NAME "] Could not produce Quote_r.");
         return charra_r;
     }
     ev.rp_signature_len = CHARRA_RSA_SIGNATURE_LEN;

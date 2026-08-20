@@ -13,20 +13,19 @@
 #      --group-add tss so the container user can talk to the TPM simulator
 #      device group.
 #   3. Inside the container: kills any stray bin/* processes and tpm_server
-#      from a previous run, wipes the TPM simulator's persistent NVRAM
-#      (NVChip) and restarts it fresh, then TPM2_Startup(CLEAR) -- a genuine
-#      cold TPM, nothing measured yet.
-#   4. Deletes all of state/ -- RP's own cached TPM identity
-#      (state/relying-party/identity/), its per-Verifier AK certificates and
-#      qualification cache, and both Verifier-side ledgers
-#      (state/verifier/). This step matters: step 3 just re-randomized the
-#      TPM simulator's storage-hierarchy seeds, so any *old* cached AK
-#      private blob no longer loads under the *new* TPM state (Esys_Load
-#      fails) -- skipping this step is what made the first run of this
-#      script fail every single attestation, cascading from one TPM load
-#      error into "no AK certificate" into every evidence build failing. A
-#      stale ledger would be similarly meaningless against a freshly-reset
-#      TPM's identities.
+#      from a previous run, then starts TWO simulators -- one for the
+#      Attester (:2321) and one for the RP (:2325), each in its own
+#      directory so their NVChip files stay separate -- wiping both and
+#      TPM2_Startup(CLEAR)ing each. Two genuinely cold, independent TPMs.
+#   4. Rebuilds keys/trusted_keys.txt, reading each role's AK from ITS OWN
+#      TPM, and drops qualified_rps.txt. Both are consequences of step 3:
+#      an AK is derived from its TPM's hierarchy seed, so wiping NVChip
+#      gives that role a new key. Against a stale trust anchor every
+#      signature check then fails -- as "this key is not a trusted
+#      identity", which reads like a rejected peer rather than a stale
+#      file, so it is worth doing unconditionally. qualified_rps.txt goes
+#      for the same reason: every fingerprint in it names an RP identity
+#      that no longer exists.
 #   5. Sanity-checks that PCRs 0-7 and 10 read back all-zero -- confirms the
 #      TPM really is freshly reset before anything starts touching it.
 #   6. Clean rebuild (make clean && make -j).
@@ -61,12 +60,10 @@ docker rm -f charra >/dev/null 2>&1 || true
 
 # Refuse to run while ANOTHER container has this same directory mounted.
 # Removing the "charra" container above only handles our own leftovers; a
-# container under any other name sharing this checkout shares state/ and
-# logs/ too, and its relying_party will revoke ours in the Verifiers'
-# issuance ledgers -- silently, surfacing only as unexplained attestation
-# failures much later. See CHARRA_V2_NOTES.md, "One state directory, many
-# owners". The binaries now refuse to start in that situation, but catching
-# it here names the container instead of just the lock file.
+# container under any other name sharing this checkout shares logs/,
+# keys/trusted_keys.txt and qualified_rps.txt too. Worse, its own TPM
+# resets would rewrite the trust anchor underneath this run -- silently,
+# surfacing only as unexplained attestation failures much later.
 mine=${PWD%/}
 others=""
 for cid in $(docker ps -q); do
@@ -80,7 +77,7 @@ for cid in $(docker ps -q); do
 done
 if [ -n "$others" ]; then
     echo "ERROR: these running containers already mount $mine:$others" >&2
-    echo "They share state/ and logs/ with this run and will corrupt it." >&2
+    echo "They share logs/ and keys/ with this run and will corrupt it." >&2
     echo "Stop them first:  docker stop$others" >&2
     exit 1
 fi
@@ -98,23 +95,40 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
     pkill -9 -f "^bin/" || true
     pkill tpm_server || true
 
-    cd /tmp && rm -f NVChip
-    (tpm_server > /tmp/tpm_server.log 2>&1 &)
+    # One simulator per role, as on real hardware: each AK is derived by
+    # the TPM of the role that owns it, from that TPM hierarchy seed.
+    # Separate working directories, because tpm_server writes NVChip into
+    # whatever directory it was started in.
+    ATTESTER_TCTI="mssim:host=127.0.0.1,port=2321"
+    RP_TCTI="mssim:host=127.0.0.1,port=2325"
+    rm -rf /tmp/tpm_attester /tmp/tpm_rp
+    mkdir -p /tmp/tpm_attester /tmp/tpm_rp
+    (cd /tmp/tpm_attester && tpm_server -port 2321 > /tmp/tpm_server_2321.log 2>&1 &)
+    (cd /tmp/tpm_rp       && tpm_server -port 2325 > /tmp/tpm_server_2325.log 2>&1 &)
     sleep 3
-    tpm2_startup --clear
+    TPM2TOOLS_TCTI="$ATTESTER_TCTI" tpm2_startup --clear
+    TPM2TOOLS_TCTI="$RP_TCTI"       tpm2_startup --clear
     cd ~/charra
 
-    # All of state/ is meaningless (and breaks outright, Esys_Load failing)
-    # against a TPM state that was just re-randomized above -- see the
-    # comment block at the top of this file.
-    rm -rf state
-
-    echo "--- PCRs before anything starts (expect all zero) ---"
-    tpm2_pcrread sha256:0,1,2,3,4,5,6,7,10
+    echo "--- PCRs before anything starts (expect all zero, both TPMs) ---"
+    echo "  attester TPM (:2321):"
+    TPM2TOOLS_TCTI="$ATTESTER_TCTI" tpm2_pcrread sha256:0,1,2,3,4,5,6,7,10
+    echo "  RP TPM (:2325):"
+    TPM2TOOLS_TCTI="$RP_TCTI" tpm2_pcrread sha256:0,1,2,3,4,5,6,7,10
 
     cd ~/charra
     make clean
     make -j
+
+    # Every fingerprint on file names an RP identity the reset above just
+    # destroyed. Clearing them also means this run actually exercises the
+    # /qualify handshake rather than coasting on a stale grant.
+    rm -f qualified_rps.txt
+
+    # Regenerate the trust anchor AFTER the TPM resets and BEFORE any role
+    # starts -- see step 4 in the comment block at the top of this file.
+    # This needs bin/provision_trusted_keys, hence after the build.
+    ATTESTER_TCTI="$ATTESTER_TCTI" RP_TCTI="$RP_TCTI" ./keys/gen-trusted-keys.sh
 
     rm -rf logs
     mkdir -p logs
@@ -129,14 +143,15 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
     done > verifiers_config.txt
 
     LOG_LEVEL_CHARRA=DEBUG bin/trust_manager > logs/trust_manager.log 2>&1 &
-    LOG_LEVEL_CHARRA=DEBUG bin/attester      > logs/attester.log      2>&1 &
+    LOG_LEVEL_CHARRA=DEBUG CHARRA_TCTI="$ATTESTER_TCTI" \
+        bin/attester > logs/attester.log 2>&1 &
     for p in 5684 5685 5686 5687 5688; do
       LOG_LEVEL_CHARRA=DEBUG bin/verifier --port $p > logs/verifier_$p.log 2>&1 &
     done
     sleep 2
 
-    LOG_LEVEL_CHARRA=DEBUG bin/relying_party --benchmark 2>&1 \
-        | tee logs/relying_party.log
+    LOG_LEVEL_CHARRA=DEBUG CHARRA_TCTI="$RP_TCTI" \
+        bin/relying_party --benchmark 2>&1 | tee logs/relying_party.log
 
     # A log that is mostly NUL bytes means two processes shared the file:
     # one truncated it while the other held a descriptor at a large offset.

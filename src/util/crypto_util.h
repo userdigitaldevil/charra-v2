@@ -98,15 +98,17 @@ bool charra_crypto_verify_quote_signature_mbedtls(
         uint32_t attestation_data_len, TPMT_SIGNATURE* signature,
         bool* out_valid);
 
-/* --- software RSA keypair (no TPM involved) ------------------------------
+/* --- AK_r's RSA parameters ------------------------------------------------
  *
- * Used by the Relying Party to sign Quote_r. This is an ordinary software
- * key, not a TPM-resident AK: it proves the same RP produced a given
- * (PCR_r, nonce) pair, but carries no hardware-rooted identity. Replacing it
- * with a certified AK is tracked in CHARRA_V2_NOTES.md.
+ * The key the Relying Party signs Quote_r with is TPM-resident: derived
+ * from the owner hierarchy on demand by
+ * tpm2_create_primary_key_rsa2048_unrestricted(), never held in software
+ * and never written to disk (see rp_signing_key.h). These constants only
+ * fix its size, which the wire DTOs need in order to declare fixed-width
+ * signature fields.
  */
 
-/** Size of the RP's RSA key. */
+/** Size of AK_r, and of the Attester's AK -- both are RSA-2048 primaries. */
 #define CHARRA_RSA_KEY_BITS 2048
 /** Bytes an RSA-2048 signature occupies. */
 #define CHARRA_RSA_SIGNATURE_LEN (CHARRA_RSA_KEY_BITS / 8)

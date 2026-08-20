@@ -20,9 +20,10 @@
 /**
  * @brief Step 2a -- local verification of the Attester's evidence.
  *
- * Runs all six spec checks in order: the Attester's RP-issued AK
- * certificate, the Quote_a signature, nonce freshness, each log entry's
- * self-consistency, the replayed PCR digest, and the file-hash policy.
+ * Runs all six spec checks in order: the Attester's signing key against
+ * the trust anchor, the Quote_a signature, nonce freshness, each log
+ * entry's self-consistency, the replayed PCR digest, and the file-hash
+ * policy.
  * Every check runs even after one fails, so one run reports everything
  * that is wrong rather than only the first thing.
  */
@@ -51,8 +52,9 @@ void charra_free_attestation_response(msg_attestation_response_dto* res);
 /**
  * @brief Builds and marshals the evidence message for one Verifier.
  *
- * Quote_r's signature covers (PCR_r || that Verifier's nonce), so each
- * Verifier gets a signature bound to the challenge it issued.
+ * Quotes the PCR charra_rp_prepare_evidence() already replayed log_r into,
+ * under this Verifier's nonce, so each Verifier gets a quote bound to the
+ * challenge it issued. The replay itself is not repeated here.
  */
 CHARRA_RC charra_rp_build_evidence_message(
         int verifier_index, uint32_t* marshaled_len, uint8_t** marshaled);

@@ -40,6 +40,13 @@
  * see verifier_qualified_rps.h. */
 static rp_qualification_state qualification_state = {0};
 
+/* The salt that went out with the outstanding challenge. Kept because
+ * /qualify_submit needs it twice over: the RP's redaction only matches the
+ * golden log if both used it, and the RP's Quote_R carries it as
+ * qualifyingData -- which is what stops a quote captured from an earlier
+ * round being replayed into this one. Zeroed with the state it belongs to. */
+static uint8_t qualification_salt[CHARRA_SDK_PATH_SALT_LEN] = {0};
+
 void coap_qualify_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
                                 const struct coap_pdu_t* request,
@@ -59,6 +66,7 @@ void coap_qualify_handler(struct coap_resource_t* resource,
     /* A fresh /qualify starts a new round; any submit still in flight for
      * the old one is now moot. */
     charra_rp_qualification_state_free(&qualification_state);
+    memset(qualification_salt, 0, sizeof(qualification_salt));
 
     uint32_t seed = 0;
     if ((charra_r = charra_random_bytes(
@@ -94,6 +102,8 @@ void coap_qualify_handler(struct coap_resource_t* resource,
             .challenge_log = challenge_log,
     };
     memcpy(resp.salt, salt, sizeof(resp.salt));
+    /* Remembered for /qualify/submit -- see qualification_salt above. */
+    memcpy(qualification_salt, salt, sizeof(qualification_salt));
     if ((charra_r = charra_marshal_qualify_response(&resp,
                  &marshaled_response_len, &marshaled_response)) !=
             CHARRA_RC_SUCCESS) {
@@ -133,11 +143,12 @@ cleanup:
  * evidence from this RP -- see charra_rp_qualification.h.
  *
  * Two things must hold before charra_rp_qualification_check() is consulted:
- * the submitter's AK certificate must chain to this Verifier's CA (the same
- * check Step 3a item 1 runs), and its signature over submitted_pcr_digest
- * must verify under that certified key. Without both, an unauthenticated
- * party could submit an arbitrary log and digest with no proof it ever ran
- * a real RP's redaction pipeline.
+ * the submitter's AK must appear in the trust anchor (the same lookup Step
+ * 3a item 1 runs), and its signature over (submitted log || salt) must
+ * verify under that same key. Without both, an unauthenticated party could submit
+ * an arbitrary log and digest with no proof it ever ran a real RP's
+ * redaction pipeline -- or could win a grant recorded against someone
+ * else's fingerprint.
  */
 void coap_qualify_submit_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
@@ -200,19 +211,35 @@ void coap_qualify_submit_handler(struct coap_resource_t* resource,
         goto cleanup;
     }
 
-    /* --- Quote_R signature: proves the certified key above actually signed
-     * submitted_pcr_digest, not that some unrelated certificate was merely
-     * attached to the request --- */
+    /* --- Quote_R signature: proves the trusted key above actually signed
+     * this attestation, rather than merely having been named in the
+     * request. Without this, anyone could win a grant recorded against
+     * another RP's fingerprint by quoting its public key. --- */
     bool signature_ok = false;
     {
         mbedtls_rsa_context rp_rsa_pub_key = {0};
         if (charra_crypto_tpm_pub_key_to_mbedtls_pub_key(
                     (const TPM2B_PUBLIC*)req.rp_public_key, &rp_rsa_pub_key) ==
                 CHARRA_RC_SUCCESS) {
-            signature_ok = charra_crypto_rsa_verify_signature(&rp_rsa_pub_key,
-                                   MBEDTLS_MD_SHA256, req.submitted_pcr_digest,
-                                   sizeof(req.submitted_pcr_digest),
-                                   req.rp_signature) == CHARRA_RC_SUCCESS;
+            /* Over (submitted log || salt) -- the salt is what binds this
+             * signature to THIS challenge, so a submission captured from
+             * an earlier round cannot be replayed into this one. */
+            uint32_t signed_len = req.submitted_redacted_log_len +
+                                  sizeof(qualification_salt);
+            uint8_t* signed_data = malloc(signed_len);
+            if (signed_data != NULL) {
+                if (req.submitted_redacted_log_len != 0) {
+                    memcpy(signed_data, req.submitted_redacted_log,
+                            req.submitted_redacted_log_len);
+                }
+                memcpy(signed_data + req.submitted_redacted_log_len,
+                        qualification_salt, sizeof(qualification_salt));
+                signature_ok = charra_crypto_rsa_verify_signature(
+                                       &rp_rsa_pub_key, MBEDTLS_MD_SHA256,
+                                       signed_data, signed_len,
+                                       req.rp_signature) == CHARRA_RC_SUCCESS;
+                free(signed_data);
+            }
             mbedtls_rsa_free(&rp_rsa_pub_key);
         } else {
             charra_log_error("[" LOG_NAME "] /qualify/submit: could not "
@@ -220,10 +247,11 @@ void coap_qualify_submit_handler(struct coap_resource_t* resource,
         }
     }
     if (!signature_ok) {
-        charra_log_error("[" LOG_NAME "] /qualify/submit: signature over "
-                         "submitted PCR digest is NOT valid.");
+        charra_log_error("[" LOG_NAME "] /qualify/submit: signature over the "
+                         "submission is NOT valid (wrong key, or it answers "
+                         "a different challenge).");
         response_code = COAP_RESPONSE_CODE_UNAUTHORIZED;
-        message = "Signature over submitted PCR digest invalid!";
+        message = "Signature over submission invalid!";
         goto cleanup;
     }
 
@@ -233,8 +261,7 @@ void coap_qualify_submit_handler(struct coap_resource_t* resource,
      * common case, not a known-broken path. --- */
     CHARRA_RC qualification_rc = charra_rp_qualification_check(
             &qualification_state, req.submitted_redacted_log,
-            req.submitted_redacted_log_len, req.submitted_pcr_digest,
-            time(NULL));
+            req.submitted_redacted_log_len, time(NULL));
     /* Read the granted deadline BEFORE freeing the state: this Verifier's
      * --qualification-validity is what stamped it, and it is the number
      * every other Verifier will honour. */
@@ -243,6 +270,7 @@ void coap_qualify_submit_handler(struct coap_resource_t* resource,
      * submission cannot be replayed to win a grant. A retry needs a
      * fresh /qualify. */
     charra_rp_qualification_state_free(&qualification_state);
+    memset(qualification_salt, 0, sizeof(qualification_salt));
 
     char rp_fingerprint_hex[17] = {0};
     charra_hex_encode_prefix(rp_fingerprint, sizeof(rp_fingerprint),

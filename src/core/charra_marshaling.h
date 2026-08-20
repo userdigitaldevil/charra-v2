@@ -155,10 +155,9 @@ CHARRA_RC charra_marshal_qualify_submit_request(
 /**
  * @brief Unmarshals a /qualify/submit request DTO. Bounds-checks
  * rp_signature_len/rp_public_key_len against their fixed-size destination
- * arrays and submitted_pcr_digest for its exact expected size, same
- * defense-in-depth style as charra_unmarshal_rp_evidence(). submitted_
- * redacted_log has no fixed upper bound, so it is heap-allocated, same as
- * event_log elsewhere in this file.
+ * arrays, same defense-in-depth style as charra_unmarshal_rp_evidence().
+ * submitted_redacted_log has no fixed upper bound, so it is heap-allocated,
+ * same as event_log elsewhere in this file.
  */
 CHARRA_RC charra_unmarshal_qualify_submit_request(
         const uint32_t marshaled_data_len, const uint8_t* marshaled_data,

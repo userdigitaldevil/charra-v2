@@ -2,7 +2,7 @@
  * @file test_rp_evidence_marshaling.c
  * @brief Standalone tests for charra_marshal_rp_evidence()/
  * charra_unmarshal_rp_evidence() -- the RP->Verifier evidence message
- * (Quote_r + log_r + Quote_a + both AK certificates).
+ * (Quote_r + log_r + Quote_a + both roles' AK public keys).
  *
  * This is the message that actually travels on every /appraise, yet it was
  * the one message type with no bounds-check test of its own:
@@ -46,9 +46,8 @@ static void test_round_trips(void) {
     printf("\nRP evidence survives marshal -> unmarshal unchanged\n");
 
     msg_rp_evidence_dto ev = {0};
-    memset(ev.pcr_r, 0x11, sizeof(ev.pcr_r));
-    ev.verifier_nonce_len = sizeof(ev.verifier_nonce);
-    memset(ev.verifier_nonce, 0x22, ev.verifier_nonce_len);
+    ev.rp_attestation_data_len = 129;
+    memset(ev.rp_attestation_data, 0x11, ev.rp_attestation_data_len);
     ev.rp_signature_len = sizeof(ev.rp_signature);
     memset(ev.rp_signature, 0x33, ev.rp_signature_len);
     ev.rp_public_key_len = sizeof(ev.rp_public_key);
@@ -79,12 +78,10 @@ static void test_round_trips(void) {
     rc = charra_unmarshal_rp_evidence(marshaled_len, marshaled, &res);
     check("unmarshaling succeeds", rc == CHARRA_RC_SUCCESS);
 
-    check("pcr_r round-trips",
-            memcmp(res.pcr_r, ev.pcr_r, sizeof(ev.pcr_r)) == 0);
-    check("verifier_nonce round-trips",
-            res.verifier_nonce_len == ev.verifier_nonce_len &&
-                    memcmp(res.verifier_nonce, ev.verifier_nonce,
-                            ev.verifier_nonce_len) == 0);
+    check("rp_attestation_data round-trips",
+            res.rp_attestation_data_len == ev.rp_attestation_data_len &&
+                    memcmp(res.rp_attestation_data, ev.rp_attestation_data,
+                            ev.rp_attestation_data_len) == 0);
     check("rp_signature round-trips",
             res.rp_signature_len == ev.rp_signature_len &&
                     memcmp(res.rp_signature, ev.rp_signature,
@@ -123,7 +120,7 @@ static void test_empty_log_accepted(void) {
     printf("\nRP evidence with an empty log_r parses\n");
 
     msg_rp_evidence_dto ev = {0};
-    ev.verifier_nonce_len = 4;
+    ev.rp_attestation_data_len = 4;
     ev.rp_signature_len = 4;
     ev.rp_public_key_len = 4;
     ev.attester_nonce_len = 4;
@@ -150,9 +147,9 @@ static void test_empty_log_accepted(void) {
 /* --- bounds -------------------------------------------------------------- */
 
 /** How many byte strings charra_marshal_rp_evidence_internal() encodes:
- * pcr_r, verifier_nonce, rp_signature, rp_public_key, attester_nonce,
+ * rp_attestation_data, rp_signature, rp_public_key, attester_nonce,
  * attestation_data, tpm2_signature, tpm2_public_key, log_r. */
-#define RAW_FIELD_COUNT 9
+#define RAW_FIELD_COUNT 8
 
 /** One byte string per field, in the exact order
  * charra_marshal_rp_evidence_internal() encodes them, so any single field
@@ -187,9 +184,9 @@ static void encode_raw_evidence(
 
 /** Fills every field with a small valid value; callers then oversize one. */
 static void fill_valid(raw_field f[RAW_FIELD_COUNT], const uint8_t* small, size_t small_len,
-        const uint8_t* pcr, size_t pcr_len) {
-    f[0].ptr = pcr;
-    f[0].len = pcr_len; /* pcr_r -- exact size, not a cap */
+        const uint8_t* attest, size_t attest_len) {
+    f[0].ptr = attest;
+    f[0].len = attest_len; /* rp_attestation_data */
     for (int i = 1; i < RAW_FIELD_COUNT; i++) {
         f[i].ptr = small;
         f[i].len = small_len;
@@ -224,32 +221,28 @@ static void test_oversized_fields_rejected(void) {
     uint8_t small[4] = {0};
     uint8_t pcr[TPM2_SHA256_DIGEST_SIZE] = {0};
 
-    OVERSIZED_FIELD_TEST(1, verifier_nonce, "verifier_nonce");
-    OVERSIZED_FIELD_TEST(2, rp_signature, "rp_signature");
-    OVERSIZED_FIELD_TEST(3, rp_public_key, "rp_public_key");
-    OVERSIZED_FIELD_TEST(4, attester_nonce, "attester_nonce");
-    OVERSIZED_FIELD_TEST(5, attestation_data, "attestation_data");
-    OVERSIZED_FIELD_TEST(6, tpm2_signature, "tpm2_signature");
-    OVERSIZED_FIELD_TEST(7, tpm2_public_key, "tpm2_public_key");
+    OVERSIZED_FIELD_TEST(0, rp_attestation_data, "rp_attestation_data");
+    OVERSIZED_FIELD_TEST(1, rp_signature, "rp_signature");
+    OVERSIZED_FIELD_TEST(2, rp_public_key, "rp_public_key");
+    OVERSIZED_FIELD_TEST(3, attester_nonce, "attester_nonce");
+    OVERSIZED_FIELD_TEST(4, attestation_data, "attestation_data");
+    OVERSIZED_FIELD_TEST(5, tpm2_signature, "tpm2_signature");
+    OVERSIZED_FIELD_TEST(6, tpm2_public_key, "tpm2_public_key");
 }
 
-/* pcr_r is the one field checked for an EXACT length rather than a cap --
- * it is a SHA-256 digest, so a short one is as wrong as a long one. */
-static void test_wrong_size_pcr_r_rejected(void) {
+/* An EMPTY Quote_r is rejected outright rather than accepted as a
+ * zero-length attestation: nothing downstream could parse it into a
+ * TPMS_ATTEST, so the nonce and PCR-digest checks would both be reading
+ * uninitialised memory. */
+static void test_empty_attestation_rejected(void) {
     uint8_t small[4] = {0};
 
-    printf("\na pcr_r of the wrong size (short or long) is rejected\n");
+    printf("\nan empty Quote_r attestation is rejected\n");
 
-    uint8_t too_long[TPM2_SHA256_DIGEST_SIZE + 1];
-    memset(too_long, 0x41, sizeof(too_long));
     raw_field f[RAW_FIELD_COUNT];
-    fill_valid(f, small, sizeof(small), too_long, sizeof(too_long));
-    expect_rejected("oversized pcr_r rejected", f);
-
-    uint8_t too_short[TPM2_SHA256_DIGEST_SIZE - 1];
-    memset(too_short, 0x41, sizeof(too_short));
-    fill_valid(f, small, sizeof(small), too_short, sizeof(too_short));
-    expect_rejected("undersized pcr_r rejected", f);
+    fill_valid(f, small, sizeof(small), small, sizeof(small));
+    f[0].len = 0;
+    expect_rejected("zero-length rp_attestation_data rejected", f);
 }
 
 /* A truncated array must fail rather than leave later fields uninitialised. */
@@ -258,7 +251,7 @@ static void test_truncated_message_rejected(void) {
 
     uint8_t small[4] = {0};
     uint8_t pcr[TPM2_SHA256_DIGEST_SIZE] = {0};
-    (void)small; /* only pcr_r and one more field are encoded below */
+    (void)small; /* only two fields are encoded below */
 
     size_t cap = 256;
     uint8_t* buf = malloc(cap);
@@ -287,7 +280,7 @@ int main(void) {
     test_round_trips();
     test_empty_log_accepted();
     test_oversized_fields_rejected();
-    test_wrong_size_pcr_r_rejected();
+    test_empty_attestation_rejected();
     test_truncated_message_rejected();
 
     printf("\n================================================\n");

@@ -551,13 +551,11 @@ static CHARRA_RC charra_marshal_rp_evidence_internal(
     QCBOREncode_Init(&ec, buf_in);
     QCBOREncode_OpenArray(&ec);
 
-    /* Quote_r */
+    /* Quote_r. The nonce and the PCR digest are inside the attestation
+     * data, put there by the TPM -- neither is a field of its own. */
     QCBOREncode_AddBytes(&ec,
-            (UsefulBufC){.ptr = rp_evidence->pcr_r,
-                    .len = sizeof(rp_evidence->pcr_r)});
-    QCBOREncode_AddBytes(&ec,
-            (UsefulBufC){.ptr = rp_evidence->verifier_nonce,
-                    .len = rp_evidence->verifier_nonce_len});
+            (UsefulBufC){.ptr = rp_evidence->rp_attestation_data,
+                    .len = rp_evidence->rp_attestation_data_len});
     QCBOREncode_AddBytes(&ec,
             (UsefulBufC){.ptr = rp_evidence->rp_signature,
                     .len = rp_evidence->rp_signature_len});
@@ -652,24 +650,18 @@ CHARRA_RC charra_unmarshal_rp_evidence(const uint32_t marshaled_data_len,
     /* Every length is checked against its destination before the copy: this
      * is attacker-reachable input and the destinations are fixed-size. */
 
-    /* PCR_r */
+    /* Quote_r attestation data */
     if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
         goto cbor_parse_error;
-    if (item.val.string.len != sizeof(res.pcr_r)) {
-        charra_log_error("CBOR parser: PCR_r has the wrong size.");
+    res.rp_attestation_data_len = item.val.string.len;
+    if (res.rp_attestation_data_len == 0 ||
+            res.rp_attestation_data_len > sizeof(res.rp_attestation_data)) {
+        charra_log_error("CBOR parser: Quote_r attestation data has an "
+                         "unusable size.");
         goto cbor_parse_error;
     }
-    memcpy(res.pcr_r, item.val.string.ptr, sizeof(res.pcr_r));
-
-    /* Verifier's nonce */
-    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
-        goto cbor_parse_error;
-    res.verifier_nonce_len = item.val.string.len;
-    if (res.verifier_nonce_len > sizeof(res.verifier_nonce)) {
-        charra_log_error("CBOR parser: verifier nonce exceeds maximum size.");
-        goto cbor_parse_error;
-    }
-    memcpy(res.verifier_nonce, item.val.string.ptr, res.verifier_nonce_len);
+    memcpy(res.rp_attestation_data, item.val.string.ptr,
+            res.rp_attestation_data_len);
 
     /* RP signature */
     if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
@@ -1039,10 +1031,6 @@ static CHARRA_RC charra_marshal_qualify_submit_request_internal(
             .len = qualify_submit_request->submitted_redacted_log_len};
     QCBOREncode_AddBytes(&ec, submitted_redacted_log);
 
-    UsefulBufC submitted_pcr_digest = {
-            .ptr = qualify_submit_request->submitted_pcr_digest,
-            .len = sizeof(qualify_submit_request->submitted_pcr_digest)};
-    QCBOREncode_AddBytes(&ec, submitted_pcr_digest);
 
     UsefulBufC rp_signature = {.ptr = qualify_submit_request->rp_signature,
             .len = qualify_submit_request->rp_signature_len};
@@ -1264,17 +1252,6 @@ CHARRA_RC charra_unmarshal_qualify_submit_request(
     res.submitted_redacted_log = submitted_redacted_log;
     memcpy(res.submitted_redacted_log, item.val.string.ptr,
             res.submitted_redacted_log_len);
-
-    /* parse "submitted-pcr-digest" (bytes) -- fixed size, checked exactly */
-    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
-        goto cbor_parse_error;
-    if (item.val.string.len != sizeof(res.submitted_pcr_digest)) {
-        charra_log_error(
-                "CBOR parser: submitted PCR digest has the wrong size.");
-        goto cbor_parse_error;
-    }
-    memcpy(&(res.submitted_pcr_digest), item.val.string.ptr,
-            sizeof(res.submitted_pcr_digest));
 
     /* parse "rp-signature" (bytes) */
     if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))

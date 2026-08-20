@@ -37,21 +37,16 @@
  * adding a second one, so the file stays as long as there are RPs and can
  * be read at a glance.
  *
- * Concurrency: sibling Verifiers run as separate processes against one
- * file, and only the Verifier that ran the handshake ever writes it. That
- * write is a rewrite, not an append, so it is published by writing a
- * temporary file and rename()-ing it into place -- rename is atomic within
- * a filesystem, so a reader sees either the whole old file or the whole
- * new one. Truncating the live file in place would instead leave a window
- * in which every reading Verifier sees an empty file and votes NO for a
- * reason nobody could later reconstruct.
+ * Concurrency: siblings read this file constantly; only the Verifier that
+ * ran the handshake writes it. Because a write REPLACES a record rather
+ * than appending, it is published by temp-file + rename() -- atomic within
+ * a filesystem, so a reader sees the whole old file or the whole new one.
+ * Truncating in place would leave a window where every reader sees an
+ * empty file and votes NO inexplicably.
  *
- * What this does NOT cover: two Verifiers rewriting at the same instant,
- * each having read the file before the other's rename. The later rename
- * wins and the earlier record is lost. That needs two RPs qualifying
- * simultaneously with two different Verifiers -- impossible with the
- * single RP this PoC runs, and the point at which a real lock would have
- * to replace the rename.
+ * Not covered: two Verifiers rewriting at the same instant, the later
+ * rename winning. That needs two RPs qualifying simultaneously, which this
+ * single-RP PoC cannot produce; it is where a real lock would go.
  */
 
 #ifndef CHARRA_VERIFIER_QUALIFIED_RPS_H

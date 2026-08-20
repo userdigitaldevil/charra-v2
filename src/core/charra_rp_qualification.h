@@ -10,8 +10,8 @@
  *
  * This module only covers the parts that need no TSS2/libcoap: generating
  * the challenge + golden answer, and comparing the RP's submission against
- * it. Sending the challenge over the wire and parsing a real Quote_R are
- * separate, not-yet-built concerns (see notes, "Not yet built").
+ * it. Carrying the challenge over the wire, authenticating the submitter
+ * and recording the resulting grant are verifier_qualify.c's job.
  */
 
 #ifndef CHARRA_RP_QUALIFICATION_H
@@ -26,33 +26,28 @@
 #include "../common/charra_error.h"
 #include "charra_sdk.h"
 
-/** Default for how long an OUTSTANDING /qualify challenge stays answerable;
- * override at runtime with charra_rp_qualification_set_validity_seconds().
+/** Default lifetime of the GRANT a passing /qualify leads to; override at
+ * runtime with charra_rp_qualification_set_validity_seconds().
  *
- * This bounds the challenge, not the grant. The grant it leads to has no
- * lifetime at all: a qualified RP is recorded in qualified_rps.txt and
- * stays recorded until that line is removed (see
- * verifier_qualified_rps.h). Identity has no lifetime either -- a signing
- * key is trusted for exactly as long as it appears in the trust anchor. */
+ * The one thing here with a lifetime. Identity has none -- a key is
+ * trusted while it appears in the trust anchor -- but behaviour goes
+ * stale: an RP can swap its redaction pipeline the moment after passing.
+ * The resulting deadline is stamped into qualified_rps.txt; a lapsed
+ * record counts as not qualified. */
 #define CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS (3 * 60)
 
 /**
  * @brief Set/get the qualification validity window actually in force.
  *
- * Deliberately a runtime value rather than the compile-time macro alone:
- * the window is a contract between two *separate* binaries -- the Verifier
- * writes `expires_at` into its ledger from it, and the RP independently
- * computes the same deadline for its own client-side cache (nothing on the
- * wire carries the expiry: `/qualify/submit` answers with a bare status
- * string). Both therefore expose the same `--qualification-validity` flag
- * and must be given matching values.
+ * Runtime rather than the macro alone so --qualification-validity can
+ * reach charra_rp_qualification_check(), which stamps state->expires_at.
  *
- * A mismatch is self-correcting rather than fatal, which is why this is a
- * flag on both sides instead of a wire-format change: if the RP over-
- * estimates, the Verifier rejects the next `/appraise` with "qualification
- * expired" (the Verifier records this; RP simply votes on the result)
- * re-qualifies and resubmits; if it under-estimates, it merely re-qualifies
- * earlier than it had to.
+ * Only the VERIFIER has this flag. The deadline is computed once, here,
+ * then recorded in qualified_rps.txt for every sibling to honour verbatim
+ * AND returned to the RP in the /qualify_submit response. One authority,
+ * one number, nothing to keep in sync -- which matters because /appraise
+ * never says WHY it voted no, so an RP guessing the window could never
+ * learn it had guessed short.
  */
 void charra_rp_qualification_set_validity_seconds(time_t seconds);
 time_t charra_rp_qualification_get_validity_seconds(void);
@@ -69,8 +64,6 @@ typedef struct {
      * byte for byte. */
     uint8_t* golden_log;
     uint32_t golden_log_len;
-    /** PCR the golden log replays to; checked against Quote_R's pcrDigest. */
-    uint8_t golden_pcr[TPM2_SHA256_DIGEST_SIZE];
     /** True only from a passing charra_rp_qualification_check() until
      * expires_at. */
     bool qualified;
@@ -82,10 +75,16 @@ typedef struct {
  * answer.
  *
  * Generates a synthetic IMA log, redacts it locally with salt to fill in
- * *state_out (golden_log, golden_pcr), and separately returns the raw
- * (unredacted) log for the caller to send to the RP -- the RP is expected
- * to redact it (with the same salt, also sent to it) and submit the result
- * back for charra_rp_qualification_check().
+ * *state_out (golden_log), and separately returns the raw (unredacted) log
+ * for the caller to send to the RP -- the RP is expected to redact it
+ * (with the same salt, also sent to it) and submit the result back for
+ * charra_rp_qualification_check().
+ *
+ * No PCR is involved anywhere in this handshake. The question it answers
+ * is "does this RP's redaction pipeline produce the same bytes mine
+ * does", and a byte-for-byte log comparison answers it completely -- two
+ * identical logs replay to the same PCR by construction, so a PCR check
+ * would be restating the log check.
  *
  * *state_out starts unqualified (qualified = false, expires_at = 0).
  *
@@ -115,35 +114,35 @@ CHARRA_RC charra_rp_qualification_generate(uint32_t num_entries,
 /**
  * @brief Check an RP's qualification submission against the golden answer.
  *
- * Compares submitted_log against state->golden_log byte for byte, and
- * submitted_pcr_digest against state->golden_pcr. Both must match for the RP
- * to qualify. Per the design, only pcrDigest/extraData from Quote_R ever
- * enter this comparison -- never raw signature bytes, since RSA-PSS salting
- * makes two honest signings over identical data differ anyway. Verifying
- * Quote_R's signature itself is a separate, not-yet-built step; the caller
- * is expected to have done that before calling this function.
+ * Compares submitted_log against state->golden_log byte for byte. That is
+ * the whole test: the RP redacted the same challenge with the same salt,
+ * so a correct pipeline reproduces the golden log exactly.
+ *
+ * Authenticating WHO submitted it is a separate step the caller does
+ * first -- the grant is recorded against a key fingerprint, so an
+ * unsigned submission could win a grant in someone else's name. See
+ * coap_qualify_submit_handler().
  *
  * On match, sets state->qualified = true and state->expires_at = now +
- * CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS. On mismatch, sets
+ * the window in force (see charra_rp_qualification_get_validity_seconds())
+ * -- the deadline the caller then records and returns. On mismatch, sets
  * state->qualified = false and state->expires_at = 0.
  *
  * A state with no challenge outstanding (golden_log NULL/empty) is rejected
  * outright: its all-zero golden answer would otherwise be matched by an
- * empty log plus a zero digest. Callers should consume the state after
+ * empty submission. Callers should consume the state after
  * this returns, so one challenge answers exactly one submission.
  *
  * @param[in,out] state golden answer to check against; updated in place
  * @param[in] submitted_log the RP's redacted log; may be NULL only if
  * submitted_log_len is 0
  * @param[in] submitted_log_len length of submitted_log
- * @param[in] submitted_pcr_digest pcrDigest extracted from the RP's Quote_R
  * @param[in] now current time, used to set state->expires_at
  * @returns CHARRA_RC_SUCCESS if the RP qualified, CHARRA_RC_VERIFICATION_FAILED
  * if it did not, CHARRA_RC_BAD_ARGUMENT on bad arguments
  */
 CHARRA_RC charra_rp_qualification_check(rp_qualification_state* state,
         const uint8_t* submitted_log, uint32_t submitted_log_len,
-        const uint8_t submitted_pcr_digest[TPM2_SHA256_DIGEST_SIZE],
         time_t now);
 
 /**
@@ -154,10 +153,10 @@ CHARRA_RC charra_rp_qualification_check(rp_qualification_state* state,
  * describes one Verifier process's single in-flight challenge round, with
  * no notion of which RP it was for (see rp_qualification_state's own
  * docstring). The real, identity-bound gate is
- * verifier_qualified_rps_contains() (verifier_qualified_rps.h), looked up
- * by the SHA-256 of AK_r's public key. This function is kept for what it
- * actually is: a plain validity check on one state struct, exercised
- * directly by tests.
+ * verifier_qualified_rps_is_qualified() (verifier_qualified_rps.h),
+ * looked up by the SHA-256 of AK_r's public key. This function is kept for
+ * what it actually is: a plain validity check on one state struct,
+ * exercised directly by tests.
  *
  * @param[in] state state to check
  * @param[in] now current time

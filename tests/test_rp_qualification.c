@@ -17,6 +17,7 @@
 
 #include "../src/core/charra_event_log.h"
 #include "../src/core/charra_rp_qualification.h"
+#include "../src/util/crypto_util.h"
 #include "../src/core/charra_sdk.h"
 
 static unsigned int tests_run = 0;
@@ -94,7 +95,7 @@ static void test_honest_rp_qualifies(void) {
 
     time_t now = 1000;
     CHARRA_RC rc = charra_rp_qualification_check(
-            &state, rp_log, rp_log_len, rp_pcr, now);
+            &state, rp_log, rp_log_len, now);
 
     check("check succeeds", rc == CHARRA_RC_SUCCESS);
     check("state is qualified", state.qualified);
@@ -127,7 +128,7 @@ static void test_rp_submitting_unredacted_log_rejected(void) {
             CHARRA_IMA_PCR_INDEX, rp_pcr);
 
     CHARRA_RC rc = charra_rp_qualification_check(
-            &state, challenge_log, challenge_log_len, rp_pcr, 1000);
+            &state, challenge_log, challenge_log_len, 1000);
 
     check("check fails", rc == CHARRA_RC_VERIFICATION_FAILED);
     check("state stays unqualified", !state.qualified);
@@ -137,9 +138,11 @@ static void test_rp_submitting_unredacted_log_rejected(void) {
     charra_rp_qualification_state_free(&state);
 }
 
-static void test_correct_log_but_wrong_pcr_rejected(void) {
-    printf("\ncorrect log with a mismatched pcrDigest still fails\n");
-    printf("(log and PCR are checked independently, not one implying the other)\n");
+/* The comparison is byte-for-byte, so a single flipped bit anywhere in an
+ * otherwise-perfect redaction must fail. Worth pinning explicitly: a
+ * length-only or prefix-only comparison would pass this. */
+static void test_one_byte_off_rejected(void) {
+    printf("\na redaction that differs by ONE byte is rejected\n");
 
     rp_qualification_state state = {0};
     uint8_t* challenge_log = NULL;
@@ -153,14 +156,18 @@ static void test_correct_log_but_wrong_pcr_rejected(void) {
     honest_rp_respond(
             challenge_log, challenge_log_len, &rp_log, &rp_log_len, rp_pcr);
 
-    uint8_t wrong_pcr[TPM2_SHA256_DIGEST_SIZE];
-    memset(wrong_pcr, 0xAA, sizeof(wrong_pcr));
+    check("sanity: the honest redaction passes",
+            charra_rp_qualification_check(&state, rp_log, rp_log_len, 1000) ==
+                    CHARRA_RC_SUCCESS);
 
-    CHARRA_RC rc = charra_rp_qualification_check(
-            &state, rp_log, rp_log_len, wrong_pcr, 1000);
+    /* Same length, one byte different, in the middle. */
+    rp_log[rp_log_len / 2] ^= 0x01;
+    CHARRA_RC rc =
+            charra_rp_qualification_check(&state, rp_log, rp_log_len, 1000);
 
     check("check fails", rc == CHARRA_RC_VERIFICATION_FAILED);
     check("state stays unqualified", !state.qualified);
+    check("expiry stays cleared", state.expires_at == 0);
 
     free(challenge_log);
     free(rp_log);
@@ -208,15 +215,14 @@ static void test_no_outstanding_challenge_rejects_empty_submission(void) {
            "(regression: V-1)\n");
 
     /* A zeroed state -- a Verifier that never served /qualify, or one whose
-     * challenge was already consumed -- has golden_log_len 0 and an all-zero
-     * golden_pcr. An empty log plus a zero digest matches both by accident,
-     * which would qualify a caller that never ran the SDK. */
+     * challenge was already consumed -- has golden_log_len 0, which an
+     * empty submission would match by accident, qualifying a caller that
+     * never ran the SDK. */
     rp_qualification_state state = {0};
-    uint8_t zero_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
 
-    check("empty log + zero digest against a zeroed state is REJECTED",
-            charra_rp_qualification_check(&state, NULL, 0, zero_digest,
-                    time(NULL)) != CHARRA_RC_SUCCESS);
+    check("empty submission against a zeroed state is REJECTED",
+            charra_rp_qualification_check(&state, NULL, 0, time(NULL)) !=
+                    CHARRA_RC_SUCCESS);
     check("state is not left marked qualified", !state.qualified);
 
     /* Same, for a state consumed after a real challenge. */
@@ -227,8 +233,8 @@ static void test_no_outstanding_challenge_rejects_empty_submission(void) {
     charra_rp_qualification_state_free(&state);
 
     check("empty log + zero digest against a CONSUMED state is REJECTED",
-            charra_rp_qualification_check(&state, NULL, 0, zero_digest,
-                    time(NULL)) != CHARRA_RC_SUCCESS);
+            charra_rp_qualification_check(&state, NULL, 0, time(NULL)) !=
+                    CHARRA_RC_SUCCESS);
 
     free(challenge_log);
 }
@@ -239,7 +245,6 @@ static void test_bad_arguments(void) {
     rp_qualification_state state = {0};
     uint8_t* log = NULL;
     uint32_t log_len = 0;
-    uint8_t pcr[TPM2_SHA256_DIGEST_SIZE] = {0};
 
     check("generate: NULL salt rejected",
             charra_rp_qualification_generate(
@@ -258,13 +263,10 @@ static void test_bad_arguments(void) {
                     CHARRA_RC_BAD_ARGUMENT);
 
     check("check: NULL state rejected",
-            charra_rp_qualification_check(NULL, log, log_len, pcr, 0) ==
-                    CHARRA_RC_BAD_ARGUMENT);
-    check("check: NULL pcr digest rejected",
-            charra_rp_qualification_check(&state, log, log_len, NULL, 0) ==
+            charra_rp_qualification_check(NULL, log, log_len, 0) ==
                     CHARRA_RC_BAD_ARGUMENT);
     check("check: NULL log with non-zero length rejected",
-            charra_rp_qualification_check(&state, NULL, 10, pcr, 0) ==
+            charra_rp_qualification_check(&state, NULL, 10, 0) ==
                     CHARRA_RC_BAD_ARGUMENT);
 
     check("is_valid: NULL state is simply invalid",
@@ -278,7 +280,7 @@ int main(void) {
     test_generate_produces_golden_state_and_challenge();
     test_honest_rp_qualifies();
     test_rp_submitting_unredacted_log_rejected();
-    test_correct_log_but_wrong_pcr_rejected();
+    test_one_byte_off_rejected();
     test_is_valid_false_before_any_check();
     test_state_free_is_idempotent();
     test_no_outstanding_challenge_rejects_empty_submission();

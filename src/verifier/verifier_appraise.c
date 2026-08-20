@@ -18,8 +18,8 @@
 #include "../common/charra_log.h"
 #include "../core/charra_trusted_keys.h"
 #include "../core/charra_dto.h"
+#include "../core/charra_event_log.h"
 #include "../core/charra_helper.h"
-#include "../core/charra_key_mgr.h"
 #include "../core/charra_marshaling.h"
 #include "../util/charra_util.h"
 #include "../util/coap_util.h"
@@ -128,6 +128,14 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     /* Quote_r's fields -- re-checked independently of whatever bounds
      * charra_unmarshal_rp_evidence() applies, same defense-in-depth style as
      * the rest of this function. */
+    if (res.rp_attestation_data_len == 0 ||
+            res.rp_attestation_data_len > sizeof(TPMS_ATTEST)) {
+        charra_log_error("[" LOG_NAME "] Quote_r attestation data has an "
+                         "unusable length.");
+        early_fail_reason = "malformed request: Quote_r attestation data "
+                            "length unusable";
+        goto cleanup;
+    }
     if (res.rp_signature_len != CHARRA_RSA_SIGNATURE_LEN) {
         charra_log_error(
                 "[" LOG_NAME "] RP signature is not exactly the expected "
@@ -229,15 +237,10 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         }
     }
 
-    /* Step 3a item 2: verify Quote_r signature -- RSA-PSS/SHA-256 over
-     * (PCR_r || verifier_nonce) under RP's public key, NOT a TPM quote
-     * verification: PCR_r is a software replay of log_r, so there is no
-     * TPMT_SIGNATURE/TPM2B_ATTEST to check. There is likewise no TPM-side
-     * second opinion to AND in, the way Step 3b item 2 has.
-     *
-     * The key is converted from its TPM2B_PUBLIC by the same helper Step
-     * 3b item 2 uses for the Attester's -- both keys arrive in the same
-     * shape now, so both are handled the same way. */
+    /* Step 3a item 2: verify Quote_r's signature -- RSA-PSS/SHA-256 over
+     * the TPMS_ATTEST the RP's TPM built, under RP's public key. Same
+     * shape as Step 3b item 2 now: both roles send a real TPM2_Quote, so
+     * both are checked the same way. */
     clock_t start_verifiy_signature, end_verifiy_signature;
     double verify_signature_duration;
     start_verifiy_signature = clock();
@@ -253,15 +256,10 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         charra_log_error(
                 "[" LOG_NAME "]     => Could not convert RP's public key!");
     } else {
-        uint8_t signed_data[sizeof(res.pcr_r) + sizeof(res.verifier_nonce)] =
-                {0};
-        memcpy(signed_data, res.pcr_r, sizeof(res.pcr_r));
-        memcpy(signed_data + sizeof(res.pcr_r), res.verifier_nonce,
-                res.verifier_nonce_len);
         attestation_result_signature_rp =
                 charra_crypto_rsa_verify_signature(&rp_rsa_pub_key,
-                        MBEDTLS_MD_SHA256, signed_data,
-                        sizeof(res.pcr_r) + res.verifier_nonce_len,
+                        MBEDTLS_MD_SHA256, res.rp_attestation_data,
+                        res.rp_attestation_data_len,
                         res.rp_signature) == CHARRA_RC_SUCCESS;
         mbedtls_rsa_free(&rp_rsa_pub_key);
     }
@@ -284,9 +282,20 @@ void coap_appraise_handler(struct coap_resource_t* resource,
      * local-verification gate, run against the log it receives from the
      * Attester, before cleansing. See charra_event_log.h. */
 
-    /* Step 3a item 3: check nonce consistency -- Quote_r's verifier_nonce
-     * must be exactly the challenge coap_nonce_handler() generated, a
-     * Verifier-picked value rather than something RP chose itself. */
+    /* Unmarshal Quote_r's attestation data -- the nonce and the PCR digest
+     * both live inside it, put there by the RP's TPM. */
+    TPMS_ATTEST rp_attest = {0};
+    bool rp_attest_parsed =
+            charra_unmarshal_tpm2_quote(res.rp_attestation_data_len,
+                    res.rp_attestation_data, &rp_attest) == CHARRA_RC_SUCCESS;
+    if (!rp_attest_parsed) {
+        charra_log_error("[" LOG_NAME "]     => Quote_r's attestation data is "
+                         "not a valid TPM2 quote structure!");
+    }
+
+    /* Step 3a item 3: nonce freshness. Read from the quote's extraData, not
+     * from a field beside it: the TPM put it there, so it is covered by the
+     * signature just checked. Same treatment as Step 3b item 3. */
     clock_t start_verifiy_nonce, end_verifiy_nonce;
     double verify_nonce_duration;
     start_verifiy_nonce = clock();
@@ -297,12 +306,10 @@ void coap_appraise_handler(struct coap_resource_t* resource,
          * challenge outstanding both lengths are 0 and memcmp(_, _, 0)
          * returns 0, so an empty nonce would match. */
         attestation_result_nonce_rp =
-                verifier_challenge_nonce_len != 0 &&
-                res.verifier_nonce_len == verifier_challenge_nonce_len &&
-                memcmp(res.verifier_nonce, verifier_challenge_nonce,
-                        verifier_challenge_nonce_len) == 0;
-        /* Snapshot for the failure diagnostic below -- the challenge is
-         * spent immediately after. */
+                rp_attest_parsed && verifier_challenge_nonce_len != 0 &&
+                charra_verify_tpm2_quote_qualifying_data(
+                        (uint16_t)verifier_challenge_nonce_len,
+                        verifier_challenge_nonce, &rp_attest);
         uint8_t expected_nonce[TPM2_SHA256_DIGEST_SIZE] = {0};
         uint32_t expected_nonce_len = verifier_challenge_nonce_len;
         memcpy(expected_nonce, verifier_challenge_nonce,
@@ -318,10 +325,11 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         } else {
             char expected_nonce_hex[17] = {0};
             char received_nonce_hex[17] = {0};
-            charra_hex_encode_prefix(expected_nonce, expected_nonce_len, expected_nonce_hex,
-                    sizeof(expected_nonce_hex));
-            charra_hex_encode_prefix(res.verifier_nonce, res.verifier_nonce_len,
-                    received_nonce_hex, sizeof(received_nonce_hex));
+            charra_hex_encode_prefix(expected_nonce, expected_nonce_len,
+                    expected_nonce_hex, sizeof(expected_nonce_hex));
+            charra_hex_encode_prefix(rp_attest.extraData.buffer,
+                    rp_attest.extraData.size, received_nonce_hex,
+                    sizeof(received_nonce_hex));
             charra_log_error("[" LOG_NAME
                              "]     => Nonce in Quote_r is NOT valid! (%s)",
                     expected_nonce_len == 0
@@ -332,7 +340,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                     "[" LOG_NAME "]     => expected %u byte(s), starting "
                     "%s...; received %u byte(s), starting %s...",
                     expected_nonce_len, expected_nonce_hex,
-                    res.verifier_nonce_len, received_nonce_hex);
+                    rp_attest.extraData.size, received_nonce_hex);
         }
     }
     end_verifiy_nonce = clock();
@@ -342,10 +350,66 @@ void coap_appraise_handler(struct coap_resource_t* resource,
             "[" LOG_NAME "] Timing: verify RP nonce took %f second(s).",
             verify_nonce_duration);
 
+    /* Step 3a item 4: does log_r actually produce the PCR the quote
+     * attests? This is what binds the quote to the log. Without it Quote_r
+     * would only prove that SOME PCR held SOME value freshly -- the RP
+     * could replay a log of its choosing, quote the result honestly, and
+     * send an unrelated log_r alongside it.
+     *
+     * The RP extended log_r's PCR-10 entries into its own replay PCR,
+     * which started at zero; replaying the same entries in software from
+     * zero must give the same value. One PCR is selected, so the composite
+     * the TPM signed is SHA-256 of just that value. */
+    clock_t start_replay = clock();
+    bool attestation_result_pcr_rp = false;
+    {
+        charra_log_info("[" LOG_NAME "] Replaying log_r against Quote_r's PCR "
+                        "digest ...");
+        uint8_t replayed_pcr[TPM2_SHA256_DIGEST_SIZE] = {0};
+        uint8_t expected_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
+        if (!rp_attest_parsed) {
+            /* already reported above */
+        } else if (charra_replay_ima_log(res.log_r, res.log_r_len,
+                           CHARRA_IMA_PCR_INDEX, replayed_pcr) !=
+                   CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "]     => log_r does not replay -- "
+                             "it is malformed.");
+        } else if (hash_sha256(sizeof(replayed_pcr), replayed_pcr,
+                           expected_digest) != CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "]     => Could not compute the "
+                             "expected PCR composite digest.");
+        } else {
+            const TPM2B_DIGEST* quoted =
+                    &rp_attest.attested.quote.pcrDigest;
+            attestation_result_pcr_rp =
+                    quoted->size == sizeof(expected_digest) &&
+                    memcmp(quoted->buffer, expected_digest,
+                            sizeof(expected_digest)) == 0;
+            if (attestation_result_pcr_rp) {
+                charra_log_info("[" LOG_NAME "]     => log_r replays to the "
+                                "PCR digest Quote_r attests!");
+            } else {
+                char want[17] = {0};
+                char got[17] = {0};
+                charra_hex_encode_prefix(expected_digest,
+                        sizeof(expected_digest), want, sizeof(want));
+                charra_hex_encode_prefix(quoted->buffer, quoted->size, got,
+                        sizeof(got));
+                charra_log_error("[" LOG_NAME "]     => log_r does NOT match "
+                                 "Quote_r's PCR digest! (expected %s..., "
+                                 "quote says %s...)",
+                        want, got);
+            }
+        }
+    }
+    charra_log_info("[" LOG_NAME "] Timing: replay log_r took %f second(s).",
+            ((double)(clock() - start_replay)) / CLOCKS_PER_SEC);
+
     bool step_3a_passed = attestation_result_ekak_rp &&
                           attestation_result_qualified &&
                           attestation_result_signature_rp &&
-                          attestation_result_nonce_rp;
+                          attestation_result_nonce_rp &&
+                          attestation_result_pcr_rp;
 
     bool attestation_result_ekak = false;
     /* Why Step 3b item 1 failed, for the reason list at the verdict. */
@@ -354,7 +418,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     bool attestation_result_nonce = false;
 
     /* Step 3b runs whatever Step 3a decided. Its three checks read only
-     * fields of the received evidence (the Attester's certificate, Quote_a,
+     * fields of the received evidence (the Attester's public key, Quote_a,
      * and the nonce), so nothing here depends on RP's identity having
      * verified -- the spec's "if 3a passes, proceed to 3b" gate was policy,
      * not a data dependency. Running it always means one appraisal reports
@@ -379,10 +443,10 @@ void coap_appraise_handler(struct coap_resource_t* resource,
 
         /* Step 3b item 1: is AK_a an identity we trust? Same lookup as
          * Step 3a item 1, against the key that actually signed Quote_a
-         * (tpm2_public_key, forwarded verbatim by the RP). The RP no
-         * longer relays any certificate for the Attester -- there is
-         * nothing to relay, because both roles' certificates were issued
-         * offline into the one trust anchor both roles read. */
+         * (tpm2_public_key, forwarded verbatim by the RP). Nothing is
+         * relayed alongside it, because there is nothing to relay: both
+         * roles' public keys were written offline into the one trust
+         * anchor every Verifier reads. */
         if (res.tpm2_public_key_len == 0) {
             ekak_att_why = "MISSING -- the RP forwarded no Attester key";
             charra_log_error("[" LOG_NAME "]     => the RP forwarded an EMPTY "
@@ -513,12 +577,17 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                               "/qualify");
         }
         if (!attestation_result_signature_rp) {
-            LOG_REASON("Quote_r signature (Step 3a item 2): MISMATCH -- not a "
-                       "valid signature by RP's AK over PCR_r");
+            LOG_REASON("Quote_r signature (Step 3a item 2): MISMATCH -- not "
+                       "a valid signature by RP's AK over the attestation");
         }
         if (!attestation_result_nonce_rp) {
             LOG_REASON("RP nonce (Step 3a item 3): WRONG -- Quote_r is not "
                        "bound to the challenge this Verifier issued");
+        }
+        if (!attestation_result_pcr_rp) {
+            LOG_REASON("log_r vs Quote_r (Step 3a item 4): MISMATCH -- the "
+                       "log sent does not replay to the PCR the quote "
+                       "attests");
         }
         if (!attestation_result_ekak) {
             LOG_REASON("Attester signing key (Step 3b item 1): %s",

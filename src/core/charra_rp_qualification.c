@@ -9,7 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "charra_event_log.h"
 #include "charra_sdk.h"
 #include "charra_synthetic_log.h"
 
@@ -53,14 +52,6 @@ CHARRA_RC charra_rp_qualification_generate(uint32_t num_entries,
         return rc;
     }
 
-    rc = charra_replay_ima_log(state_out->golden_log,
-            state_out->golden_log_len, CHARRA_IMA_PCR_INDEX,
-            state_out->golden_pcr);
-    if (rc != CHARRA_RC_SUCCESS) {
-        free(raw_log);
-        charra_rp_qualification_state_free(state_out);
-        return rc;
-    }
 
     *challenge_log_out = raw_log;
     *challenge_log_len_out = raw_log_len;
@@ -69,16 +60,15 @@ CHARRA_RC charra_rp_qualification_generate(uint32_t num_entries,
 
 CHARRA_RC charra_rp_qualification_check(rp_qualification_state* state,
         const uint8_t* submitted_log, uint32_t submitted_log_len,
-        const uint8_t submitted_pcr_digest[TPM2_SHA256_DIGEST_SIZE],
         time_t now) {
-    if (state == NULL || submitted_pcr_digest == NULL ||
+    if (state == NULL ||
             (submitted_log == NULL && submitted_log_len != 0)) {
         return CHARRA_RC_BAD_ARGUMENT;
     }
 
-    /* No challenge outstanding: a zeroed state has golden_log_len == 0 and
-     * an all-zero golden_pcr, which an empty log plus a zero digest would
-     * match -- qualifying a caller that never ran the SDK. */
+    /* No challenge outstanding: a zeroed state has golden_log_len == 0,
+     * which an empty submission would match -- qualifying a caller that
+     * never ran the SDK. */
     if (state->golden_log == NULL || state->golden_log_len == 0) {
         return CHARRA_RC_VERIFICATION_FAILED;
     }
@@ -87,10 +77,7 @@ CHARRA_RC charra_rp_qualification_check(rp_qualification_state* state,
             (submitted_log_len == 0 ||
                     memcmp(submitted_log, state->golden_log,
                             submitted_log_len) == 0);
-    bool pcr_matches = memcmp(submitted_pcr_digest, state->golden_pcr,
-                                TPM2_SHA256_DIGEST_SIZE) == 0;
-
-    if (log_matches && pcr_matches) {
+    if (log_matches) {
         state->qualified = true;
         state->expires_at =
                 now + charra_rp_qualification_get_validity_seconds();

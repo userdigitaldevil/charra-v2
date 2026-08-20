@@ -70,13 +70,14 @@ typedef struct {
     bool* use_ima_event_log;
     char** ima_event_log_path;
     char** dtls_psk_identity;
-    /* Qualification window this Verifier grants, in seconds. Must
-     * match the RP's own --qualification-validity: nothing on the
-     * wire carries the expiry (see charra_rp_qualification.h). */
+    /* Qualification window this Verifier grants, in seconds. Stamped
+     * into the deadline it records in qualified_rps.txt and echoed back
+     * to the RP in the /qualify_submit response, so the RP needs no
+     * matching flag of its own (see charra_rp_qualification.h).
+     *
+     * Every VERIFIER caller must set this: the help text prints its
+     * value. */
     time_t* qualification_validity_seconds;
-    /* Lifetime of AK certificates this Verifier issues, in seconds
-     * from issuance (see --ak-validity). */
-    time_t* ak_cert_validity_seconds;
 } cli_config_verifier;
 
 /**

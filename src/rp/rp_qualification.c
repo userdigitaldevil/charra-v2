@@ -19,7 +19,6 @@
 #include "../common/charra_log.h"
 #include "../common/charra_macro.h"
 #include "../core/charra_dto.h"
-#include "../core/charra_event_log.h"
 #include "../core/charra_marshaling.h"
 #include "../core/charra_rp_qualification.h"
 #include "../core/charra_sdk.h"
@@ -97,10 +96,17 @@ static coap_response_t coap_qualify_submit_response_handler(
 }
 
 CHARRA_RC rp_perform_qualification_handshake_once(int num_verifiers) {
-    /* Fast path: the grant we already hold is still valid. Re-checked
+    /* Fast path: the grant we already hold has not lapsed yet. Re-checked
      * against the wall clock on every call rather than latched into a
      * boolean, so a daemon whose run outlives its grant actually notices
-     * and re-qualifies instead of being voted down forever. */
+     * and re-qualifies instead of being voted down forever.
+     *
+     * Deliberately NO safety margin. The grant is only required to be
+     * valid HERE, not for the whole round that follows -- so a grant that
+     * lapses mid-round costs that cycle: every Verifier votes NO on
+     * evidence the RP believed was covered, and /appraise never says why.
+     * The next cycle re-qualifies and it self-corrects. Likelier the
+     * longer a round takes. */
     if (time(NULL) < rp_qualified_until) {
         return CHARRA_RC_SUCCESS;
     }
@@ -177,41 +183,47 @@ CHARRA_RC rp_perform_qualification_handshake_once(int num_verifiers) {
             goto done;
         }
 
-        /* --- 3. replay the redacted log into its PCR digest --- */
-        uint8_t submitted_pcr_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
-        result = charra_replay_ima_log(redacted_log, redacted_log_len,
-                CHARRA_IMA_PCR_INDEX, submitted_pcr_digest);
-        if (result != CHARRA_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME "] Could not replay the redacted "
-                             "challenge log.");
-            charra_free_if_not_null(redacted_log);
-            goto done;
-        }
-
-        /* --- 4. sign the PCR digest with RP's TPM-resident key, the same
-         * call charra_rp_build_evidence_message() uses for Quote_r --- */
+        /* --- 3. sign (redacted log || salt) --- 
+         *
+         * No replay and no PCR: the Verifier decides whether this RP
+         * redacts correctly by comparing the log bytes against its own
+         * redaction, and two identical logs replay identically anyway.
+         *
+         * The signature is here for a different reason -- it says WHO
+         * submitted. The grant is recorded against this key's
+         * fingerprint, so without it anyone could win a grant in this
+         * RP's name. The salt is folded in so the signature is bound to
+         * THIS challenge and cannot be replayed into a later round. */
         uint8_t rp_signature[CHARRA_RSA_SIGNATURE_LEN] = {0};
         TPM2B_PUBLIC ak_public_key = {0};
-        result = rp_sign_with_ak(submitted_pcr_digest,
-                sizeof(submitted_pcr_digest), rp_signature,
-                &ak_public_key);
-        if (result != CHARRA_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] Could not sign the qualification PCR "
-                    "digest.");
-            charra_free_if_not_null(redacted_log);
-            goto done;
-        }
-
-        /* --- 5. submit --- */
         msg_qualify_submit_request_dto submit_req = {
                 .submitted_redacted_log_len = redacted_log_len,
                 .submitted_redacted_log = redacted_log,
                 .rp_signature_len = sizeof(rp_signature),
                 .rp_public_key_len = sizeof(ak_public_key),
         };
-        memcpy(submit_req.submitted_pcr_digest, submitted_pcr_digest,
-                sizeof(submitted_pcr_digest));
+
+        uint32_t signed_len = redacted_log_len + sizeof(qualify_challenge_salt);
+        uint8_t* signed_data = malloc(signed_len);
+        if (signed_data == NULL) {
+            charra_free_if_not_null(redacted_log);
+            result = CHARRA_RC_ERROR;
+            goto done;
+        }
+        memcpy(signed_data, redacted_log, redacted_log_len);
+        memcpy(signed_data + redacted_log_len, qualify_challenge_salt,
+                sizeof(qualify_challenge_salt));
+        result = rp_sign_with_ak(
+                signed_data, signed_len, rp_signature, &ak_public_key);
+        free(signed_data);
+        if (result != CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Could not sign the qualification "
+                             "submission.");
+            charra_free_if_not_null(redacted_log);
+            goto done;
+        }
+
+        /* --- 4. submit --- */
         memcpy(submit_req.rp_signature, rp_signature, sizeof(rp_signature));
         /* From the same derivation that signed, as in the evidence path. */
         memcpy(submit_req.rp_public_key, &ak_public_key,

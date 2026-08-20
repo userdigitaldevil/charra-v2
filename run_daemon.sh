@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Full daemon-mode run: fresh TPM, clean state, trust_manager + attester +
+# Full daemon-mode run: fresh TPMs, clean state, trust_manager + attester +
 # N verifiers + relying_party looping until you stop it (Ctrl-C).
 #
 # The counterpart to run_live_test.sh, which runs the bounded --benchmark
@@ -14,9 +14,13 @@
 #   RP_INTERVAL=5 RP_VERIFIERS=3 ./run_daemon.sh
 #   RP_DURATION=120 ./run_daemon.sh            # stop cleanly after 2 minutes
 #
+# The Attester and the Relying Party each get their OWN TPM simulator, as
+# they would on real hardware. Each role's AK is derived by, and read from,
+# its own TPM.
+#
 # Identities are not provisioned at runtime and never expire: there are no
 # certificates at all, just a file of trusted public keys
-# (keys/trusted_keys.txt) written from the TPM by keys/gen-trusted-keys.sh,
+# (keys/trusted_keys.txt) written from the TPMs by keys/gen-trusted-keys.sh,
 # which this script re-runs after every TPM reset.
 #
 # Qualification is the one thing that DOES expire -- identity does not go
@@ -26,7 +30,7 @@
 #   VERIFIER_QUALIFICATION_VALIDITY=20 RP_CYCLES=8 ./run_daemon.sh
 #
 # Options:
-#   --keep-state   do NOT reset the TPM (see RESET_TPM below)
+#   --keep-state   do NOT reset the TPMs (see RESET_TPM below)
 #   -h, --help     this message
 #
 set -euo pipefail
@@ -53,6 +57,23 @@ RP_ATTESTER_TIMEOUT="${RP_ATTESTER_TIMEOUT:-6}"  # --attester-timeout, seconds
 # it lapses.
 VERIFIER_QUALIFICATION_VALIDITY="${VERIFIER_QUALIFICATION_VALIDITY:-180}"  # --qualification-validity
 
+# --- TPMs -------------------------------------------------------------------
+# One simulator per role, which is what real hardware looks like. It is not
+# only realism:
+#   - the two roles stop queueing behind a simulator that serves one client
+#     at a time;
+#   - their AKs come from different hierarchy seeds, so they are distinct by
+#     construction rather than by a one-bit template difference;
+#   - TPM2_Clear needs no authorization here, so on a shared TPM either role
+#     could silently destroy both identities. Separate TPMs contain that.
+# Each simulator binds PORT and PORT+1, and keeps its NVChip in its own
+# directory -- sharing one would have them clobber each other.
+#
+# TWO_TPMS=0 falls back to a single shared TPM on ATTESTER_TPM_PORT.
+TWO_TPMS="${TWO_TPMS:-1}"
+ATTESTER_TPM_PORT="${ATTESTER_TPM_PORT:-2321}"
+RP_TPM_PORT="${RP_TPM_PORT:-2325}"
+
 # --- Topology ---------------------------------------------------------------
 VERIFIER_START_PORT="${VERIFIER_START_PORT:-5684}"   # first Verifier port; rest follow
 VERIFIER_HOST="${VERIFIER_HOST:-127.0.0.1}"          # address written into verifiers_config.txt
@@ -71,15 +92,17 @@ ATTESTER_EXTRA_ARGS="${ATTESTER_EXTRA_ARGS:-}"
 IMAGE="${IMAGE:-fraunhofer-sit/charra-dev-env:1.9.0}"
 CONTAINER_NAME="${CONTAINER_NAME:-charra-daemon}"
 REBUILD="${REBUILD:-1}"          # 1 = make clean && make -j inside the container
-# 1 = wipe NVChip and TPM2_Startup(CLEAR). Note this changes both AK keys,
-# which is why the trust anchor is regenerated afterwards, in-container.
+# 1 = wipe each TPM's NVChip and TPM2_Startup(CLEAR) it. Note this changes
+# every AK, which is why the trust anchor is regenerated afterwards,
+# in-container. (TPM2_Startup alone would NOT change them -- deleting the
+# NVChip is what re-randomizes the hierarchy seeds.)
 RESET_TPM="${RESET_TPM:-1}"
 
 # =============================================================================
 #  end of tunables
 # =============================================================================
 
-usage() { sed -n '3,22p' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '3,34p' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit "${1:-0}"; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -142,8 +165,14 @@ cat <<EOF
   Cycle interval     ${RP_INTERVAL}s
   Stop after         $([ "$RP_DURATION" -gt 0 ] && echo "${RP_DURATION}s" || echo "never (Ctrl-C)")$([ "$RP_CYCLES" -gt 0 ] && echo " / $RP_CYCLES cycles" || echo "")
   Timeouts           verifier ${RP_VERIFIER_TIMEOUT}s, attester ${RP_ATTESTER_TIMEOUT}s
-  Trusted keys       keys/trusted_keys.txt, written from the TPM before any
-                     role starts; no certificates, no expiry, no renewal
+  TPMs               $([ "$TWO_TPMS" -eq 1 ] \
+                        && echo "one each -- attester :$ATTESTER_TPM_PORT, RP :$RP_TPM_PORT" \
+                        || echo "one shared on :$ATTESTER_TPM_PORT (TWO_TPMS=0)")
+  Trusted keys       keys/trusted_keys.txt, written before any role starts;
+                     $([ "$TWO_TPMS" -eq 1 ] \
+                        && echo "each AK read from its own role's TPM" \
+                        || echo "both AKs read from the one shared TPM")
+                     no certificates, no expiry, no renewal
   Qualification      granted for ${VERIFIER_QUALIFICATION_VALIDITY}s, recorded with its deadline in
                      qualified_rps.txt (shared by every Verifier); the RP
                      re-qualifies on the first cycle after it lapses
@@ -164,6 +193,9 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
   -e RP_VERIFIER_TIMEOUT="$RP_VERIFIER_TIMEOUT" \
   -e RP_ATTESTER_TIMEOUT="$RP_ATTESTER_TIMEOUT" \
   -e VERIFIER_QUALIFICATION_VALIDITY="$VERIFIER_QUALIFICATION_VALIDITY" \
+  -e TWO_TPMS="$TWO_TPMS" \
+  -e ATTESTER_TPM_PORT="$ATTESTER_TPM_PORT" \
+  -e RP_TPM_PORT="$RP_TPM_PORT" \
   -e VERIFIER_START_PORT="$VERIFIER_START_PORT" \
   -e VERIFIER_HOST="$VERIFIER_HOST" \
   -e LOG_LEVEL="$LOG_LEVEL" \
@@ -180,16 +212,37 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
 
     pkill -9 -f "^bin/" || true
 
-    if [ "$RESET_TPM" = "1" ]; then
-        pkill tpm_server || true
-        cd /tmp && rm -f NVChip
-        (tpm_server > /tmp/tpm_server.log 2>&1 &)
-        sleep 3
-        tpm2_startup --clear
-        cd ~/charra
+    ATTESTER_TCTI="mssim:host=127.0.0.1,port=$ATTESTER_TPM_PORT"
+    if [ "$TWO_TPMS" = "1" ]; then
+        RP_TCTI="mssim:host=127.0.0.1,port=$RP_TPM_PORT"
     else
-        pgrep tpm_server >/dev/null || { cd /tmp && (tpm_server > /tmp/tpm_server.log 2>&1 &); sleep 3; tpm2_startup --clear; cd ~/charra; }
+        RP_TCTI="$ATTESTER_TCTI"
     fi
+
+    # Each simulator gets its own directory: tpm_server writes NVChip into
+    # its working directory, so a shared one means the two corrupt each
+    # other -- surfacing much later as keys that stop matching the anchor.
+    start_tpm() {   # $1 = port, $2 = state dir
+        mkdir -p "$2"
+        [ "$RESET_TPM" = "1" ] && rm -f "$2/NVChip"
+        ( cd "$2" && tpm_server -port "$1" > "/tmp/tpm_server_$1.log" 2>&1 & )
+    }
+
+    if [ "$RESET_TPM" = "1" ] || ! pgrep tpm_server >/dev/null; then
+        pkill tpm_server || true
+        sleep 1
+        start_tpm "$ATTESTER_TPM_PORT" /tmp/tpm_attester
+        [ "$TWO_TPMS" = "1" ] && start_tpm "$RP_TPM_PORT" /tmp/tpm_rp
+        sleep 3
+        # Every TPM needs its own TPM2_Startup: one that has power but was
+        # never started rejects everything with 0x100 (TPM_RC_INITIALIZE),
+        # and the tools report that as an ordinary command failure.
+        TPM2TOOLS_TCTI="$ATTESTER_TCTI" tpm2_startup --clear
+        if [ "$TWO_TPMS" = "1" ]; then
+            TPM2TOOLS_TCTI="$RP_TCTI" tpm2_startup --clear
+        fi
+    fi
+    cd ~/charra
 
     if [ "$REBUILD" = "1" ]; then
         make clean && make -j
@@ -212,15 +265,23 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
     # wiping the NVChip silently changes them -- and every signature check
     # would then fail against a stale keys/trusted_keys.txt, in a way that
     # reads as a rejected identity rather than a stale file.
-    ./keys/gen-trusted-keys.sh
+    if [ "$TWO_TPMS" = "1" ]; then
+        ATTESTER_TCTI="$ATTESTER_TCTI" RP_TCTI="$RP_TCTI" \
+            ./keys/gen-trusted-keys.sh
+    else
+        CHARRA_TCTI="$ATTESTER_TCTI" ./keys/gen-trusted-keys.sh
+    fi
 
     rm -rf logs && mkdir -p logs
 
     export LOG_LEVEL_CHARRA="$LOG_LEVEL"
     [ -n "$LOG_LEVEL_COAP" ] && export LOG_LEVEL_COAP
 
+    # Only these two open a TPM. The Verifiers never do -- every check they
+    # run is public-key math in mbedTLS -- and neither does trust_manager.
     bin/trust_manager > logs/trust_manager.log 2>&1 &
-    bin/attester $ATTESTER_EXTRA_ARGS > logs/attester.log 2>&1 &
+    CHARRA_TCTI="$ATTESTER_TCTI" bin/attester $ATTESTER_EXTRA_ARGS \
+        > logs/attester.log 2>&1 &
 
     # start_verifiers.sh also generates verifiers_config.txt for exactly these
     # ports, which is what the Trust Manager resolves the RP requests against.
@@ -243,7 +304,8 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
     echo
 
     # Foreground and tee-ed: Ctrl-C stops the daemon, the container exits.
-    bin/relying_party $rp_args $RP_EXTRA_ARGS 2>&1 | tee logs/relying_party.log
+    CHARRA_TCTI="$RP_TCTI" bin/relying_party $rp_args $RP_EXTRA_ARGS 2>&1 \
+        | tee logs/relying_party.log
 
     # A log that is mostly NUL bytes means two processes shared the file: one
     # truncated it while the other held a descriptor at a large offset. That

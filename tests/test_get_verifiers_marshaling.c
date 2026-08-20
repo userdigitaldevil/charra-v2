@@ -12,9 +12,10 @@
  * Trust Manager side went unnoticed (see CHARRA_V2_NOTES.md). These tests
  * cover round-tripping (marshal then unmarshal reproduces the original
  * DTO, including a response with fewer verifiers than requested -- the
- * normal "some Verifier IDs missing from configuration" case) and, mirroring
- * test_certify_ak_marshaling.c's technique, that an oversized field/count
- * is rejected rather than overflowing its destination array -- hand-encoded
+ * normal "some Verifier IDs missing from configuration" case) and, using
+ * the same technique as test_rp_evidence_marshaling.c, that an oversized
+ * field/count is rejected rather than overflowing its destination array
+ * -- hand-encoded
  * with QCBOR directly, since the normal encoder can't produce an oversized
  * field (it reads from the same fixed-size struct it's encoding into).
  *

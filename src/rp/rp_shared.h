@@ -143,7 +143,6 @@ extern msg_attestation_response_dto last_response;
 /** log_r: the redacted log, and the PCR digest replayed from it. */
 extern uint8_t* rp_log_r;
 extern uint32_t rp_log_r_len;
-extern uint8_t rp_pcr_r[TPM2_SHA256_DIGEST_SIZE];
 
 /** Per-Verifier nonces, indexed the same way as verifiers[]. */
 extern uint8_t verifier_nonces[MAX_VERIFIERS][sizeof(TPMU_HA)];
