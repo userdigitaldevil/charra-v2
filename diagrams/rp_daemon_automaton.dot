@@ -2,7 +2,7 @@ digraph rp_daemon {
   compound=true; newrank=true; rankdir=TB; bgcolor="white";
   splines=ortho; esep=0.3;
   fontname="Helvetica"; labelloc="t"; labeljust="l"; fontsize=20;
-  ranksep=0.45; nodesep=0.55;
+  ranksep=0.5; nodesep=0.7;
 
   label=<<b>CHARRA v2 — Relying Party, daemon mode</b><br align="left"/>
 <font point-size="11">The RP's own states run down the <b>left</b> spine; each peer it talks to sits on its <b>right</b>, on the same line.<br align="left"/>
@@ -108,7 +108,8 @@ anchor labelled 'attester'.</font><br align="left"/>>,
 
   /* ---------------- the cycle ------------------------------------------ */
   S0 [label=<<b>cycle start</b><br align="left"/>
-<font point-size="10">loop until SIGINT, <b>--cycles</b> (0 = unbounded) or <b>--duration</b> (0 = none)</font><br align="left"/>>,
+<font point-size="10">Loops until one of the three stop conditions in SHUTDOWN below fires.<br align="left"/>
+Defaults: <b>--cycles</b> 0 (unbounded), <b>--duration</b> 0 (no deadline).</font><br align="left"/>>,
       fillcolor="#e0e7ff"];
 
   S1 [label=<<b>1 · get verifiers</b><br align="left"/>
@@ -161,11 +162,38 @@ The signature says WHO submitted; the salt binds it to THIS challenge.</font><br
 accepted. Unreachable, timed out, or never sent all count as NO.</font><br align="left"/>>,
       fillcolor="#e0e7ff"];
 
-  S9 [label=<<b>9 · sleep <b>--interval</b> (15s), next cycle</b>>, fillcolor="#e0e7ff"];
+  subgraph cluster_loopctl {
+    label=<<b>9 · Loop control</b> — every cycle, finished or abandoned, arrives here.<br align="left"/><font point-size="10">The three ways this daemon stops, in the order they are tested. Fall through all three and it sleeps.</font><br align="left"/>>;
+    fontsize=13; style="rounded,filled"; fillcolor="#f8fafc"; color="#94a3b8"; margin=10;
+
+    QQUIT [label=<<b>asked to stop?</b><br align="left"/><font point-size="9">SIGINT (Ctrl-C) or SIGTERM<br align="left"/>(docker stop, timeout, systemd) —<br align="left"/>from the OS, never from a peer</font>>,
+           shape=diamond, fillcolor="#fef3c7", color="#b45309", width=2.2, height=1.15];
+    QCYC  [label=<<b>--cycles reached?</b><br align="left"/><font point-size="9">default 0 = unbounded</font>>,
+           shape=diamond, fillcolor="#fef3c7", color="#b45309", width=2.0, height=0.95];
+    QDUR  [label=<<b>--duration elapsed?</b><br align="left"/><font point-size="9">default 0 = no deadline</font>>,
+           shape=diamond, fillcolor="#fef3c7", color="#b45309", width=2.0, height=0.95];
+  }
+
+  NAP [label=<<b>nap min(--interval, time left on --duration)</b><br align="left"/>
+<font point-size="9">Clamped so a --duration deadline is honoured to within a second, not overshot<br align="left"/>
+by a whole interval. Sliced into 1s steps so the stop flag is re-tested — though<br align="left"/>
+<font face="Courier">sleep()</font> is <font face="Courier">nanosleep</font>, which a signal never restarts, so a Ctrl-C 2s into a 60s<br align="left"/>
+nap exits in <b>~0.1s</b> (measured). The slicing is portability insurance, not the reason.<br align="left"/>
+<b>Leaves early for two reasons</b>: a signal, or --duration running out (re-tested<br align="left"/>
+after the nap as well as before it). Either way → SHUTDOWN.</font><br align="left"/>>,
+       fillcolor="#e0e7ff"];
+
+  STOP [label=<<b>SHUTDOWN</b><br align="left"/>
+<font point-size="10">One line reports which of the three fired. A cycle already in flight is not torn<br align="left"/>
+down mid-way: since the quit flag is tested at every phase boundary, a stop<br align="left"/>
+during a cycle abandons it at the next boundary — measured at <b>2.3s</b> when<br align="left"/>
+signalled during the Attester round trip, rather than waiting out the cycle.</font><br align="left"/>>,
+        fillcolor="#dcfce7", color="#15803d", penwidth=1.8];
 
   ABORT [label=<<b>cycle abandoned</b>&nbsp;&nbsp;<font point-size="10">◂ every ▸ abort lands here</font><br align="left"/>
-<font point-size="10">Not fatal to the daemon: the next cycle starts fresh. The RP does not<br align="left"/>
-retry within a cycle -- a briefly unreachable peer costs one cycle.</font><br align="left"/>>,
+<font point-size="10">Not fatal: falls into loop control like a completed cycle, and the next one<br align="left"/>
+starts fresh. The RP does not retry within a cycle — a briefly unreachable<br align="left"/>
+peer costs one cycle.</font><br align="left"/>>,
          fillcolor="#fee2e2", color="#b91c1c"];
 
   /* ---------------- peers ---------------------------------------------- */
@@ -213,11 +241,24 @@ WHICH check failed. Reasons go to the Verifier's log only.</font></font><br alig
   S0 -> S1 -> S2 -> S3 [weight=20];
   S3 -> S4 [xlabel=" Step 2a passed ", weight=20];
   S4 -> S5 -> Q [weight=20];
-  Q  -> S6 [xlabel=" no — renew first "];
-  Q  -> S7 [xlabel=" yes ", weight=10];
+  Q  -> S6 [xlabel=" no "];
+  Q  -> S7 [weight=10];
   S6 -> S7 [xlabel=" qualified ", weight=20];
-  S7 -> S8 -> S9 [weight=20];
-  S9 -> S0 [constraint=false, xlabel=" next cycle "];
+  S7 -> S8 [weight=20];
+  /* A completed cycle AND an abandoned one both fall into loop control. */
+  S8 -> QQUIT [weight=20];
+  ABORT -> QQUIT [color="#b91c1c", style=dashed, constraint=false];
+  QQUIT -> QCYC [xlabel=" no "];
+  QCYC  -> QDUR [xlabel=" no "];
+  QDUR  -> NAP  [xlabel=" no "];
+  QQUIT -> STOP [color="#15803d", fontcolor="#15803d", xlabel=" yes "];
+  QCYC  -> STOP [color="#15803d", fontcolor="#15803d", xlabel=" yes "];
+  QDUR  -> STOP [color="#15803d", fontcolor="#15803d", xlabel=" yes "];
+  /* --duration is re-tested after the nap too, and the nap itself is cut
+   * short by a signal -- both land on the same terminal. */
+  NAP -> STOP [color="#15803d", fontcolor="#15803d", constraint=false,
+               xlabel=" yes "];
+  NAP -> S0 [constraint=false, xlabel=" next cycle "];
 
   S1 -> TM  [style=dashed, dir=both, color="#5b21b6"];
   S2 -> ATT [style=dashed, dir=both, color="#0d9488"];
@@ -247,13 +288,15 @@ WHICH check failed. Reasons go to the Verifier's log only.</font></font><br alig
   edge [color="#334155", arrowhead=normal, style=solid, constraint=true];
 
   /* failure exits */
-  ABORT -> S9 [color="#b91c1c", style=dashed];
 
   /* Peers pinned to the right of the state that calls them, and the RP's
    * own states weighted into a straight spine so the eye can follow it. */
   { rank=same; S2; ATT }
   { rank=same; S7; VA }
   { rank=same; S8; ABORT }
+  /* NAP left, SHUTDOWN right, on their own row -- otherwise the two wide
+   * boxes were laid out overlapping. */
+  { rank=same; NAP -> STOP [style=invis]; }
   /* Invisible chains fix the LEFT-TO-RIGHT order inside each rank, which
    * rank=same alone does not: without them the tags drifted past the peer
    * boxes on the right and the connectors had to reach across the page. */
@@ -263,5 +306,5 @@ WHICH check failed. Reasons go to the Verifier's log only.</font></font><br alig
   { rank=same; A4 -> S6 -> VQ [style=invis]; }
 
   edge [style=invis];
-  S0 -> S1 -> S2 -> S3 -> S4 -> S5 -> Q -> S6 -> S7 -> S8 -> S9 [weight=100];
+  S0 -> S1 -> S2 -> S3 -> S4 -> S5 -> Q -> S6 -> S7 -> S8 [weight=100];
 }

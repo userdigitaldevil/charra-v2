@@ -505,6 +505,14 @@ void* get_attestation_results_thread(void* arg) {
     const int verifier_index = *(int*)arg;
     const verifier_info* verifier = &verifiers[verifier_index];
 
+    /* A stop can land between pthread_create() and the thread actually
+     * running. Bail before doing any I/O rather than completing an
+     * exchange whose result is about to be discarded; the vote array
+     * already defaults to NO, so an unrun thread needs nothing else. */
+    if (quit) {
+        return NULL;
+    }
+
     /* Tags this thread's log lines so concurrent Verifier threads don't
      * interleave into one indistinguishable stream. */
     char log_prefix[32] = {0};
@@ -606,6 +614,10 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
         charra_rp_release_evidence();
         return CHARRA_RC_ERROR;
     }
+    if (quit) {
+        charra_rp_release_evidence();
+        return CHARRA_RC_ERROR;
+    }
 
     /* Qualify before any verifier thread starts -- with a single Verifier,
      * which records the grant in the list every Verifier reads
@@ -617,6 +629,12 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
             CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not qualify with any "
                          "reachable Verifier; aborting attestation run.");
+        charra_rp_release_evidence();
+        return CHARRA_RC_ERROR;
+    }
+    /* Last check before spawning threads: past this point a stop costs
+     * however long the slowest thread's exchange takes. */
+    if (quit) {
         charra_rp_release_evidence();
         return CHARRA_RC_ERROR;
     }

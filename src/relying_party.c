@@ -225,6 +225,9 @@ static CHARRA_RC run_one_attestation_cycle(
     }
     charra_log_info("[" LOG_NAME "] Phase timing: get_verifiers took %.3fs.",
             duration);
+    if (quit) {
+        return CHARRA_RC_ERROR;
+    }
 
     /* Getting evidence */
     charra_log_info("[" LOG_NAME "] Getting evidence.");
@@ -242,8 +245,14 @@ static CHARRA_RC run_one_attestation_cycle(
     charra_log_info("[" LOG_NAME "] Phase timing: get_evidence (Attester "
                     "round trip + local appraisal) took %.3fs.",
             duration);
+    if (quit) {
+        return CHARRA_RC_ERROR;
+    }
 
     /* Getting attestation results */
+    if (quit) {
+        return CHARRA_RC_ERROR;
+    }
     charra_log_info("[" LOG_NAME "] Getting attestation results.");
     clock_gettime(CLOCK_MONOTONIC, &start_time);
     if ((result = get_attestation_results(num_verifiers)) !=
@@ -425,7 +434,12 @@ int main(int argc, char** argv) {
          * whole process. The failure is already logged in detail by
          * whichever phase hit it. */
         if (run_one_attestation_cycle(rp_num_verifiers, label, NULL) !=
-                CHARRA_RC_SUCCESS) {
+                CHARRA_RC_SUCCESS &&
+                !quit) {
+            /* The !quit term matters: a cycle cut short by SIGINT returns
+             * the same failure code as a real one, and reporting a clean
+             * stop as an error is how a shutdown comes to look like a
+             * fault. */
             charra_log_error("[" LOG_NAME "] Attestation cycle %lu failed; "
                              "retrying after the usual interval.",
                     cycle);

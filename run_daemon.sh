@@ -272,7 +272,7 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
         CHARRA_TCTI="$ATTESTER_TCTI" ./keys/gen-trusted-keys.sh
     fi
 
-    rm -rf logs && mkdir -p logs
+
 
     export LOG_LEVEL_CHARRA="$LOG_LEVEL"
     [ -n "$LOG_LEVEL_COAP" ] && export LOG_LEVEL_COAP
