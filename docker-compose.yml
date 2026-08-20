@@ -1,0 +1,43 @@
+---
+version: '3'
+services:
+  charra-dev-env:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        user: bob
+        uid: 1000
+        gid: 1000
+    image: fraunhofer-sit/charra-dev-env:1.9.0
+    container_name: charra-dev-env
+    restart: unless-stopped
+    volumes:
+      - ".:/home/bob/charra"
+    #ports:
+    #  - "127.0.0.1:8080:8080"
+    #command: >
+    #  /bin/bash
+#  charra-attester:
+#    build:
+#      context: .
+#      dockerfile: Dockerfile.app
+#    image: fraunhofer-sit/charra:1.5.1
+#    container_name: charra-attester
+#    restart: unless-stopped
+#    ports:
+#      - "127.0.0.1:5683:5683"
+#    command: >
+#      /home/bob/charra/bin/attester
+#  charra-verifier:
+#    build:
+#      context: .
+#      dockerfile: Dockerfile.app
+#    image: fraunhofer-sit/charra:1.5.1
+#    container_name: charra-verifier
+#    restart: unless-stopped
+    #ports:
+    #  - "127.0.0.1:5683:5683"
+#    command: >
+#      /home/bob/charra/bin/verifier
+
