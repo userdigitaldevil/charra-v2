@@ -20,8 +20,13 @@ obj/*
 #     role accepts, written from the TPM by keys/gen-trusted-keys.sh.
 #     Regenerate after any TPM reset rather than committing it; the keys it
 #     names belong to one specific NVChip.
+#   verifiers_config.txt -- host:port per Verifier ID, rewritten by
+#     start_verifiers.sh for however many Verifiers that run starts. It was
+#     tracked, so every run with a different --verifiers showed up as a
+#     spurious diff.
 qualified_rps.txt
 qualified_rps.txt.tmp
+verifiers_config.txt
 keys/trusted_keys.txt
 keys/trusted_keys.txt.tmp
 
