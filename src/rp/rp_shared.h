@@ -19,6 +19,7 @@
 #define CHARRA_RP_SHARED_H
 
 #include <coap3/coap.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -73,7 +74,7 @@ extern unsigned long rp_max_cycles;
 
 /* Set by the SIGINT/SIGTERM handler; polled by the daemon loop and by
  * rp_interruptible_sleep(). */
-extern bool quit;
+extern volatile sig_atomic_t quit;
 
 extern charra_log_t charra_log_level;
 
@@ -148,6 +149,12 @@ extern uint32_t rp_log_r_len;
 extern uint8_t verifier_nonces[MAX_VERIFIERS][sizeof(TPMU_HA)];
 extern uint32_t verifier_nonce_lens[MAX_VERIFIERS];
 
+/** SHA-256 of the evidence sent to each Verifier, kept because the signed
+ * verdict coming back names it and the response handler has no other way
+ * to reach the buffer, which is freed by then. See charra_verdict.h. */
+extern uint8_t verifier_evidence_digests[MAX_VERIFIERS]
+                                        [TPM2_SHA256_DIGEST_SIZE];
+
 /* --- policy inputs ------------------------------------------------------ */
 extern uint8_t tpm_pcr_selection[TPM2_MAX_PCRS];
 extern uint32_t tpm_pcr_selection_len;
@@ -169,10 +176,16 @@ extern const bool USE_TPM_FOR_RANDOM_NONCE_GENERATION;
  * All defined in relying_party.c; the pipeline modules read them. */
 extern CHARRA_RC attestation_rc;
 extern bool attestation_results[MAX_VERIFIERS];
+/** Whether each Verifier's verdict verified -- true even for a signed NO.
+ * Separates "voted against us" from "sent something we could not count",
+ * which are the same NO but very different faults. */
+extern bool verifier_verdict_verified[MAX_VERIFIERS];
 extern uint16_t attester_response_timeout;
 extern charra_dtls_config dtls_config;
 extern char* dtls_rpk_attester_public_key_path;
 extern char* dtls_rpk_verifier_public_key_path;
+/** Public half of the key Verifiers sign their verdicts with. */
+extern char* verifier_public_key_path;
 extern char* ima_event_log_path;
 extern char* ima_test_log_path;
 /* Per-Verifier, not shared: five threads run these exchanges

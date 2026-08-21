@@ -19,7 +19,9 @@
 #include "../common/charra_macro.h"
 #include "../core/charra_dto.h"
 #include "../core/charra_marshaling.h"
+#include "../core/charra_verdict.h"
 #include "../util/charra_util.h"
+#include "../util/crypto_util.h"
 #include "../util/coap_util.h"
 #include "../util/io_util.h"
 #include "rp_coap.h"
@@ -242,35 +244,38 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
         const coap_pdu_t* sent CHARRA_UNUSED,
         const coap_pdu_t* received,
         const coap_mid_t mid CHARRA_UNUSED) {
-            
-    int* current_thread_index = coap_session_get_app_data(session);
-    processing_appraisal_response[*current_thread_index] = true;
+    int* index = coap_session_get_app_data(session);
+    processing_appraisal_response[*index] = true;
+
+    /* Fail-closed, set before anything can fail: only a verdict that
+     * parses, verifies under the Verifier's key, and names this round's
+     * nonce and this Verifier's copy of the evidence can turn it true.
+     * An unverifiable YES is a NO -- see charra_verdict.h. */
+    attestation_results[*index] = false;
+    verifier_verdict_verified[*index] = false;
 
     size_t data_len = 0;
     const uint8_t* data = NULL;
-    if (!charra_coap_get_payload(
-                received, LOG_NAME, "/appraise response", &data, &data_len,
-                NULL)) {
-        attestation_rc = CHARRA_RC_ERROR;
-        goto cleanup;
-    }
-
-    const char* successful_message = "Attestation successful!\0";
-
-    /* memcmp against the exact sent length, not strcmp on data: data points
-     * into the PDU buffer as received (data_len bytes, per
-     * coap_add_data_large_response()'s strlen()-based length on the
-     * Verifier's side), with no guaranteed NUL terminator past it. */
-    if (data_len == strlen(successful_message) &&
-            memcmp(data, successful_message, data_len) == 0) {
-        attestation_results[*current_thread_index] = true;
+    bool accepted = false;
+    if (charra_coap_get_payload(received, LOG_NAME, "/appraise response",
+                &data, &data_len, NULL) &&
+            charra_verdict_verify((uint32_t)data_len, data,
+                    verifier_public_key_path, verifier_nonces[*index],
+                    verifier_nonce_lens[*index],
+                    verifier_evidence_digests[*index], time(NULL),
+                    &accepted) == CHARRA_RC_SUCCESS) {
+        attestation_results[*index] = accepted;
+        verifier_verdict_verified[*index] = true;
+        charra_log_info("[" LOG_NAME "] Verifier n\u00b0 %d returned a valid "
+                        "signed verdict: %s.",
+                *index + 1, accepted ? "ACCEPTED" : "REJECTED");
     } else {
-        charra_log_info("[" LOG_NAME "] False\n");
-        attestation_results[*current_thread_index] = false;
+        charra_log_error("[" LOG_NAME "] Verifier n\u00b0 %d did not return a "
+                         "verdict this RP could verify; counting it as a NO.",
+                *index + 1);
     }
 
-cleanup:
-    processing_appraisal_response[*current_thread_index] = false;
+    processing_appraisal_response[*index] = false;
     return COAP_RESPONSE_OK;
 }
 
@@ -458,10 +463,9 @@ CHARRA_RC get_evidence(void) {
 
     charra_log_info("[" LOG_NAME "] Sending attestation request.");
     /* Reset before the exchange, not after: coap_attester_handler() is the
-     * only thing that writes a verdict here, it does not run at all on a
-     * timeout, and coap_verifier_handler_appraisal() writes this same
-     * global later in the cycle -- so without this a previous round's value
-     * could be read as this round's verdict. Fail-closed initial value. */
+     * only thing that writes a verdict here and it does not run at all on
+     * a timeout, so without this a previous round's value could be read as
+     * this round's verdict. Fail-closed initial value. */
     attestation_rc = CHARRA_RC_ERROR;
     result = rp_coap_exchange(&(rp_coap_request){
             .host = attester_host, .port = attester_port,
@@ -523,6 +527,7 @@ void* get_attestation_results_thread(void* arg) {
     /* Fail closed: nothing below sets these on an early exit, so without the
      * reset a stale PASS from a previous cycle would be counted in the vote. */
     attestation_results[verifier_index] = false;
+    verifier_verdict_verified[verifier_index] = false;
     verifier_latency_ms[verifier_index] = -1;
 
     /* Nothing per-Verifier to provision: neither AK's certificate is
@@ -579,6 +584,16 @@ void* get_attestation_results_thread(void* arg) {
     charra_log_info(
             "[" LOG_NAME "] Sending %u bytes of RP evidence to Verifier n\u00b0 %d.",
             evidence_buf_len, verifier_index + 1);
+
+    /* Kept for the response handler, which checks the signed verdict names
+     * this exact submission -- by then evidence_buf is freed. */
+    if (hash_sha256(evidence_buf_len, evidence_buf,
+                verifier_evidence_digests[verifier_index]) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not digest the evidence.");
+        charra_free_if_not_null(evidence_buf);
+        return NULL;
+    }
 
     struct timespec appraisal_start, appraisal_end;
     clock_gettime(CLOCK_MONOTONIC, &appraisal_start);
@@ -647,18 +662,32 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
     pthread_t threads[num_verifiers];
     int indexes[num_verifiers];
 
+    /* started, not num_verifiers, is what gets joined below. Returning
+     * straight from here would unwind the frame holding indexes[], which
+     * every running thread still dereferences for its slot number, and
+     * would free log_r out from under the ones building a message from
+     * it. Break, join, then decide. */
+    int started = 0;
     for (int i = 0; i < num_verifiers; ++i) {
         indexes[i] = i;
         if (pthread_create(&threads[i], NULL, get_attestation_results_thread, &indexes[i]) != 0) {
-            charra_log_error("[" LOG_NAME"] Error creating thread");
-            goto done;
-        } else {
-            charra_log_info("[" LOG_NAME "] Forwarding evidence to Verifier n° %d (port %u) ...", i+1, verifiers[i].port_number);
+            charra_log_error("[" LOG_NAME "] Could not create the thread for "
+                             "Verifier n\u00b0 %d; abandoning this attestation "
+                             "cycle.", i + 1);
+            break;
         }
+        started++;
+        charra_log_info("[" LOG_NAME "] Forwarding evidence to Verifier n° %d (port %u) ...", i+1, verifiers[i].port_number);
     }
 
-    for (int i = 0; i < num_verifiers; ++i) {
+    for (int i = 0; i < started; ++i) {
         pthread_join(threads[i], NULL);
+    }
+
+    /* Only once every thread is joined. Their votes default to NO, so a
+     * short round is a lost cycle, never a wrong tally. */
+    if (started < num_verifiers) {
+        goto done;
     }
 
     /* Qualification is the only readiness left to report: the signing key
@@ -712,6 +741,13 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
              * never judged anything -- still a NO, but "appraisal failed"
              * would point at a per-Verifier log that does not exist. */
             reason = "no response from Verifier (unreachable or timed out)";
+        } else if (!verifier_verdict_verified[i]) {
+            /* It answered, and may well have accepted -- but the verdict
+             * did not verify, so we have no vote to count. A Verifier-side
+             * log saying SUCCESSFUL alongside this line is the signature of
+             * a key mismatch, not of a disagreement. */
+            reason = "verdict could not be verified (bad signature, stale "
+                     "nonce, or wrong evidence)";
         } else {
             reason = "appraisal failed (see per-Verifier log above)";
         }

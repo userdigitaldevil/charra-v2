@@ -220,9 +220,11 @@ CHARRA_RC rp_replay_log_into_pcr(const uint8_t* log, uint32_t log_len) {
         goto cleanup;
     }
 
+    /* !quit because this is the longest uninterruptible stretch in a
+     * cycle -- one TPM round trip per log entry, tens of them. */
     uint32_t offset = 0;
     uint32_t extended = 0;
-    while (offset < log_len) {
+    while (offset < log_len && !quit) {
         charra_event_log_entry entry = {0};
         if (charra_event_log_parse_entry(
                     log, log_len, &offset, digest_len, &entry) !=
@@ -243,6 +245,16 @@ CHARRA_RC rp_replay_log_into_pcr(const uint8_t* log, uint32_t log_len) {
             goto cleanup;
         }
         extended++;
+    }
+
+    if (quit) {
+        /* A partial replay leaves the PCR holding a value no log explains,
+         * so it must not be quoted. The caller abandons the cycle. */
+        charra_log_info("[" LOG_NAME "] Replay of log_r interrupted after %u "
+                        "entr(ies); abandoning this attestation cycle.",
+                extended);
+        charra_r = CHARRA_RC_ERROR;
+        goto cleanup;
     }
 
     charra_log_info("[" LOG_NAME "] Replayed %u log_r entr(ies) into PCR %d; "

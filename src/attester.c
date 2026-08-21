@@ -53,7 +53,7 @@
 /* --- config ------------------------------------------------------------- */
 
 /* quit signal */
-static bool quit = false;
+static volatile sig_atomic_t quit = 0;
 
 /* logging */
 #define LOG_NAME "attester"
@@ -193,4 +193,4 @@ finish:
 
 /* --- function definitions ----------------------------------------------- */
 
-static void handle_sigint(int signum CHARRA_UNUSED) { quit = true; }
+static void handle_sigint(int signum CHARRA_UNUSED) { quit = 1; }

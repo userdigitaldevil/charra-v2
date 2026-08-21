@@ -33,6 +33,9 @@ Read the vocabulary table first — several words below are narrower than they l
   <TR><TD ALIGN="LEFT" BGCOLOR="#f8fafc"><B>Quote_a</B> / <B>Quote_r</B></TD>
       <TD ALIGN="LEFT">TPM2_Quote taken by the <B>Attester</B> over PCRs {0..7, 10} with its RESTRICTED key /<BR ALIGN="LEFT"/>by the <B>RP</B> over PCR 23 with its unrestricted key. Both are built AND signed inside a TPM.</TD></TR>
 
+  <TR><TD ALIGN="LEFT" BGCOLOR="#fff7ed"><B>verdict</B></TD>
+      <TD ALIGN="LEFT">A Verifier's vote, <B>ECDSA-signed</B> with <FONT FACE="Courier">keys/verifier.der</FONT> and bound to the round: it carries<BR ALIGN="LEFT"/>the Verifier's own nonce and a SHA-256 of the evidence appraised. The RP counts it only if<BR ALIGN="LEFT"/>all three check out. <B>Fail-closed</B> — an unverifiable YES is a NO. All Verifiers share one<BR ALIGN="LEFT"/>keypair today, so a signature says &quot;some Verifier&quot;; the <B>nonce</B> keeps votes in their own slots.</TD></TR>
+
   <TR><TD ALIGN="LEFT" BGCOLOR="#f0fdfa"><B>replay</B></TD>
       <TD ALIGN="LEFT">Re-applying a log's digests from zero to rebuild a PCR value. <B>Where it runs is the whole<BR ALIGN="LEFT"/>design:</B> in a <B>TPM</B> when you are <B>proving</B> a value, in <B>software</B> when you are <B>checking</B> one.<BR ALIGN="LEFT"/>So the RP replays log_a in software (step 3) but log_r in its TPM (step 5); the Verifier<BR ALIGN="LEFT"/>replays log_r in software. Identical arithmetic — only the proof differs.</TD></TR>
 
@@ -40,7 +43,7 @@ Read the vocabulary table first — several words below are narrower than they l
       <TD ALIGN="LEFT">A <B>local setting</B> of whichever process is named, never a protocol message. Defaults shown.</TD></TR>
 
   <TR><TD ALIGN="LEFT" BGCOLOR="#fee2e2"><FONT COLOR="#b91c1c"><B>▸ abort</B></FONT></TD>
-      <TD ALIGN="LEFT">A connector, not a wire: &quot;continue at <I>cycle abandoned</I>&quot;. Four failure paths would otherwise<BR ALIGN="LEFT"/>become four page-crossing lines.</TD></TR>
+      <TD ALIGN="LEFT">A connector, not a wire: &quot;continue at <I>attestation cycle abandoned</I>&quot;. Four failure paths would otherwise<BR ALIGN="LEFT"/>become four page-crossing lines.</TD></TR>
 
   <TR><TD ALIGN="LEFT" BGCOLOR="#f8fafc"><B>colours</B></TD>
       <TD ALIGN="LEFT"><FONT COLOR="#5b21b6"><B>purple</B></FONT> Trust Manager &#183; <FONT COLOR="#0d9488"><B>teal</B></FONT> Attester &#183; <FONT COLOR="#c2410c"><B>orange</B></FONT> Verifier &#183; diamonds are guards</TD></TR>
@@ -54,17 +57,17 @@ Read the vocabulary table first — several words below are narrower than they l
   <TR><TD BGCOLOR="#e2e8f0"><B>env var</B></TD><TD BGCOLOR="#e2e8f0"><B>becomes</B></TD><TD BGCOLOR="#e2e8f0"><B>default</B></TD><TD BGCOLOR="#e2e8f0"><B>what it changes</B></TD></TR>
 
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">RP_VERIFIERS</FONT></TD><TD ALIGN="LEFT"><B>--verifiers</B></TD><TD ALIGN="RIGHT"><B>5</B></TD>
-      <TD ALIGN="LEFT">Verifiers per cycle (1..10) — also how many get started. Sets the majority denominator.</TD></TR>
+      <TD ALIGN="LEFT">Verifiers per attestation cycle (1..10) — also how many get started. Sets the majority denominator.</TD></TR>
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">RP_INTERVAL</FONT></TD><TD ALIGN="LEFT"><B>--interval</B></TD><TD ALIGN="RIGHT"><B>15s</B></TD>
-      <TD ALIGN="LEFT">Sleep between cycles (step 9).</TD></TR>
+      <TD ALIGN="LEFT">Sleep between attestation cycles (step 9).</TD></TR>
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">RP_CYCLES</FONT></TD><TD ALIGN="LEFT"><B>--cycles</B></TD><TD ALIGN="RIGHT"><B>0</B></TD>
-      <TD ALIGN="LEFT">Stop after N cycles. 0 = unbounded.</TD></TR>
+      <TD ALIGN="LEFT">Stop after N attestation cycles. 0 = unbounded.</TD></TR>
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">RP_DURATION</FONT></TD><TD ALIGN="LEFT"><B>--duration</B></TD><TD ALIGN="RIGHT"><B>0</B></TD>
       <TD ALIGN="LEFT">Stop after roughly N seconds. 0 = run until SIGINT.</TD></TR>
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">RP_VERIFIER_TIMEOUT</FONT></TD><TD ALIGN="LEFT"><B>--verifier-timeout</B></TD><TD ALIGN="RIGHT"><B>6s</B></TD>
       <TD ALIGN="LEFT">Wait per Verifier round trip. A timeout counts as a <B>NO</B> vote, exactly like a rejection.</TD></TR>
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">RP_ATTESTER_TIMEOUT</FONT></TD><TD ALIGN="LEFT"><B>--attester-timeout</B></TD><TD ALIGN="RIGHT"><B>6s</B></TD>
-      <TD ALIGN="LEFT">Wait for the Attester's evidence (step 2). Exceeding it abandons the cycle.</TD></TR>
+      <TD ALIGN="LEFT">Wait for the Attester's evidence (step 2). Exceeding it abandons the attestation cycle.</TD></TR>
   <TR><TD ALIGN="LEFT" BGCOLOR="#fff7ed"><FONT FACE="Courier">VERIFIER_QUALIFICATION_VALIDITY</FONT></TD><TD ALIGN="LEFT" BGCOLOR="#fff7ed"><B>--qualification-validity</B></TD><TD ALIGN="RIGHT" BGCOLOR="#fff7ed"><B>180s</B></TD>
       <TD ALIGN="LEFT" BGCOLOR="#fff7ed">How long a passing /qualify is honoured. <B>Verifier-side flag</B> — the RP learns the resulting<BR ALIGN="LEFT"/>deadline from the /qualify_submit response, so it needs no matching flag. Set it below<BR ALIGN="LEFT"/><B>120s</B> to watch the RP re-qualify mid-run; run_daemon.sh warns when you do.</TD></TR>
   <TR><TD ALIGN="LEFT" BGCOLOR="#f0fdfa"><FONT FACE="Courier">TWO_TPMS</FONT></TD><TD ALIGN="LEFT" BGCOLOR="#f0fdfa">—</TD><TD ALIGN="RIGHT" BGCOLOR="#f0fdfa"><B>1</B></TD>
@@ -106,8 +109,8 @@ anchor labelled 'attester'.</font><br align="left"/>>,
     P0 -> P1;
   }
 
-  /* ---------------- the cycle ------------------------------------------ */
-  S0 [label=<<b>cycle start</b><br align="left"/>
+  /* ---------------- one attestation cycle ------------------------------ */
+  S0 [label=<<b>start of one attestation cycle</b><br align="left"/>
 <font point-size="10">Loops until one of the three stop conditions in SHUTDOWN below fires.<br align="left"/>
 Defaults: <b>--cycles</b> 0 (unbounded), <b>--duration</b> 0 (no deadline).</font><br align="left"/>>,
       fillcolor="#e0e7ff"];
@@ -129,12 +132,12 @@ All six run even after one fails, so one pass reports everything.</font><br alig
 
   S4 [label=<<b>4 · privacy-clean → log_r</b><br align="left"/>
 <font point-size="10">charra_sdk_redact_ima_log() rewrites each entry's PATH only.<br align="left"/>
-Randomised, so it is done ONCE per cycle — per Verifier would<br align="left"/>
+Randomised, so it is done ONCE per attestation cycle — per Verifier would<br align="left"/>
 hand each of them a different log_r for the same attestation.</font><br align="left"/>>];
 
   S5 [label=<<b>5 · replay log_r into PCR 23, on the RP's TPM</b>&nbsp;&nbsp;<font point-size="9">[RP as PROVER]</font><br align="left"/>
 <font point-size="10">TPM2_PCR_Reset(23), then one TPM2_PCR_Extend per entry.<br align="left"/>
-<b>Once per cycle, not per Verifier</b> — quoting reads a PCR without<br align="left"/>
+<b>Once per attestation cycle, not per Verifier</b> — quoting reads a PCR without<br align="left"/>
 consuming it, so one replay backs every quote below.<br align="left"/>
 PCR 23 because it is resettable from locality 0 and PCR 10 is not,<br align="left"/>
 and because it is outside the Attester's quoted selection.</font><br align="left"/>>];
@@ -142,8 +145,8 @@ and because it is outside the Attester's quoted selection.</font><br align="left
   Q [label=<<b>is the RP still qualified at this point?</b><br align="left"/>
 <font point-size="9">Checked against the wall clock, <b>with no safety margin</b>: the grant<br align="left"/>
 need only be valid HERE, not for the whole round that follows. One<br align="left"/>
-that lapses mid-round costs that cycle — every Verifier votes NO and<br align="left"/>
-/appraise never says why. The next cycle re-qualifies and it corrects.<br align="left"/>
+that lapses mid-round costs that attestation cycle — every Verifier votes NO and<br align="left"/>
+/appraise never says why. The next attestation cycle re-qualifies and it corrects.<br align="left"/>
 no → qualify first (step 6) · yes → straight to step 7</font>>, shape=diamond,
      fillcolor="#fef3c7", color="#b45309", margin=0.04];
 
@@ -155,15 +158,20 @@ The signature says WHO submitted; the salt binds it to THIS challenge.</font><br
 
   S7 [label=<<b>7 · per Verifier, in parallel threads</b><br align="left"/>
 <font point-size="10">GET /nonce  →  TPM2_Quote(PCR 23, qualifyingData = that nonce)<br align="left"/>
-→ POST /appraise. One quote each, over the one shared replay.</font><br align="left"/>>];
+→ POST /appraise. One quote each, over the one shared replay.<br align="left"/>
+The answer is a <b>signed verdict</b>, checked before it is counted:<br align="left"/>
+signature under the Verifier's key, its own nonce, and a digest of<br align="left"/>
+the evidence THIS thread sent. Any of those wrong → no vote.</font><br align="left"/>>];
 
   S8 [label=<<b>8 · majority vote</b><br align="left"/>
 <font point-size="10">fail-closed: a Verifier counts as a pass only if it appraised AND<br align="left"/>
-accepted. Unreachable, timed out, or never sent all count as NO.</font><br align="left"/>>,
+accepted AND that verdict verified. Unreachable, timed out, never<br align="left"/>
+sent, or unverifiable all count as NO. The tally ends here — it is<br align="left"/>
+logged, and never sent onward to the Attester.</font><br align="left"/>>,
       fillcolor="#e0e7ff"];
 
   subgraph cluster_loopctl {
-    label=<<b>9 · Loop control</b> — every cycle, finished or abandoned, arrives here.<br align="left"/><font point-size="10">The three ways this daemon stops, in the order they are tested. Fall through all three and it sleeps.</font><br align="left"/>>;
+    label=<<b>9 · Loop control</b> — every attestation cycle, finished or abandoned, arrives here.<br align="left"/><font point-size="10">The three ways this daemon stops, in the order they are tested. Fall through all three and it sleeps.</font><br align="left"/>>;
     fontsize=13; style="rounded,filled"; fillcolor="#f8fafc"; color="#94a3b8"; margin=10;
 
     QQUIT [label=<<b>asked to stop?</b><br align="left"/><font point-size="9">SIGINT (Ctrl-C) or SIGTERM<br align="left"/>(docker stop, timeout, systemd) —<br align="left"/>from the OS, never from a peer</font>>,
@@ -184,16 +192,16 @@ after the nap as well as before it). Either way → SHUTDOWN.</font><br align="l
        fillcolor="#e0e7ff"];
 
   STOP [label=<<b>SHUTDOWN</b><br align="left"/>
-<font point-size="10">One line reports which of the three fired. A cycle already in flight is not torn<br align="left"/>
+<font point-size="10">One line reports which of the three fired. An attestation cycle already in flight is not torn<br align="left"/>
 down mid-way: since the quit flag is tested at every phase boundary, a stop<br align="left"/>
-during a cycle abandons it at the next boundary — measured at <b>2.3s</b> when<br align="left"/>
-signalled during the Attester round trip, rather than waiting out the cycle.</font><br align="left"/>>,
+during an attestation cycle abandons it at the next boundary — measured at <b>2.3s</b> when<br align="left"/>
+signalled during the Attester round trip, rather than waiting out the attestation cycle.</font><br align="left"/>>,
         fillcolor="#dcfce7", color="#15803d", penwidth=1.8];
 
-  ABORT [label=<<b>cycle abandoned</b>&nbsp;&nbsp;<font point-size="10">◂ every ▸ abort lands here</font><br align="left"/>
-<font point-size="10">Not fatal: falls into loop control like a completed cycle, and the next one<br align="left"/>
-starts fresh. The RP does not retry within a cycle — a briefly unreachable<br align="left"/>
-peer costs one cycle.</font><br align="left"/>>,
+  ABORT [label=<<b>attestation cycle abandoned</b>&nbsp;&nbsp;<font point-size="10">◂ every ▸ abort lands here</font><br align="left"/>
+<font point-size="10">Not fatal: falls into loop control like a completed attestation cycle, and the next one<br align="left"/>
+starts fresh. The RP does not retry within an attestation cycle — a briefly unreachable<br align="left"/>
+peer costs one attestation cycle.</font><br align="left"/>>,
          fillcolor="#fee2e2", color="#b91c1c"];
 
   /* ---------------- peers ---------------------------------------------- */
@@ -229,8 +237,10 @@ deadline. Window = <b>--qualification-validity</b> (180s), Verifier-only.</font>
 <b>Step 3b</b> ① AK_a in the anchor  ② Quote_a signature  ③ nonce<br align="left"/>
 Opens NO TPM: every check is public-key math or hashing.<br align="left"/>
 ③ and ④ together are what bind the log to a TPM-attested value.<br align="left"/>
-<font color="#b91c1c">The verdict on the wire is a bare pass/fail — the RP is never told<br align="left"/>
-WHICH check failed. Reasons go to the Verifier's log only.</font></font><br align="left"/>>,
+<font color="#b91c1c">The verdict on the wire is a <b>signed</b> pass/fail and nothing more —<br align="left"/>
+the RP is never told WHICH check failed. Reasons go to this<br align="left"/>
+Verifier's log only. Both exits sign, so a NO that never reached<br align="left"/>
+appraisal looks identical on the wire to one that did.</font></font><br align="left"/>>,
        fillcolor="#fff7ed", color="#c2410c"];
 
   /* ---------------- wiring --------------------------------------------- */
@@ -245,7 +255,7 @@ WHICH check failed. Reasons go to the Verifier's log only.</font></font><br alig
   Q  -> S7 [weight=10];
   S6 -> S7 [xlabel=" qualified ", weight=20];
   S7 -> S8 [weight=20];
-  /* A completed cycle AND an abandoned one both fall into loop control. */
+  /* A completed attestation cycle AND an abandoned one both fall into loop control. */
   S8 -> QQUIT [weight=20];
   ABORT -> QQUIT [color="#b91c1c", style=dashed, constraint=false];
   QQUIT -> QCYC [xlabel=" no "];
@@ -258,7 +268,7 @@ WHICH check failed. Reasons go to the Verifier's log only.</font></font><br alig
    * short by a signal -- both land on the same terminal. */
   NAP -> STOP [color="#15803d", fontcolor="#15803d", constraint=false,
                xlabel=" yes "];
-  NAP -> S0 [constraint=false, xlabel=" next cycle "];
+  NAP -> S0 [constraint=false, xlabel=" next attestation cycle "];
 
   S1 -> TM  [style=dashed, dir=both, color="#5b21b6"];
   S2 -> ATT [style=dashed, dir=both, color="#0d9488"];
@@ -268,7 +278,7 @@ WHICH check failed. Reasons go to the Verifier's log only.</font></font><br alig
 
   /* Failure exits are drawn as CONNECTORS, not wires: four page-crossing
    * red lines cost more legibility than they buy. Each tag means
-   * "continue at cycle abandoned". */
+   * "continue at attestation cycle abandoned". */
   node [shape=triangle, style=filled, fillcolor="#fee2e2", color="#b91c1c",
         fontcolor="#b91c1c", fontsize=9, penwidth=1.4,
         fixedsize=true, width=0.95, height=0.62, margin=0];

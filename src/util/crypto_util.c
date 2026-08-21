@@ -24,6 +24,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 #include <mbedtls/pk.h>
@@ -363,13 +364,108 @@ bool charra_crypto_verify_quote_signature_mbedtls(
     return true;
 }
 
+/* --- file-backed signing keys ------------------------------------------
+ *
+ * Both entry points parse the key file on every call rather than caching a
+ * context. Same trade the trust anchor makes (see charra_trusted_keys.h):
+ * a handful of calls per attestation cycle against a one-key file costs
+ * nothing next to the TPM round trips around it, and it keeps a replaced
+ * key file effective without a restart. mbedTLS picks the algorithm out of
+ * the file, so EC and RSA both work with no caller-visible difference. */
+
+CHARRA_RC charra_crypto_pk_sign_file(const char* private_key_path,
+        const uint8_t* data, size_t data_len, uint8_t* signature_out,
+        size_t signature_out_cap, size_t* signature_len_out) {
+    CHARRA_RC charra_r = CHARRA_RC_CRYPTO_ERROR;
+    mbedtls_pk_context pk = {0};
+    mbedtls_entropy_context entropy = {0};
+    mbedtls_ctr_drbg_context ctr_drbg = {0};
+
+    mbedtls_pk_init(&pk);
+    mbedtls_entropy_init(&entropy);
+    mbedtls_ctr_drbg_init(&ctr_drbg);
+
+    uint8_t digest[TPM2_SHA256_DIGEST_SIZE] = {0};
+    if (hash_sha256(data_len, data, digest) != CHARRA_RC_SUCCESS) {
+        goto cleanup;
+    }
+
+    /* Seeded before the key is parsed, not after: mbedTLS 3.x threads an
+     * RNG through both calls -- ECDSA needs it per signature, and key
+     * parsing uses it for blinding. */
+    static const unsigned char personalization[] = "charra-pk-sign";
+    if (mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
+                personalization, sizeof(personalization)) != 0) {
+        goto cleanup;
+    }
+
+    if (mbedtls_pk_parse_keyfile(&pk, private_key_path, NULL,
+                mbedtls_ctr_drbg_random, &ctr_drbg) != 0) {
+        charra_log_error("[crypto_util] Could not read the private key "
+                         "('%s').",
+                private_key_path);
+        goto cleanup;
+    }
+
+    /* Signed into a full-size local so the cap is enforced by us with a
+     * clear error, rather than by mbedTLS as a generic buffer failure. */
+    uint8_t signature[MBEDTLS_PK_SIGNATURE_MAX_SIZE] = {0};
+    size_t signature_len = 0;
+    if (mbedtls_pk_sign(&pk, MBEDTLS_MD_SHA256, digest, sizeof(digest),
+                signature, sizeof(signature), &signature_len,
+                mbedtls_ctr_drbg_random, &ctr_drbg) != 0) {
+        goto cleanup;
+    }
+    if (signature_len > signature_out_cap) {
+        charra_log_error("[crypto_util] Signature is %zu bytes, but only %zu "
+                         "fit.",
+                signature_len, signature_out_cap);
+        goto cleanup;
+    }
+
+    memcpy(signature_out, signature, signature_len);
+    *signature_len_out = signature_len;
+    charra_r = CHARRA_RC_SUCCESS;
+
+cleanup:
+    mbedtls_ctr_drbg_free(&ctr_drbg);
+    mbedtls_entropy_free(&entropy);
+    mbedtls_pk_free(&pk);
+    return charra_r;
+}
+
+CHARRA_RC charra_crypto_pk_verify_file(const char* public_key_path,
+        const uint8_t* data, size_t data_len, const uint8_t* signature,
+        size_t signature_len) {
+    CHARRA_RC charra_r = CHARRA_RC_CRYPTO_ERROR;
+    mbedtls_pk_context pk = {0};
+    mbedtls_pk_init(&pk);
+
+    uint8_t digest[TPM2_SHA256_DIGEST_SIZE] = {0};
+    if (hash_sha256(data_len, data, digest) != CHARRA_RC_SUCCESS) {
+        goto cleanup;
+    }
+
+    if (mbedtls_pk_parse_public_keyfile(&pk, public_key_path) != 0) {
+        charra_log_error("[crypto_util] Could not read the public key "
+                         "('%s').",
+                public_key_path);
+        goto cleanup;
+    }
+
+    charra_r = (mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, digest,
+                        sizeof(digest), signature, signature_len) == 0)
+                       ? CHARRA_RC_SUCCESS
+                       : CHARRA_RC_VERIFICATION_FAILED;
+
+cleanup:
+    mbedtls_pk_free(&pk);
+    return charra_r;
+}
+
 CHARRA_RC compute_and_check_PCR_digest(uint8_t** pcr_values,
         uint32_t pcr_values_len, const TPMS_ATTEST* const attest_struct) {
     uint8_t pcr_composite_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
-    /* TODO use crypto-agile (generic) version
-     * charra_compute_pcr_composite_digest_from_ptr_array(), once
-     * implemented, instead of hash_sha256_array() (then maybe remove
-     * hash_sha256_array() function) */
     CHARRA_RC charra_r =
             hash_sha256_array(pcr_values, pcr_values_len, pcr_composite_digest);
     if (charra_r != CHARRA_RC_SUCCESS) {

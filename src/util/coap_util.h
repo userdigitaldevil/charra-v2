@@ -23,6 +23,7 @@
 
 #include "../common/charra_error.h"
 #include <coap3/coap.h>
+#include <signal.h>
 #include <stdbool.h>
 
 /* --- type declarations/definitions -------------------------------------- */
@@ -303,11 +304,11 @@ CHARRA_RC charra_coap_server_start(const charra_coap_server_config* config,
 /**
  * @brief Process CoAP I/O until *quit turns true, or an I/O error occurs.
  *
- * quit is read through a volatile pointer because it is set from a signal
+ * quit is a volatile sig_atomic_t because it is set from a signal
  * handler.
  */
 CHARRA_RC charra_coap_server_run(coap_context_t* context, const char* log_name,
-        const volatile bool* quit);
+        const volatile sig_atomic_t* quit);
 
 /** @brief Frees the endpoint and context, then shuts libcoap down. */
 void charra_coap_server_stop(

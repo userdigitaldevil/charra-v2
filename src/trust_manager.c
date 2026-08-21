@@ -27,7 +27,7 @@
 
 
 #define LOG_NAME "trust manager"
-static bool quit = false;
+static volatile sig_atomic_t quit = 0;
 static const char LISTEN_ADDRESS[] = "0.0.0.0";
 int port = 6000;
 

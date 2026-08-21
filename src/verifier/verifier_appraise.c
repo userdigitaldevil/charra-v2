@@ -17,6 +17,7 @@
 
 #include "../common/charra_log.h"
 #include "../core/charra_trusted_keys.h"
+#include "../core/charra_verdict.h"
 #include "../core/charra_dto.h"
 #include "../core/charra_event_log.h"
 #include "../core/charra_helper.h"
@@ -32,18 +33,70 @@
 
 #define LOG_NAME "verifier"
 
+/**
+ * @brief The one way a verdict leaves this Verifier.
+ *
+ * Both exits below go through here, so a NO that never reached appraisal
+ * is indistinguishable on the wire from one that did -- the same reason
+ * the reason list stays in this log and off the wire.
+ */
+static void send_verdict(struct coap_resource_t* resource,
+        struct coap_session_t* session, const struct coap_pdu_t* request,
+        const struct coap_string_t* query, struct coap_pdu_t* response,
+        bool accepted, const uint8_t* challenge_nonce,
+        uint32_t challenge_nonce_len,
+        const uint8_t evidence_digest[TPM2_SHA256_DIGEST_SIZE]) {
+    charra_verdict verdict = {
+            .accepted = accepted,
+            .challenge_nonce_len = challenge_nonce_len,
+            .signed_at = (uint64_t)time(NULL),
+    };
+    memcpy(verdict.challenge_nonce, challenge_nonce, challenge_nonce_len);
+    memcpy(verdict.evidence_digest, evidence_digest, TPM2_SHA256_DIGEST_SIZE);
+
+    uint8_t* buf = NULL;
+    uint32_t buf_len = 0;
+    if (charra_verdict_sign(&verdict, verdict_signing_key_path, &buf_len,
+                &buf) != CHARRA_RC_SUCCESS) {
+        /* An unsigned answer is one the RP counts as NO regardless, so the
+         * useful output here is the log line, not a fallback payload. */
+        charra_log_error("[" LOG_NAME "] Could not sign the verdict.");
+        coap_pdu_set_code(response, COAP_RESPONSE_CODE_INTERNAL_ERROR);
+        return;
+    }
+
+    coap_pdu_set_code(response, COAP_RESPONSE_CODE_CONTENT);
+    if (coap_add_data_large_response(resource, session, request, response,
+                query, COAP_MEDIATYPE_APPLICATION_CBOR, -1, 0, buf_len, buf,
+                release_response_data, buf) == 0) {
+        charra_log_error("[" LOG_NAME "] Error invoking "
+                         "coap_add_data_large_response().");
+        /* libcoap did not accept ownership -- still ours to free */
+        free(buf);
+    }
+}
+
 void coap_appraise_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
                                 const struct coap_pdu_t* request,
                                 const struct coap_string_t* query,
                                 struct coap_pdu_t* response) {
-    int coap_r = 0;
     CHARRA_RC charra_r = CHARRA_RC_ERROR;
     /* Set by any exit that jumps to cleanup BEFORE a verdict is reached, so
      * those still tell the RP why rather than closing silently -- an
      * unexplained NO is exactly as unhelpful as a wrong one. */
     const char* early_fail_reason = NULL;
     bool verdict_reached = false;
+
+    /* Snapshotted here, before anything can jump to cleanup, because every
+     * exit signs a verdict over both: the challenge is spent mid-appraisal
+     * (below), and the digest is of evidence not yet received. A digest
+     * still zero at cleanup fails the RP's check, which is the correct
+     * outcome for a request whose payload never arrived. */
+    uint8_t challenge_nonce[TPM2_SHA256_DIGEST_SIZE] = {0};
+    uint32_t challenge_nonce_len = verifier_challenge_nonce_len;
+    memcpy(challenge_nonce, verifier_challenge_nonce, sizeof(challenge_nonce));
+    uint8_t evidence_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
 
     charra_coap_log_peer_address(LOG_NAME, "/appraise", session);
 
@@ -74,6 +127,14 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     charra_log_info("[" LOG_NAME "] Received evidence of length %zu (%zu "
                     "total).",
             data_len, data_total_len);
+
+    /* Over the bytes as received, before any parsing: the RP digests what
+     * it sent, so anything derived from a parse could only disagree. */
+    if (hash_sha256(data_len, data, evidence_digest) != CHARRA_RC_SUCCESS) {
+        early_fail_reason = "Verifier-side error: could not digest the "
+                            "evidence";
+        goto cleanup;
+    }
 
     clock_t start_appraise, end_appraise;
     double appraise_duration;
@@ -306,17 +367,15 @@ void coap_appraise_handler(struct coap_resource_t* resource,
          * challenge outstanding both lengths are 0 and memcmp(_, _, 0)
          * returns 0, so an empty nonce would match. */
         attestation_result_nonce_rp =
-                rp_attest_parsed && verifier_challenge_nonce_len != 0 &&
+                rp_attest_parsed && challenge_nonce_len != 0 &&
                 charra_verify_tpm2_quote_qualifying_data(
-                        (uint16_t)verifier_challenge_nonce_len,
-                        verifier_challenge_nonce, &rp_attest);
-        uint8_t expected_nonce[TPM2_SHA256_DIGEST_SIZE] = {0};
-        uint32_t expected_nonce_len = verifier_challenge_nonce_len;
-        memcpy(expected_nonce, verifier_challenge_nonce,
-                sizeof(expected_nonce));
+                        (uint16_t)challenge_nonce_len, challenge_nonce,
+                        &rp_attest);
         /* Single-use: spend the challenge once it has been checked, pass or
          * fail, so a captured bundle cannot be replayed until the next
-         * /nonce rotates it. A retry needs a fresh /nonce. */
+         * /nonce rotates it. A retry needs a fresh /nonce. The snapshot
+         * taken at entry outlives this, since the verdict is signed over
+         * it. */
         memset(verifier_challenge_nonce, 0, sizeof(verifier_challenge_nonce));
         verifier_challenge_nonce_len = 0;
         if (attestation_result_nonce_rp == true) {
@@ -325,21 +384,21 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         } else {
             char expected_nonce_hex[17] = {0};
             char received_nonce_hex[17] = {0};
-            charra_hex_encode_prefix(expected_nonce, expected_nonce_len,
+            charra_hex_encode_prefix(challenge_nonce, challenge_nonce_len,
                     expected_nonce_hex, sizeof(expected_nonce_hex));
             charra_hex_encode_prefix(rp_attest.extraData.buffer,
                     rp_attest.extraData.size, received_nonce_hex,
                     sizeof(received_nonce_hex));
             charra_log_error("[" LOG_NAME
                              "]     => Nonce in Quote_r is NOT valid! (%s)",
-                    expected_nonce_len == 0
+                    challenge_nonce_len == 0
                             ? "no challenge outstanding -- /nonce was never "
                               "called, or this one was already spent"
                             : "does not match the one sent");
             charra_log_error(
                     "[" LOG_NAME "]     => expected %u byte(s), starting "
                     "%s...; received %u byte(s), starting %s...",
-                    expected_nonce_len, expected_nonce_hex,
+                    challenge_nonce_len, expected_nonce_hex,
                     rp_attest.extraData.size, received_nonce_hex);
         }
     }
@@ -608,18 +667,15 @@ void coap_appraise_handler(struct coap_resource_t* resource,
      * not a work order -- it does not tell the RP which remedy to attempt,
      * and the RP does not retry on its say-so. Which checks failed, and why,
      * is in this Verifier's own log; the wire carries only the verdict. */
-    const char* message;
     charra_log_info("[" LOG_NAME "] +----------------------------+");
     charra_log_info("[" LOG_NAME "]   RP identity: %s...",
             rp_identity_known ? rp_fingerprint_hex
                               : "(unknown -- no key sent)");
     if (attestation_result) {
-        message = "Attestation successful!";
         charra_log_info("[" LOG_NAME "] |   ATTESTATION SUCCESSFUL   |");
     } else {
         /* Banner names the first failing check, so a log skimmer sees the
          * headline cause; the full list is logged above either way. */
-        message = "Attestation failed!    ";
         if (!attestation_result_ekak_rp) {
             charra_log_info("[" LOG_NAME "] |    RP KEY NOT TRUSTED      |");
         } else if (!attestation_result_qualified) {
@@ -633,7 +689,6 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     charra_log_info("[" LOG_NAME "] +----------------------------+");
 
     verdict_reached = true;
-    coap_pdu_set_code(response, COAP_RESPONSE_CODE_CONTENT);
 
     end_appraise = clock();
     appraise_duration = ((double) (end_appraise - start_appraise)) / CLOCKS_PER_SEC;
@@ -645,12 +700,9 @@ void coap_appraise_handler(struct coap_resource_t* resource,
             "second(s) (%f second(s) measured across sub-phases).",
             appraise_duration, total_measured);
 
-    if ((coap_r = coap_add_data_large_response(resource, session, request,
-                 response, query, COAP_MEDIATYPE_TEXT_PLAIN, -1, 0,
-                 strlen(message), (const uint8_t*)message, NULL, NULL)) == 0) {
-        charra_log_error("[" LOG_NAME
-                         "] Error invoking coap_add_data_large_response().");
-    }
+    send_verdict(resource, session, request, query, response,
+            attestation_result, challenge_nonce, challenge_nonce_len,
+            evidence_digest);
 
 cleanup:
     if (!verdict_reached) {
@@ -663,11 +715,8 @@ cleanup:
          * have to interpret. */
         charra_log_error("[" LOG_NAME "] Voting NO (no appraisal). Reason: %s",
                 why);
-        static const char failed_msg[] = "Attestation failed!    ";
-        coap_pdu_set_code(response, COAP_RESPONSE_CODE_CONTENT);
-        coap_add_data_large_response(resource, session, request, response,
-                query, COAP_MEDIATYPE_TEXT_PLAIN, -1, 0, strlen(failed_msg),
-                (const uint8_t*)failed_msg, NULL, NULL);
+        send_verdict(resource, session, request, query, response, false,
+                challenge_nonce, challenge_nonce_len, evidence_digest);
     }
 
     /* every path through this function reaches here exactly once */

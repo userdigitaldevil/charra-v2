@@ -21,7 +21,7 @@
 /* --- config ------------------------------------------------------------- */
 
 /* quit signal */
-static bool quit = false;
+static volatile sig_atomic_t quit = 0;
 
 /* logging */
 #define LOG_NAME "verifier"
@@ -58,6 +58,12 @@ char* durations_file_path = "durations_verifier.txt";
 /* Who has qualified. NOT per port -- one file shared by every Verifier, so
  * the RP's single /qualify handshake is honoured by all of them. */
 char* qualified_rps_file_path = VERIFIER_QUALIFIED_RPS_DEFAULT_PATH;
+
+/* Key this Verifier signs its /appraise verdicts with (see
+ * charra_verdict.h). Distinct from the DTLS RPK paths above even though it
+ * is the same file today: DTLS is off, and conflating a transport key with
+ * an application signing key is how one gets rotated without the other. */
+char* verdict_signing_key_path = "keys/verifier.der";
 
 /* Qualification window this Verifier grants, settable with
  * --qualification-validity. Pushed into charra_rp_qualification.c after
@@ -236,4 +242,4 @@ finish:
 
 /* --- function definitions ----------------------------------------------- */
 
-static void handle_sigint(int signum CHARRA_UNUSED) { quit = true; }
+static void handle_sigint(int signum CHARRA_UNUSED) { quit = 1; }

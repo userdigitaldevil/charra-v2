@@ -48,4 +48,7 @@ extern char* durations_file_path;
  * just once and all of us must honour it. See verifier_qualified_rps.h. */
 extern char* qualified_rps_file_path;
 
+/** Private key /appraise signs its verdict with. See charra_verdict.h. */
+extern char* verdict_signing_key_path;
+
 #endif /* CHARRA_VERIFIER_SHARED_H */

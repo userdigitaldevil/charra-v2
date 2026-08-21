@@ -72,7 +72,11 @@ static CHARRA_RC rp_coap_wait_for_response(coap_context_t* context,
     struct timespec wait_start, wait_now;
     clock_gettime(CLOCK_MONOTONIC, &wait_start);
 
-    while (*response_pending && coap_io_pending(context)) {
+    /* !quit caps the worst case at one COAP_IO_PROCESS_TIME_MS slice
+     * rather than a whole --verifier-timeout: without it a Ctrl-C during a
+     * round trip is not acted on until the exchange finishes or times out.
+     * The caller sees a timeout, which it already treats as a NO vote. */
+    while (*response_pending && coap_io_pending(context) && !quit) {
         if (coap_io_process(context, COAP_IO_PROCESS_TIME_MS) == -1) {
             charra_log_error(
                     "[" LOG_NAME "] Error during CoAP I/O processing for /%s.",
@@ -89,7 +93,10 @@ static CHARRA_RC rp_coap_wait_for_response(coap_context_t* context,
             return CHARRA_RC_TIMEOUT;
         }
     }
-    return CHARRA_RC_SUCCESS;
+    /* Leaving on !quit means no response arrived, so it must not be
+     * reported as one -- the handler never ran and its output slot still
+     * holds whatever it was reset to. */
+    return (*response_pending && quit) ? CHARRA_RC_ERROR : CHARRA_RC_SUCCESS;
 }
 
 CHARRA_RC rp_coap_exchange(const rp_coap_request* request) {

@@ -98,6 +98,43 @@ bool charra_crypto_verify_quote_signature_mbedtls(
         uint32_t attestation_data_len, TPMT_SIGNATURE* signature,
         bool* out_valid);
 
+/* --- file-backed signing keys ------------------------------------------
+ *
+ * For identities that are NOT TPM-resident -- today just the Verifier's
+ * verdict key, an EC P-256 pair in keys/. Everything above this point is
+ * RSA-only because it serves AKs, which are TPM primaries; these two go
+ * through mbedTLS's generic pk interface instead, so the algorithm is
+ * whatever the key file says it is.
+ *
+ * Both hash with SHA-256 internally, and both re-read the key file on
+ * every call -- see the note above their definitions.
+ */
+
+/**
+ * @brief SHA-256 data, then sign the digest with the private key at
+ * private_key_path.
+ *
+ * @param[out] signature_out receives at most signature_out_cap bytes;
+ * fails rather than truncating if the signature is longer.
+ */
+CHARRA_RC charra_crypto_pk_sign_file(const char* private_key_path,
+        const uint8_t* data, size_t data_len, uint8_t* signature_out,
+        size_t signature_out_cap, size_t* signature_len_out);
+
+/**
+ * @brief The inverse: SHA-256 data and check signature under the public
+ * key at public_key_path.
+ *
+ * @returns CHARRA_RC_SUCCESS if the signature is valid,
+ * CHARRA_RC_VERIFICATION_FAILED if it is not, CHARRA_RC_CRYPTO_ERROR if
+ * the key could not be read or the digest not computed -- three outcomes,
+ * because "no key file" is a deployment fault and "bad signature" is an
+ * attack, and the caller may want to say so differently.
+ */
+CHARRA_RC charra_crypto_pk_verify_file(const char* public_key_path,
+        const uint8_t* data, size_t data_len, const uint8_t* signature,
+        size_t signature_len);
+
 /* --- AK_r's RSA parameters ------------------------------------------------
  *
  * The key the Relying Party signs Quote_r with is TPM-resident: derived

@@ -181,7 +181,6 @@ CHARRA_RC charra_marshal_attestation_request(
     return charra_r;
 }
 
-// TODO(any): Implement this function using QCBORDecode_* functions.
 CHARRA_RC charra_unmarshal_attestation_request(
         const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
         msg_attestation_request_dto* attestation_request) {
@@ -435,7 +434,6 @@ CHARRA_RC charra_marshal_attestation_response(
     return charra_r;
 }
 
-// TODO(any): Implement this function using QCBORDecode_* functions.
 CHARRA_RC charra_unmarshal_attestation_response(
         const uint32_t marshaled_data_len, const uint8_t* marshaled_data,
         msg_attestation_response_dto* attestation_response) {

@@ -34,7 +34,10 @@ unsigned long rp_max_cycles = 0;
 #define LOG_NAME "relying party"
 coap_log_t coap_log_level = LOG_INFO;
 charra_log_t charra_log_level = CHARRA_LOG_INFO;
-bool quit = false;
+/* volatile sig_atomic_t, not bool: C11 7.14.1.1p5 permits a signal
+ * handler to touch nothing else, and a plain bool is neither
+ * guaranteed atomic nor guaranteed to be re-read after the handler. */
+volatile sig_atomic_t quit = 0;
 
 /* trust manager config */ 
 char trust_manager_host[16] = "127.0.0.1"; 
@@ -48,6 +51,7 @@ bool processing_trust_manager_response = false;
  * way for the same reason. */
 int verifier_list[MAX_VERIFIERS];
 bool attestation_results[MAX_VERIFIERS];
+bool verifier_verdict_verified[MAX_VERIFIERS];
 /* Summary-report only: appraisal round-trip latency. */
 long verifier_latency_ms[MAX_VERIFIERS];
 verifier_info verifiers[MAX_VERIFIERS];
@@ -136,6 +140,8 @@ pthread_mutex_t rp_qualification_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* Nonces received from each Verifier, indexed by verifier slot. */
 uint8_t verifier_nonces[MAX_VERIFIERS][sizeof(TPMU_HA)] = {{0}};
 uint32_t verifier_nonce_lens[MAX_VERIFIERS] = {0};
+uint8_t verifier_evidence_digests[MAX_VERIFIERS][TPM2_SHA256_DIGEST_SIZE] = {
+        {0}};
 bool processing_nonce_response[MAX_VERIFIERS] = {false};
 char attester_host[16] = "127.0.0.1";      // 15 characters for IPv4 plus \0
 unsigned int attester_port = 5683;         // default port
@@ -156,6 +162,12 @@ charra_dtls_config dtls_config = {
 char* dtls_rpk_attester_public_key_path = "keys/attester.pub.der";
 char* dtls_rpk_verifier_public_key_path = "keys/verifier.pub.der";
 
+/* Checks the signature on every /appraise verdict. The same file as the
+ * DTLS path above only because all Verifiers currently share one keypair;
+ * the two are separate settings because they answer separate questions
+ * (who am I talking to, versus who signed this vote). */
+char* verifier_public_key_path = "keys/verifier.pub.der";
+
 /* --- in-flight message state -------------------------------------------
  * Declared in rp_shared.h; the pipeline modules in src/rp/ fill these in
  * from their CoAP response handlers, which cannot return data. */
@@ -164,7 +176,7 @@ msg_attestation_request_dto last_request = {0};
 msg_attestation_response_dto last_response = {0};
 
 /** @brief SIGINT/SIGTERM handler: requests graceful termination. */
-static void handle_sigint(int signum CHARRA_UNUSED) { quit = true; }
+static void handle_sigint(int signum CHARRA_UNUSED) { quit = 1; }
 
 /* --- attestation cycle -------------------------------------------------- */
 

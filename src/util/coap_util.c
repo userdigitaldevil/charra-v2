@@ -402,6 +402,16 @@ bool charra_coap_get_payload(const struct coap_pdu_t* pdu,
         return false;
     }
 
+    /* libcoap can report success with nothing attached. Every caller here
+     * wants a body, and handing them (NULL, 0) only pushes the check
+     * downstream -- where it has already been forgotten once, and where a
+     * zero-length buffer compares equal to anything. */
+    if (*data_out == NULL || *data_len_out == 0) {
+        charra_log_error("[%s] %s: CoAP PDU carries an empty payload.",
+                log_name, context);
+        return false;
+    }
+
     if (data_total_len_out != NULL) {
         *data_total_len_out = data_total_len;
     }
@@ -539,7 +549,7 @@ error:
 }
 
 CHARRA_RC charra_coap_server_run(coap_context_t* context, const char* log_name,
-        const volatile bool* quit) {
+        const volatile sig_atomic_t* quit) {
     if (context == NULL || log_name == NULL || quit == NULL) {
         return CHARRA_RC_BAD_ARGUMENT;
     }

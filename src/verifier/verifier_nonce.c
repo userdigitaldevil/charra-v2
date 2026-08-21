@@ -70,7 +70,8 @@ void coap_nonce_handler(struct coap_resource_t* resource,
                 &data_total_len)) {
         goto error;
     }
-    charra_log_info("[" LOG_NAME "] Received nonce of length %zu (%zu total).",
+    charra_log_info("[" LOG_NAME "] Received /nonce request body of %zu "
+                    "bytes (%zu total).",
             data_len, data_total_len);
 
     /* unmarshal data */
