@@ -16,27 +16,32 @@
 #      from a previous run, wipes the TPM simulator's persistent NVRAM
 #      (NVChip) and restarts it fresh, then TPM2_Startup(CLEAR) -- a genuine
 #      cold TPM, nothing measured yet.
-#   4. Deletes all of state/ -- RP's own cached TPM identity
-#      (state/relying-party/identity/), its per-Verifier AK certificates,
-#      and both Verifier-side ledgers (state/verifier/). This step matters:
-#      step 3 just re-randomized the TPM simulator's storage-hierarchy
-#      seeds, so any *old* cached AK private blob no longer loads under the
-#      *new* TPM state (Esys_Load fails) -- skipping this step is what made
-#      the first run of this script fail every single attestation,
-#      cascading from one TPM load error into "no AK certificate" into
-#      every evidence build failing. A stale ledger would be similarly
-#      meaningless against a freshly-reset TPM's identities.
+#   4. Deletes state/ if present. No role provisions or caches anything on
+#      disk any more (every signing key is derived from the TPM fresh on
+#      each use, see rp_signing_key.h / charra_trusted_keys.h), so this is
+#      normally a no-op kept only to clear out a leftover directory from an
+#      older checkout of this repo, where it mattered a great deal (a
+#      cached AK private blob no longer loading under a just-reset TPM's
+#      re-randomized storage-hierarchy seed, Esys_Load failing).
 #   5. Sanity-checks that PCRs 0-7 and 10 read back all-zero -- confirms the
 #      TPM really is freshly reset before anything starts touching it.
 #   6. Clean rebuild (make clean && make -j).
-#   7. Wipes logs/ entirely and recreates it empty -- so logs/ always
+#   7. Regenerates keys/trusted_keys.txt from the just-reset TPM's own
+#      signing keys (bin/provision_trusted_keys, single-TPM mode -- every
+#      role here shares one simulator, so both identities come from it).
+#      Step 3 just re-randomized the TPM's owner-hierarchy seed, so any
+#      *old* trust anchor names keys that no longer exist -- skipping this
+#      step is what makes every /appraise fail as "key not in the trust
+#      anchor" against an otherwise-correct evidence bundle. See
+#      keys/README.md.
+#   8. Wipes logs/ entirely and recreates it empty -- so logs/ always
 #      reflects exactly this run, nothing left over from some earlier
 #      one-off script with a different naming scheme (that's how
 #      rp_run1.log/rp_run2.log/rp_run3.log/verifier_5684_restarted.log
 #      ended up sitting there stale after unrelated scratch-test scripts).
-#   8. Launches trust_manager, attester, and 5 verifier instances on ports
+#   9. Launches trust_manager, attester, and 5 verifier instances on ports
 #      5684-5688, all backgrounded with DEBUG logging to logs/.
-#   9. Runs relying_party in the foreground (tee'd to logs/relying_party.log
+#   10. Runs relying_party in the foreground (tee'd to logs/relying_party.log
 #      too) with --verifiers 5, so this stays a genuine 5-Verifier
 #      attestation run rather than silently degrading to relying_party's
 #      own single-Verifier default. relying_party runs exactly one
@@ -97,9 +102,8 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
     tpm2_startup --clear
     cd ~/charra
 
-    # All of state/ is meaningless (and breaks outright, Esys_Load failing)
-    # against a TPM state that was just re-randomized above -- see the
-    # comment block at the top of this file.
+    # Normally a no-op now -- see the comment block at the top of this
+    # file -- kept to clear out a leftover state/ from an older checkout.
     rm -rf state
 
     echo "--- PCRs before anything starts (expect all zero) ---"
@@ -108,6 +112,12 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
     cd ~/charra
     make clean
     make -j
+
+    # Regenerate the trust anchor from the TPM this run just reset --
+    # see the comment block at the top of this file. Single-TPM mode
+    # (neither ATTESTER_TCTI nor RP_TCTI set): every role here shares one
+    # simulator instance.
+    ./keys/gen-trusted-keys.sh
 
     rm -rf logs
     mkdir -p logs

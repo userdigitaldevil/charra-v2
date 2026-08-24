@@ -92,9 +92,9 @@ CHARRA_RC tee_sign(const tee_attestation_document* doc,
 
 /**
  * @brief DER-encodes the TEE's public key, so the RP can forward it to a
- * Verifier that has no other way to learn it -- the same "ship the public
- * key alongside the signature" simplification the RP's own AK keypair
- * already uses (see rp_public_key_der in rp_shared.h).
+ * Verifier that has no other way to learn it. Unlike AK_r (looked up in
+ * the trust anchor, see charra_trusted_keys.h), the TEE's key is not
+ * pre-shared, so it has to ship alongside every signature it produces.
  */
 CHARRA_RC tee_public_key_der(uint8_t* der_out, size_t der_out_size,
         uint32_t* der_len_out);

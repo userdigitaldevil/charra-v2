@@ -31,9 +31,7 @@
 static const struct option rp_long_options[] = {{"help", no_argument, 0, '0'},
         {"verbose", no_argument, 0, 'v'},
         {"log-level", required_argument, 0, 'l'},
-        {"ak-renew-margin", required_argument, 0, 'R'},
         {"verifiers", required_argument, 0, 'n'},
-        {"attester-ak-validity", required_argument, 0, 'A'},
         {"verifier-timeout", required_argument, 0, RP_OPT_VERIFIER_TIMEOUT},
         {"attester-timeout", required_argument, 0, RP_OPT_ATTESTER_TIMEOUT},
         {0}};
@@ -60,7 +58,7 @@ int parse_rp_command_line(int argc, char** argv) {
     for (;;) {
         int index = -1;
         int identifier =
-                getopt_long(argc, argv, "vl:R:n:A:", rp_long_options, &index);
+                getopt_long(argc, argv, "vl:n:", rp_long_options, &index);
         if (identifier == -1) {
             break;
         }
@@ -82,26 +80,14 @@ int parse_rp_command_line(int argc, char** argv) {
             printf(" -l, --log-level=LEVEL:        Set CHARRA log-level "
                    "(TRACE, DEBUG, INFO, WARN, ERROR, FATAL). Overrides "
                    "$LOG_LEVEL_CHARRA.\n");
-            printf("     --ak-renew-margin=SECONDS: Renew an AK "
-               "certificate once it is within this long of "
-               "expiring.\n");
-        printf("               Applies to RP's own AK certificate "
-               "and to both of the Attester's. Default: %ds "
-               "\n",
-                RP_DEFAULT_AK_RENEW_MARGIN_S);
-        printf(" -n, --verifiers=COUNT:        Attest against COUNT "
+            printf(" -n, --verifiers=COUNT:        Attest against COUNT "
                    "Verifiers (1..%d). Default %d.\n",
                     MAX_VERIFIERS, RP_DEFAULT_NUM_VERIFIERS);
-            printf(" -A, --attester-ak-validity=SECONDS:\n");
-            printf("                               Lifetime of the Attester AK "
-                   "certificate RP issues under its own CA, measured from "
-                   "issuance. Default %ld.\n",
-                    (long)attester_ak_cert_validity_seconds);
             printf("     --verifier-timeout=SECONDS: How long to wait for a "
                    "Verifier's reply before giving up. Also bounds every "
-                   "other RP round trip (Trust Manager, /certify_ak). A "
-                   "Verifier that times out counts against the majority "
-                   "exactly like a NO vote. Default %d.\n",
+                   "other RP round trip (Trust Manager). A Verifier that "
+                   "times out counts against the majority exactly like a NO "
+                   "vote. Default %d.\n",
                     RP_DEFAULT_VERIFIER_TIMEOUT_S);
             printf("     --attester-timeout=SECONDS: How long to wait for the "
                    "Attester's evidence before giving up, ending the run. "
@@ -118,16 +104,6 @@ int parse_rp_command_line(int argc, char** argv) {
                         "[" LOG_NAME "] Invalid --log-level '%s'.", optarg);
                 return -1;
             }
-            break;
-        case 'R':
-            /* Upper bound is a year: a margin beyond that exceeds any
-             * plausible certificate lifetime, which would mean renewing on
-             * every cycle forever. */
-            if (!charra_cli_parse_uint_arg(LOG_NAME, "--ak-renew-margin",
-                        optarg, 0, 365L * 24 * 60 * 60, &value)) {
-                return -1;
-            }
-            rp_ak_renew_margin_s = (time_t)value;
             break;
         case 'n':
             if (!charra_cli_parse_uint_arg(LOG_NAME, "--verifiers", optarg, 1,
@@ -150,14 +126,6 @@ int parse_rp_command_line(int argc, char** argv) {
             }
             attester_response_timeout = (uint16_t)value;
             break;
-        case 'A':
-            if (!charra_cli_parse_uint_arg(LOG_NAME,
-                        "--attester-ak-validity", optarg, 1, LONG_MAX,
-                        &value)) {
-                return -1;
-            }
-            attester_ak_cert_validity_seconds = (time_t)value;
-            break;
         default:
             charra_log_error(
                     "[" LOG_NAME "] Unrecognized option. Try --help.");
@@ -177,11 +145,6 @@ void rp_log_effective_configuration(void) {
 
     charra_log_info("[" LOG_NAME "]   %-22s %d%s", "--verifiers",
             rp_num_verifiers, charra_cli_default_tag('n'));
-    charra_log_info("[" LOG_NAME "]   %-22s %lds%s", "--ak-renew-margin",
-            (long)rp_ak_renew_margin_s, charra_cli_default_tag('R'));
-    charra_log_info("[" LOG_NAME "]   %-22s %lds%s", "--attester-ak-validity",
-            (long)attester_ak_cert_validity_seconds,
-            charra_cli_default_tag('A'));
     charra_log_info("[" LOG_NAME "]   %-22s %s%s", "--log-level",
             charra_log_level_to_str(charra_log_level),
             (charra_cli_flag_was_given('l') || charra_cli_flag_was_given('v'))

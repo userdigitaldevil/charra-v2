@@ -37,18 +37,14 @@
 #include "core/charra_helper.h"
 #include "core/charra_key_mgr.h"
 #include "core/charra_marshaling.h"
-#include "core/charra_identity_key_mgr.h"
 #include "util/cbor_util.h"
 #include "util/charra_util.h"
 #include "util/cli_util.h"
 #include "util/coap_util.h"
 #include "util/crypto_util.h"
-#include "util/io_util.h"
 #include "util/tpm2_util.h"
 
 #include "attester/attester_attest.h"
-#include "attester/attester_certify_ak.h"
-#include "attester/attester_identity.h"
 #include "attester/attester_ima_log.h"
 #include "attester/attester_result.h"
 #include "attester/attester_shared.h"
@@ -166,20 +162,15 @@ int main(int argc, char** argv) {
         goto error;
     }
 
-    /* Attester's own runtime state (TPM identity, delivered AK
-     * certificates) -- mirrors how relying_party.c organizes state/
-     * relying-party/. No lock: unlike the RP and the Verifier, the Attester
-     * writes nothing here that a second instance would revoke. */
-    static const char* const state_dirs[] = {"state/attester/identity",
-            "state/attester/ak-certificates", NULL};
-    (void)charra_io_claim_state_dir(state_dirs, NULL, LOG_NAME);
+    /* No runtime state to claim: the Attester's signing key is derived
+     * from the TPM on demand and its public half sits in the read-only
+     * trust anchor, so there is nothing on disk for a second instance to
+     * conflict over. */
 
     /* register CoAP resource and resource handler */
     charra_log_info("[" LOG_NAME "] Registering CoAP resources.");
     charra_coap_add_resource(
             coap_context, COAP_REQUEST_FETCH, "attest", coap_attest_handler);
-    charra_coap_add_resource(coap_context, COAP_REQUEST_FETCH,
-            "certify_ak_of_attester", coap_certify_ak_of_attester_handler);
     charra_coap_add_resource(coap_context, COAP_REQUEST_FETCH, "attest_result",
             coap_attest_result_handler);
     if (charra_coap_server_run(coap_context, LOG_NAME, &quit) !=

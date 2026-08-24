@@ -130,29 +130,29 @@ SOURCES = $(shell find $(SRCDIR) -name '*.c')
 INCLUDE = -I$(INCDIR)
 
 OBJECTS =  $(addsuffix .o, $(addprefix $(OBJDIR)/common/, charra_log))
-OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log charra_synthetic_log charra_sdk charra_ak_state charra_record_file charra_identity_key_mgr TEE))
+OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log charra_synthetic_log charra_sdk charra_trusted_keys TEE))
 OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/util/, cbor_util charra_util coap_util crypto_util hex_util io_util tpm2_util cli_util parser_util))
 
 # Relying-Party-only modules (src/rp/). Kept out of $(OBJECTS) on purpose:
 # that list is linked into every binary, and these carry RP-specific state
 # the Attester/Verifier/Trust Manager have no business pulling in.
-RP_OBJECTS = $(addsuffix .o, $(addprefix $(OBJDIR)/rp/, rp_config rp_coap rp_cert_cache rp_evidence rp_attester_identity rp_identity rp_attestation))
+RP_OBJECTS = $(addsuffix .o, $(addprefix $(OBJDIR)/rp/, rp_config rp_coap rp_signing_key rp_evidence rp_attestation))
 
 # Verifier-only modules (src/verifier/), kept out of $(OBJECTS) for the same
 # reason as RP_OBJECTS above.
-VERIFIER_OBJECTS = $(addsuffix .o, $(addprefix $(OBJDIR)/verifier/, verifier_util verifier_nonce verifier_certify_ak verifier_appraise))
+VERIFIER_OBJECTS = $(addsuffix .o, $(addprefix $(OBJDIR)/verifier/, verifier_util verifier_nonce verifier_appraise))
 
 # Attester-only modules (src/attester/), kept out of $(OBJECTS) for the same
 # reason as RP_OBJECTS above.
-ATTESTER_OBJECTS = $(addsuffix .o, $(addprefix $(OBJDIR)/attester/, attester_util attester_ima_log attester_identity attester_certify_ak attester_result attester_attest))
+ATTESTER_OBJECTS = $(addsuffix .o, $(addprefix $(OBJDIR)/attester/, attester_util attester_ima_log attester_result attester_attest))
 
-TARGETS = $(addprefix $(BINDIR)/, attester verifier verifier_old relying_party trust_manager)
+TARGETS = $(addprefix $(BINDIR)/, attester verifier verifier_old relying_party trust_manager provision_trusted_keys)
 
 .PHONY: all attester verifier verifier_old relying_party trust_manager \
+        provision_trusted_keys \
         test test_event_log test_synthetic_log test_sdk \
-        test_marshaling_bounds test_x509_cert_chain \
-        test_certify_ak_marshaling test_ak_state \
-        test_get_verifiers_marshaling test_certify_ak_of_attester_marshaling \
+        test_marshaling_bounds \
+        test_get_verifiers_marshaling \
         test_rp_evidence_marshaling \
         clean
 
@@ -162,28 +162,21 @@ verifier: $(BINDIR)/verifier
 verifier_server: $(BINDIR)/verifier_old
 relying_party: $(BINDIR)/relying_party
 trust_manager: $(BINDIR)/trust_manager
+provision_trusted_keys: $(BINDIR)/provision_trusted_keys
 test_event_log: $(BINDIR)/test_event_log
 test_synthetic_log: $(BINDIR)/test_synthetic_log
 test_sdk: $(BINDIR)/test_sdk
 test_marshaling_bounds: $(BINDIR)/test_marshaling_bounds
-test_x509_cert_chain: $(BINDIR)/test_x509_cert_chain
-test_certify_ak_marshaling: $(BINDIR)/test_certify_ak_marshaling
-test_ak_state: $(BINDIR)/test_ak_state
 test_rp_evidence_marshaling: $(BINDIR)/test_rp_evidence_marshaling
 test_get_verifiers_marshaling: $(BINDIR)/test_get_verifiers_marshaling
-test_certify_ak_of_attester_marshaling: $(BINDIR)/test_certify_ak_of_attester_marshaling
 
 ## run the test suite
-test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log $(BINDIR)/test_sdk $(BINDIR)/test_marshaling_bounds $(BINDIR)/test_x509_cert_chain $(BINDIR)/test_certify_ak_marshaling $(BINDIR)/test_ak_state $(BINDIR)/test_get_verifiers_marshaling $(BINDIR)/test_certify_ak_of_attester_marshaling $(BINDIR)/test_rp_evidence_marshaling
+test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log $(BINDIR)/test_sdk $(BINDIR)/test_marshaling_bounds $(BINDIR)/test_get_verifiers_marshaling $(BINDIR)/test_rp_evidence_marshaling
 	./$(BINDIR)/test_event_log
 	./$(BINDIR)/test_synthetic_log
 	./$(BINDIR)/test_sdk
 	./$(BINDIR)/test_marshaling_bounds
-	./$(BINDIR)/test_x509_cert_chain
-	./$(BINDIR)/test_certify_ak_marshaling
-	./$(BINDIR)/test_ak_state
 	./$(BINDIR)/test_get_verifiers_marshaling
-	./$(BINDIR)/test_certify_ak_of_attester_marshaling
 	./$(BINDIR)/test_rp_evidence_marshaling
 
 
@@ -223,6 +216,14 @@ ifeq ($(enable_stripping),1)
 	strip --strip-unneeded $@
 endif
 
+# Offline setup, not a protocol role: reads the TPM's public signing keys
+# and writes keys/trusted_keys.txt. See keys/gen-trusted-keys.sh.
+$(BINDIR)/provision_trusted_keys: $(SRCDIR)/provision_trusted_keys.c $(OBJECTS)
+	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ -Wl,--gc-sections $(link_mode)
+ifeq ($(enable_stripping),1)
+	strip --strip-unneeded $@
+endif
+
 ## --- tests -------------------------------------------------------------------
 
 $(BINDIR)/test_event_log: tests/test_event_log.c $(OBJECTS)
@@ -241,27 +242,11 @@ $(BINDIR)/test_marshaling_bounds: tests/test_marshaling_bounds.c $(OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
-$(BINDIR)/test_x509_cert_chain: tests/test_x509_cert_chain.c $(OBJECTS)
-	@mkdir -p $(@D)
-	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
-
-$(BINDIR)/test_certify_ak_marshaling: tests/test_certify_ak_marshaling.c $(OBJECTS)
-	@mkdir -p $(@D)
-	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
-
-$(BINDIR)/test_ak_state: tests/test_ak_state.c $(OBJECTS)
-	@mkdir -p $(@D)
-	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
-
 $(BINDIR)/test_rp_evidence_marshaling: tests/test_rp_evidence_marshaling.c $(OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
 $(BINDIR)/test_get_verifiers_marshaling: tests/test_get_verifiers_marshaling.c $(OBJECTS)
-	@mkdir -p $(@D)
-	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
-
-$(BINDIR)/test_certify_ak_of_attester_marshaling: tests/test_certify_ak_of_attester_marshaling.c $(OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 

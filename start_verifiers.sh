@@ -33,7 +33,7 @@
 #   ./start_verifiers.sh                            # 1 Verifier on 5684
 #   ./start_verifiers.sh 3 --startingport 5684      # 5684, 5685, 5686
 #   (a bare number is the count only as the FIRST argument; use -n otherwise)
-#   ./start_verifiers.sh 3 --ak-validity 3600 -v    # 3, each with those flags
+#   ./start_verifiers.sh 3 --log-level DEBUG -v     # 3, each with those flags
 #   ./start_verifiers.sh 2 -- --ip 10.0.0.4         # pass the Verifier's --ip
 
 set -euo pipefail
@@ -66,9 +66,9 @@ while [ $# -gt 0 ]; do
         --)          shift; VERIFIER_ARGS+=("$@"); break ;;
         [0-9]*)
             # A bare number is the count ONLY as the very first argument.
-            # Anywhere else it is the value of a pass-through option (e.g.
-            # `--ak-validity 3600`), and swallowing it as the count would
-            # silently start thousands of Verifiers.
+            # Anywhere else it is the value of some pass-through option, and
+            # swallowing it as the count would silently start thousands of
+            # Verifiers.
             if [ "$FIRST_ARG" -eq 1 ]; then COUNT=$1; else VERIFIER_ARGS+=("$1"); fi
             shift ;;
         *)           VERIFIER_ARGS+=("$1"); shift ;;   # anything else -> Verifier

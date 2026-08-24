@@ -3,8 +3,8 @@
  * @brief See attester_attest.h.
  *
  * /attest: produces Quote_a over the requested PCR selection, together with
- * the IMA log those PCRs were extended from and both of this Attester's AK
- * certificates.
+ * the IMA log those PCRs were extended from. The signing key itself is
+ * never provisioned or certified at runtime -- see charra_trusted_keys.h.
  */
 
 
@@ -14,13 +14,13 @@
 
 #include "../common/charra_macro.h"
 #include "../core/charra_helper.h"
+#include "../core/charra_key_mgr.h"
 #include "../core/charra_marshaling.h"
 #include "../util/charra_util.h"
 #include "../util/coap_util.h"
 #include "../util/io_util.h"
 #include "../util/tpm2_util.h"
 #include "attester_shared.h"
-#include "attester_identity.h"
 #include "attester_ima_log.h"
 #include "attester_util.h"
 
@@ -67,7 +67,6 @@ void coap_attest_handler(struct coap_resource_t* resource,
     int coap_r = 0;
     TSS2_RC tss_r = 0;
     ESYS_TR sig_key_handle = ESYS_TR_NONE;
-    ESYS_TR ek_handle = ESYS_TR_NONE;
     TPM2B_PUBLIC* public_key = NULL;
     /* Declared here (rather than right before first use, further down) and
      * initialized to NULL so that every earlier 'goto error' -- including
@@ -105,14 +104,6 @@ void coap_attest_handler(struct coap_resource_t* resource,
     charra_log_info("[" LOG_NAME
                     "] ============================================================");
     charra_coap_log_peer_address(LOG_NAME, "/attest", session);
-
-    /* must run before the ESAPI init below opens its own TPM connection --
-     * the simulator only accepts one at a time */
-    if ((charra_r = ensure_attester_ak_keypair()) != CHARRA_RC_SUCCESS) {
-        charra_log_error(
-                "[" LOG_NAME "] Could not ensure Attester AK identity.");
-        goto error;
-    }
 
     /* --- receive incoming data --- */
     charra_log_info(
@@ -241,23 +232,18 @@ void coap_attest_handler(struct coap_resource_t* resource,
                 "further and break replay if repeated).");
     }
 
-    /* load TPM key -- the identity-provisioned AK, restricted so it can
-     * sign a real quote (see charra_identity_key_mgr_create_restricted_ak()) */
+    /* Load the AK: the TPM's deterministic RESTRICTED signing primary,
+     * which TPM2_Quote below requires and which
+     * tpm2_create_primary_key_rsa2048() reproduces identically on every
+     * call. No provisioning, no persisted blob -- this key's public half
+     * was written into keys/trusted_keys.txt offline (see
+     * charra_trusted_keys.h), and both the RP and the Verifier check the
+     * key they see here against that file. */
     struct timespec start_key_load, end_key_load;
     clock_gettime(CLOCK_MONOTONIC, &start_key_load);
     charra_log_info("[" LOG_NAME "] Loading TPM key.");
-    TPM2B_PUBLIC ak_public_tmp = {0};
-    TPM2B_NAME* ak_name_unused = NULL;
-    if ((charra_r = attester_load_ak(esys_ctx, &ek_handle, &sig_key_handle,
-                 &ak_name_unused, &ak_public_tmp)) == CHARRA_RC_SUCCESS) {
-        Esys_Free(ak_name_unused);
-        public_key = malloc(sizeof(*public_key));
-        if (public_key == NULL) {
-            charra_r = CHARRA_RC_ERROR;
-        } else {
-            *public_key = ak_public_tmp;
-        }
-    }
+    charra_r = charra_load_tpm2_key(esys_ctx, req.sig_key_id_len,
+            req.sig_key_id, &sig_key_handle, &public_key);
     if (charra_r != CHARRA_RC_SUCCESS) {
         charra_log_error(
                 "[" LOG_NAME "] Could not load TPM key: CHARRA_RC=%d.",
@@ -372,38 +358,6 @@ skip_event_log:
     /* prepare response */
     charra_log_info("[" LOG_NAME "] Preparing response.");
 
-    /* Attester's own Verifier-issued AK certificate (see
-     * /certify_ak_of_attester), if the Attester's identity has completed
-     * that leg -- empty (not an error) until then, same "temporary bypass"
-     * gap coap_appraise_handler() already documents on the Verifier side.
-     * Not cached in memory the way event_log is: DELIVER_VERIFIER can
-     * (re)write this file at any time between /attest calls, so every call
-     * re-reads whatever is on disk right now. */
-    char* ak_cert_buf = NULL;
-    size_t ak_cert_buf_len = 0;
-    if (charra_io_file_exists(attester_ak_cert_verifier_path) ==
-            CHARRA_RC_SUCCESS) {
-        if (charra_io_read_file(attester_ak_cert_verifier_path, &ak_cert_buf,
-                    &ak_cert_buf_len) != CHARRA_RC_SUCCESS) {
-            charra_log_warn("[" LOG_NAME "] Could not read Attester's own "
-                            "AK certificate; sending an empty one.");
-            ak_cert_buf = NULL;
-            ak_cert_buf_len = 0;
-        }
-    }
-    /* RP-issued cert, forwarded alongside the Verifier-issued one above */
-    char* ak_cert_rp_buf = NULL;
-    size_t ak_cert_rp_buf_len = 0;
-    if (charra_io_file_exists(attester_ak_cert_rp_path) == CHARRA_RC_SUCCESS) {
-        if (charra_io_read_file(attester_ak_cert_rp_path, &ak_cert_rp_buf,
-                    &ak_cert_rp_buf_len) != CHARRA_RC_SUCCESS) {
-            charra_log_warn("[" LOG_NAME "] Could not read Attester's "
-                            "RP-issued AK certificate; sending an empty one.");
-            ak_cert_rp_buf = NULL;
-            ak_cert_rp_buf_len = 0;
-        }
-    }
-
     /* prepare response DTO */
     msg_attestation_response_dto res = {
             .attestation_data_len = attest_buf->size,
@@ -415,10 +369,6 @@ skip_event_log:
             .event_log_len = ima_event_log_len,
             /* borrowed from the cache; not freed here */
             .event_log = (uint8_t*)ima_event_log,
-            .ak_certificate_attester_by_verifier_len = (uint32_t)ak_cert_buf_len,
-            .ak_certificate_attester_by_verifier = (uint8_t*)ak_cert_buf,
-            .ak_certificate_attester_by_rp_len = (uint32_t)ak_cert_rp_buf_len,
-            .ak_certificate_attester_by_rp = (uint8_t*)ak_cert_rp_buf,
     };
     memcpy(res.attestation_data, attest_buf->attestationData,
             res.attestation_data_len);
@@ -428,12 +378,9 @@ skip_event_log:
     charra_log_info(
             "[" LOG_NAME "] Response components: attestation_data=%u "
             "byte(s), tpm2_signature=%u byte(s), tpm2_public_key=%u "
-            "byte(s), event_log=%u byte(s), ak_certificate_by_verifier=%u "
-            "byte(s), ak_certificate_by_rp=%u byte(s).",
+            "byte(s), event_log=%u byte(s).",
             res.attestation_data_len, res.tpm2_signature_len,
-            res.tpm2_public_key_len, res.event_log_len,
-            res.ak_certificate_attester_by_verifier_len,
-            res.ak_certificate_attester_by_rp_len);
+            res.tpm2_public_key_len, res.event_log_len);
 
     /* clean up */
     charra_free_and_null(signature);
@@ -449,12 +396,8 @@ skip_event_log:
         charra_log_error(
                 "[" LOG_NAME "] Error marshaling data: CHARRA_RC=%d.",
                 charra_r);
-        charra_io_free_file_buffer(&ak_cert_buf);
-        charra_io_free_file_buffer(&ak_cert_rp_buf);
         goto error;
     }
-    charra_io_free_file_buffer(&ak_cert_buf);
-    charra_io_free_file_buffer(&ak_cert_rp_buf);
     charra_log_info("[" LOG_NAME "] Size of marshaled response is %d bytes.",
             res_buf_len);
 
@@ -499,11 +442,6 @@ error:
         if (Esys_FlushContext(esys_ctx, sig_key_handle) != TSS2_RC_SUCCESS) {
             charra_log_error(
                     "[" LOG_NAME "] TSS cleanup sig_key_handle failed.");
-        }
-    }
-    if (ek_handle != ESYS_TR_NONE) {
-        if (Esys_FlushContext(esys_ctx, ek_handle) != TSS2_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME "] TSS cleanup ek_handle failed.");
         }
     }
 

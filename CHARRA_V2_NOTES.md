@@ -2471,3 +2471,137 @@ eight booleans total now, up from seven.
 (no SGX/Nitro/etc. integration) and no attempt to protect `TEE.c` against
 an attacker who can edit the running binary -- both are out of scope for a
 software PoC and were never the gap this closes.
+
+### The entire EK/AK certificate PKI is gone, replaced by a flat trust anchor; RP now has its own TPM for Quote_r
+
+Ported from a colleague's independent rewrite on a separate branch
+(`origin/fresh`), re-derived by hand against this branch rather than
+merged mechanically -- `fresh` never had the qualification-handshake
+removal or the TEE feature above, and this branch never had `fresh`'s own
+unrelated work (signed `/appraise` verdicts, the qualification handshake
+kept alive under a new `verifier_qualified_rps.h`). Only the two changes
+described below were ported; the rest was deliberately left out as
+out-of-scope scope creep relative to what was asked.
+
+**What's gone.** Every certificate, every CA, every EK, every issuance
+ledger, every credential-activation handshake (`TPM2_MakeCredential` /
+`TPM2_ActivateCredential`), and the `/certify_ak` and
+`/certify_ak_of_attester` CoAP resources that drove them -- deleted
+outright, not stubbed:
+`charra_ak_state.{c,h}`, `charra_identity_key_mgr.{c,h}`,
+`charra_record_file.{c,h}`, `rp_identity.{c,h}`,
+`rp_attester_identity.{c,h}`, `rp_cert_cache.{c,h}`,
+`verifier_certify_ak.{c,h}`, `attester_identity.{c,h}`,
+`attester_certify_ak.{c,h}`, the four `msg_certify_ak*`/`msg_ak_identity*`/
+`msg_activate_credential*` DTOs and their marshaling, the entire
+`state/` runtime-state tree (RP no longer claims or writes *any* state
+directory), the `--ak-validity`/`--attester-ak-validity`/
+`--ak-renew-margin` CLI flags, and every certificate/key file under
+`keys/` that existed only to backstop that PKI
+(`gen-ak-pki.sh`, `manufacturer-root.*`, `rp-ca.*`, `rp-ek.*`,
+`attester-ek.*`, `test-ak.key`, all eleven `verifier-ca-<port>.*` pairs).
+`crypto_util.c/h` lost the entire EK/AK chain-verification section, AK
+issuance (Verifier-as-Privacy-CA), and AES-256-GCM (used only to wrap a
+credential-activation secret) -- roughly 970 of the 1,642 lines that file
+had; the software RSA-keypair helpers at the top were **kept**, since
+`TEE.c` (a same-session, unrelated feature) still needs them and they were
+never cert-specific themselves.
+
+**What replaced it: `charra_trusted_keys.h`.** A flat file,
+`keys/trusted_keys.txt`, holding the PEM public halves of exactly two
+TPM-resident signing keys -- the Attester's (restricted, quotes `Quote_a`)
+and the RP's (unrestricted, quotes `Quote_r`, see below). A signing key is
+trusted **if and only if it appears in this file**. No chain, no validity
+window, no revocation, no serial, nothing to provision or renew at
+runtime -- the AK/EK binding a real deployment proves with
+`TPM2_MakeCredential` is asserted here by the file's existence instead.
+Both keys are *deterministic*: `tpm2_create_primary_key_rsa2048()` (the
+Attester's, restricted) and the new
+`tpm2_create_primary_key_rsa2048_unrestricted()` (the RP's) derive the same
+key from the TPM's owner-hierarchy seed and a fixed template on every call
+and every process restart -- there is nothing to cache because re-deriving
+is free and always reproduces the same identity. A new offline tool,
+`bin/provision_trusted_keys` (`--role attester|relying-party`, or both at
+once for the single-shared-TPM dev setup), reads those keys straight out
+of a TPM and writes the file; `keys/gen-trusted-keys.sh` wraps it for both
+the single-TPM and the two-TPM-per-role cases. **Re-run it after every TPM
+reset** -- wiping the simulator's NVChip re-randomizes the seed and
+silently invalidates every entry, which then fails as "key not in the
+trust anchor" rather than anything more diagnosable. `run_live_test.sh`
+now does this automatically as part of its TPM-reset sequence.
+
+**RP gets its own TPM for Quote_r -- `rp_signing_key.h`.** Previously
+`PCR_r` was a pure software computation (replay `log_r`, `hash_sha256_array`
+the per-PCR digests) and `Quote_r` was an RSA-PSS signature over
+`PCR_r ‖ nonce` produced by a throwaway software keypair -- not a TPM
+operation at all, and not the same kind of proof `Quote_a` makes. Now
+`rp_replay_log_into_pcr()` resets `RP_REPLAY_PCR_INDEX` (23, not 10: this
+one must be rewindable before every cycle's replay, and the PC Client
+profile only allows that from locality 0 on 16 and 23) and extends
+`log_r`'s PCR-10-tagged entries into it via genuine `TPM2_PCR_Extend`
+calls, once per cycle, shared by every Verifier's later quote. Then
+`rp_quote_pcr_with_ak()` has the RP's TPM itself read that PCR and produce
+a real `TPM2_Quote` -- `extraData` = that Verifier's nonce, `pcrDigest` =
+the composite over the one PCR -- signed by the same deterministic
+unrestricted primary named above, derived fresh and discarded inside the
+call, never cached. `Quote_r` is therefore now the same *kind* of proof
+`Quote_a` already was: a TPM asserting it read a specific PCR and was
+handed a specific nonce, not software asserting a value and separately
+signing it. The corresponding software replay in `rp_evidence.c` survives
+only as a diagnostic prediction, logged but never sent.
+
+**Wire consequence.** `msg_rp_evidence_dto`'s `pcr_r`/`verifier_nonce`
+fields are gone -- both now live *inside* the TPM-signed
+`rp_attestation_data` (a `TPMS_ATTEST`), the same way the Attester's own
+nonce and PCR digest always lived inside `attestation_data`. `rp_public_key`
+changed shape from a DER-encoded software RSA key to a raw `TPM2B_PUBLIC`,
+matching `tpm2_public_key`'s existing convention -- both keys now come from
+a TPM and are checked the same way (a trust-anchor lookup), so there was no
+reason left for them to travel differently. Every `ak_certificate_*` field,
+on both `msg_attestation_response_dto` and `msg_rp_evidence_dto`, is gone.
+
+**Verifier side.** Step 3a item 1 and Step 3b item 1 both collapsed from a
+certificate-chain-plus-ledger check into one `charra_trusted_keys_check()`
+call. Step 3a item 2 (Quote_r's signature) now verifies a real
+`TPMS_ATTEST` under a `TPM2B_PUBLIC` instead of a DER key over a raw
+`PCR_r ‖ nonce` buffer. A **new** Step 3a item 4 exists that had no
+equivalent before: replay `log_r` in software
+(`charra_replay_ima_log()`) and check the result against
+`rp_attestation_data`'s own `pcrDigest` -- without this, a genuine
+`Quote_r` would only prove *some* PCR held *some* value freshly, not that
+it came from replaying the log actually being appraised. (The TEE
+Attestation Document check from the previous entry is Step 3a item 5 now,
+unchanged in substance.) Step 3b item 2 also dropped its TPM-backed
+double-check (`charra_verify_tpm2_quote_signature_with_tpm_logged()`,
+which opened a TCTI/ESAPI session against the Verifier's own TPM) -- with
+no certificate chain left to validate either, `/appraise` opens **no TPM
+connection at all** any more; every check is mbedTLS public-key math over
+bytes the RP sent. The final verdict is still eight booleans, fail-closed,
+ANDed -- the identity of one of them changed (the dropped TPM-backed
+signature double-check for one gained (log_r-vs-PCR), net zero), but the
+count happens to match.
+
+**Attester side.** No more `ensure_attester_ak_keypair()`/provisioning
+step before ESAPI init. `coap_attest_handler()` now loads its quoting key
+via the pre-existing `charra_load_tpm2_key()` (already used by
+`verifier_old.c`, keyed off `req.sig_key_id == "PK.RSA.default"`) instead
+of a dedicated identity-provisioning path -- one fewer thing this file
+depends on. `msg_attestation_response_dto` shrank from six fields to four.
+
+**Deliberately excluded from this port**, even though they exist on
+`origin/fresh`: signed `/appraise` verdicts (`charra_verdict.h`, using the
+DTLS transport keypair to sign the vote so a raw-socket forger needs
+`keys/verifier.der`) -- a real hardening, but unrelated to identity/PKI and
+not asked for; and the RP-qualification handshake surviving there under
+`verifier_qualified_rps.h` -- this branch already replaced that entire
+concept with the TEE Attestation Document (previous entry) and was not
+going to resurrect a parallel mechanism for the same problem.
+
+**Kept, deliberately:** `charra_key_mgr.c/h`'s `charra_load_tpm2_key()`/
+`charra_load_external_public_key()` (still used by `verifier_old.c` and
+`charra_util.c`'s TPM-backed quote check), and `crypto_util.c/h`'s
+software RSA-keypair section (now serving only `TEE.c`, with its doc
+comment updated to say so instead of the RP identity it used to serve).
+`verifier_old.c` -- the legacy upstream single-binary demo -- was never
+touched and still builds against everything this removed, since it never
+depended on any of it in the first place.

@@ -43,8 +43,11 @@ CHARRA_RC charra_tpm2_pcr_selection_to_bitmap(const uint32_t pcr_selection_len,
         return CHARRA_RC_BAD_ARGUMENT;
     }
 
-    /* set length */
-    /* FIXME There seems to be a bug with sizes other than 3 */
+    /* 3 bytes, covering PCRs 0..23 -- not a workaround. TPM2_MAX_PCRS is
+     * the spec's architectural ceiling (32), while a PC Client TPM
+     * implements 24, so TPM2_PCR_SELECT_MAX (4) would describe PCRs the
+     * device does not have and the TPM rejects the selection. Every bound
+     * in this function is TPM2_MAX_PCRS - 8 for the same reason. */
     pcr_selection_bitmap->sizeofSelect = TPM2_PCR_SELECT_MAX - 1;
 
     /* initialize PCR selection to all zeros */
@@ -56,10 +59,15 @@ CHARRA_RC charra_tpm2_pcr_selection_to_bitmap(const uint32_t pcr_selection_len,
     for (uint32_t i = 0; i < pcr_selection_len; ++i) {
         uint32_t pcr = pcr_selection[i];
 
-        /* sanity check(s) */
+        /* Rejected, not just logged: sizeofSelect above stops at byte 2,
+         * so a bit set for PCR 24+ never reaches the wire. Continuing
+         * would return SUCCESS on a selection silently missing a PCR the
+         * caller asked for. */
         if (pcr >= (TPM2_MAX_PCRS - 8)) {
-            charra_log_error("PCR index (%i) greater than TPM2_MAX_PCRS (%i).",
-                    pcr, TPM2_MAX_PCRS);
+            charra_log_error("pcr_selection_to_bitmap(...): PCR index (%i) "
+                             "is not below %i.",
+                    pcr, TPM2_MAX_PCRS - 8);
+            return CHARRA_RC_BAD_ARGUMENT;
         }
 
         /* set bit in PCR selection bitmap */

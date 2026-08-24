@@ -12,21 +12,19 @@
 #include <time.h>
 
 #include <mbedtls/rsa.h>
-#include <tss2/tss2_tctildr.h>
 
 #include "../common/charra_log.h"
 #include "../common/charra_macro.h"
 #include "../core/TEE.h"
-#include "../core/charra_ak_state.h"
 #include "../core/charra_event_log.h"
-#include "../core/charra_identity_key_mgr.h"
 #include "../core/charra_marshaling.h"
 #include "../core/charra_sdk.h"
+#include "../core/charra_trusted_keys.h"
 #include "../util/charra_util.h"
 #include "../util/crypto_util.h"
 #include "../util/io_util.h"
-#include "rp_identity.h"
 #include "rp_shared.h"
+#include "rp_signing_key.h"
 
 #define LOG_NAME "relying party"
 
@@ -82,50 +80,23 @@ bool charra_rp_appraise_evidence(
     memcpy(&signature, res->tpm2_signature, res->tpm2_signature_len);
     TPM2B_PUBLIC* tpm2_public_key = (TPM2B_PUBLIC*)res->tpm2_public_key;
 
-    /* --- 1. Attester's AK certificate, issued by RP's own CA -------------
-     * DRA-TLS Step 2a item 1. Same chain+key check the Verifier runs for
-     * Step 3a/3b item 1 (charra_crypto_verify_ekak_certificate() is written
-     * to be shared by both, see its docstring), but RP additionally checks
-     * the serial against its own issuance ledger: unlike the Verifier-issued
-     * leg (one shared CA, no cross-Verifier ledger), RP signed this cert
-     * itself, so revocation is actually checkable here. */
-    charra_log_info(
-            "[" LOG_NAME "] Verifying Attester's RP-issued AK certificate ...");
-    if (res->ak_certificate_attester_by_rp_len == 0) {
-        charra_log_error("[" LOG_NAME "]     => certificate is EMPTY -- "
-                         "/certify_ak_of_attester's DELIVER_RP leg has not "
-                         "completed yet.");
-    } else {
-        char* rp_ca_cert_der = NULL;
-        size_t rp_ca_cert_der_len = 0;
-        if (charra_io_read_file(rp_ca_cert_path, &rp_ca_cert_der,
-                    &rp_ca_cert_der_len) != CHARRA_RC_SUCCESS) {
-            charra_log_error("[" LOG_NAME "]     => could not read RP CA "
-                             "certificate ('%s').",
-                    rp_ca_cert_path);
+    /* --- 1. Attester's identity -------------------------------------------
+     * DRA-TLS Step 2a item 1. The same check the Verifier runs for Step 3b
+     * item 1, and for the same reason: the key that signed this quote has
+     * to be one we already trust. "Already trust" means "appears in the
+     * trust anchor" -- see charra_trusted_keys.h for what that does and
+     * does not establish. */
+    charra_log_info("[" LOG_NAME "] Verifying the Attester's signing key ...");
+    {
+        char name[128] = {0};
+        ekak_ok = charra_trusted_keys_check(
+                          NULL, tpm2_public_key, name, sizeof(name)) ==
+                  CHARRA_RC_SUCCESS;
+        if (ekak_ok) {
+            charra_log_info("[" LOG_NAME "]     => trusted: '%s'", name);
         } else {
-            uint8_t ak_serial[16] = {0};
-            ekak_ok = charra_crypto_verify_ekak_certificate(
-                    res->ak_certificate_attester_by_rp,
-                    res->ak_certificate_attester_by_rp_len,
-                    (uint8_t*)rp_ca_cert_der, rp_ca_cert_der_len,
-                    tpm2_public_key, ak_serial) == CHARRA_RC_SUCCESS;
-            charra_io_free_file_buffer(&rp_ca_cert_der);
-            if (!ekak_ok) {
-                charra_log_error("[" LOG_NAME "]     => certificate did NOT "
-                                 "verify (chain or key mismatch)!");
-            } else {
-                charra_print_hex(CHARRA_LOG_INFO, sizeof(ak_serial),
-                        ak_serial,
-                        "[" LOG_NAME "]     => chain and key valid! serial 0x",
-                        "\n", false);
-                ekak_ok = charra_ak_state_check_serial_valid(
-                        attester_ak_state_file_path, ak_serial, NULL, NULL);
-                charra_log_info(
-                        "[" LOG_NAME "]     => serial is %s",
-                        ekak_ok ? "currently valid (not revoked/expired)!"
-                                : "REVOKED or EXPIRED!");
-            }
+            charra_log_error("[" LOG_NAME "]     => the key that signed this "
+                             "quote is NOT in the trust anchor!");
         }
     }
 
@@ -243,42 +214,39 @@ CHARRA_RC charra_rp_prepare_evidence(void) {
                     "redaction took %.3fs.",
             rp_log_r_len, last_response.event_log_len, redact_duration);
 
-    /* --- replay log_r into the same PCR selection, then composite ------ */
-    charra_pcr_accumulator replayed[TPM2_MAX_PCRS] = {{{0}}};
-    charra_r = charra_replay_ima_log_pcrs(rp_log_r, rp_log_r_len,
-            tpm_pcr_selection, tpm_pcr_selection_len, replayed);
-    if (charra_r != CHARRA_RC_SUCCESS) {
+    /* A software replay, kept only for the log line below: it predicts the
+     * value the TPM is about to arrive at, which is what makes a Verifier's
+     * later "does NOT match" report diagnosable. Local, not global -- no
+     * other module reads it. */
+    uint8_t rp_pcr_r[TPM2_SHA256_DIGEST_SIZE] = {0};
+    if (charra_replay_ima_log(rp_log_r, rp_log_r_len, CHARRA_IMA_PCR_INDEX,
+                rp_pcr_r) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Replay of log_r failed.");
-        return charra_r;
-    }
-    uint8_t* pcr_values[TPM2_MAX_PCRS] = {NULL};
-    for (uint32_t i = 0; i < tpm_pcr_selection_len; i++) {
-        pcr_values[i] = replayed[i].value;
-    }
-    if (hash_sha256_array(pcr_values, tpm_pcr_selection_len, rp_pcr_r) !=
-            CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not compute PCR_r.");
-        return CHARRA_RC_CRYPTO_ERROR;
+        return CHARRA_RC_ERROR;
     }
     charra_print_hex(CHARRA_LOG_INFO, sizeof(rp_pcr_r), rp_pcr_r,
-            "                        PCR_r: 0x", "\n", false);
+            "                        expected PCR_r: 0x", "\n", false);
 
-    /* --- keypair Quote_r is signed under --------------------------------
-     * Ensured here, once, before any per-Verifier thread starts -- each
-     * thread separately calls ensure_rp_ak_certificate(verifier_index) for
-     * its own Verifier's AK *certificate*, but the underlying TPM-resident
-     * keypair itself is Verifier-agnostic and only needs creating once;
-     * this call is idempotent (cheap) once it has been. */
-    CHARRA_RC keypair_rc = ensure_rp_ak_keypair();
-    if (keypair_rc != CHARRA_RC_SUCCESS) {
-        charra_log_error(
-                "[" LOG_NAME "] RP AK keypair not provisioned; evidence not "
-                "ready.");
-        return keypair_rc;
+    /* Replay log_r into the RP's own TPM, ONCE for the whole cycle. Every
+     * Verifier's quote reads this same PCR -- quoting does not consume it
+     * -- so repeating the replay per Verifier would multiply the most
+     * expensive part of the cycle by the Verifier count for no benefit.
+     *
+     * The signing key is still derived fresh inside each quote and never
+     * held here; only the PCR is prepared ahead. */
+    struct timespec replay_start, replay_end;
+    clock_gettime(CLOCK_MONOTONIC, &replay_start);
+    charra_r = rp_replay_log_into_pcr(rp_log_r, rp_log_r_len);
+    clock_gettime(CLOCK_MONOTONIC, &replay_end);
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not replay log_r into the "
+                         "TPM; no Verifier can be answered this cycle.");
+        return charra_r;
     }
-    charra_log_info(
-            "[" LOG_NAME "] RP AK keypair ready (public key %u bytes).",
-            rp_public_key_der_len);
+    charra_log_info("[" LOG_NAME "] TPM replay of log_r took %.3fs.",
+            (replay_end.tv_sec - replay_start.tv_sec) +
+                    (replay_end.tv_nsec - replay_start.tv_nsec) / 1e9);
+
     return CHARRA_RC_SUCCESS;
 }
 
@@ -286,19 +254,17 @@ void charra_rp_release_evidence(void) {
     charra_free_if_not_null(rp_log_r);
     rp_log_r = NULL;
     rp_log_r_len = 0;
-    /* rp_public_key_der/rp_ak_cert_der are provisioned once (per-Verifier
-     * for the latter) by ensure_rp_ak_keypair()/ensure_rp_ak_certificate()
-     * and live for the whole process, not freed per attestation cycle. */
+    /* Nothing key-related to release: the signing key is derived and
+     * discarded inside each signature, never held here. */
 }
 
 /**
  * @brief Frees the heap-allocated fields of an /attest response DTO.
  *
- * charra_unmarshal_attestation_response() malloc()s three of them
- * (event_log plus both Attester AK certificates, ~6 KB per cycle). Freed
+ * charra_unmarshal_attestation_response() malloc()s the event log. Freed
  * explicitly rather than left for process exit, so a run that ever
  * attests more than once in one process -- or is checked under valgrind --
- * does not accumulate or misreport them as still reachable. Nulls as it
+ * does not accumulate or misreport it as still reachable. Nulls as it
  * frees, so it's safe on a zeroed struct and safe to call twice.
  */
 void charra_free_attestation_response(
@@ -308,101 +274,46 @@ void charra_free_attestation_response(
     }
     charra_free_if_not_null(res->event_log);
     res->event_log_len = 0;
-    charra_free_if_not_null(res->ak_certificate_attester_by_verifier);
-    res->ak_certificate_attester_by_verifier_len = 0;
-    charra_free_if_not_null(res->ak_certificate_attester_by_rp);
-    res->ak_certificate_attester_by_rp_len = 0;
 }
 
 /**
  * @brief Builds Quote_r for one Verifier and marshals the whole RP evidence
  * message for it.
  *
- * Quote_r's signature covers (PCR_r || that Verifier's nonce), so each
- * Verifier gets a signature bound to the challenge it issued -- which is
- * what makes the exchange fresh from the Verifier's point of view.
+ * Quote_r is taken per Verifier, not once per cycle, because each carries
+ * that Verifier's own nonce as qualifyingData -- which is what makes the
+ * exchange fresh from that Verifier's point of view. Each therefore costs
+ * its own TPM2_Quote against the RP's TPM, against the PCR
+ * charra_rp_prepare_evidence() already replayed log_r into.
  */
 CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
         uint32_t* marshaled_len, uint8_t** marshaled) {
-    /* Only the signing keypair is mandatory -- without it there is no
-     * Quote_r at all, so there is nothing to send. A missing AK
-     * *certificate* is not a reason to stay silent: send the evidence with
-     * the field empty and let the Verifier apply Step 3a item 1 and record
-     * its own decision -- a Verifier that cannot validate the certificate
-     * votes NO, which is the whole signal, and staying silent would instead
-     * look like an unreachable RP. */
-    if (!rp_ak_keypair_ready) {
-        charra_log_error("[" LOG_NAME "] No AK keypair; cannot sign Quote_r.");
-        return CHARRA_RC_ERROR;
-    }
-    if (!rp_ak_cert_ready[verifier_index]) {
-        charra_log_error("[" LOG_NAME "] No AK certificate for Verifier %d -- "
-                         "sending evidence without one; that Verifier will "
-                         "reject it at Step 3a item 1.",
-                verifier_index + 1);
-    }
-
     msg_rp_evidence_dto ev = {0};
-    memcpy(ev.pcr_r, rp_pcr_r, sizeof(ev.pcr_r));
 
-    ev.verifier_nonce_len = verifier_nonce_lens[verifier_index];
-    if (ev.verifier_nonce_len > sizeof(ev.verifier_nonce)) {
-        charra_log_error("[" LOG_NAME "] Verifier nonce too long.");
+    uint32_t nonce_len = verifier_nonce_lens[verifier_index];
+    if (nonce_len == 0) {
+        charra_log_error("[" LOG_NAME "] No nonce from this Verifier.");
         return CHARRA_RC_ERROR;
     }
-    memcpy(ev.verifier_nonce, verifier_nonces[verifier_index],
-            ev.verifier_nonce_len);
 
-    /* sign (PCR_r || nonce) with RP's TPM-resident AK -- opens its own
-     * short-lived TPM connection (mutex-serialized against any other RP
-     * TPM use, including a concurrent sibling verifier thread's own sign
-     * here) rather than reusing a long-lived one; see rp_tpm_mutex's
-     * comment for why holding a connection open longer than one operation
-     * needs is a real problem, not just tidiness, on this dev TPM
-     * simulator. */
-    uint8_t signed_data[sizeof(ev.pcr_r) + sizeof(ev.verifier_nonce)] = {0};
-    memcpy(signed_data, ev.pcr_r, sizeof(ev.pcr_r));
-    memcpy(signed_data + sizeof(ev.pcr_r), ev.verifier_nonce,
-            ev.verifier_nonce_len);
-
-    pthread_mutex_lock(&rp_tpm_mutex);
-    ESYS_CONTEXT* sign_esys_ctx = NULL;
-    TSS2_TCTI_CONTEXT* sign_tcti_ctx = NULL;
-    ESYS_TR sign_ek_handle = ESYS_TR_NONE;
-    ESYS_TR sign_ak_handle = ESYS_TR_NONE;
-    TPM2B_NAME* sign_ak_name = NULL;
-    CHARRA_RC charra_r = rp_open_tpm_and_load_ak(&sign_esys_ctx,
-            &sign_tcti_ctx, &sign_ek_handle, &sign_ak_handle, &sign_ak_name);
+    /* Quote the PCR charra_rp_prepare_evidence() already replayed log_r
+     * into, under this Verifier's nonce. The key is derived, used and
+     * discarded inside this call -- see rp_signing_key.h. */
+    TPM2B_PUBLIC ak_public_key = {0};
+    CHARRA_RC charra_r = rp_quote_pcr_with_ak(
+            verifier_nonces[verifier_index], nonce_len,
+            ev.rp_attestation_data, sizeof(ev.rp_attestation_data),
+            &ev.rp_attestation_data_len, ev.rp_signature, &ak_public_key);
     if (charra_r != CHARRA_RC_SUCCESS) {
-        pthread_mutex_unlock(&rp_tpm_mutex);
-        charra_log_error(
-                "[" LOG_NAME "] Could not open TPM connection to sign "
-                "Quote_r.");
-        return charra_r;
-    }
-    Esys_Free(sign_ak_name);
-
-    charra_r = charra_identity_key_mgr_sign(sign_esys_ctx, sign_ak_handle,
-            signed_data, sizeof(ev.pcr_r) + ev.verifier_nonce_len,
-            ev.rp_signature);
-
-    Esys_FlushContext(sign_esys_ctx, sign_ak_handle);
-    Esys_FlushContext(sign_esys_ctx, sign_ek_handle);
-    Esys_Finalize(&sign_esys_ctx);
-    Tss2_TctiLdr_Finalize(&sign_tcti_ctx);
-    pthread_mutex_unlock(&rp_tpm_mutex);
-
-    if (charra_r != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not sign Quote_r.");
+        charra_log_error("[" LOG_NAME "] Could not produce Quote_r.");
         return charra_r;
     }
     ev.rp_signature_len = CHARRA_RSA_SIGNATURE_LEN;
 
-    ev.rp_public_key_len = rp_public_key_der_len;
-    memcpy(ev.rp_public_key, rp_public_key_der, rp_public_key_der_len);
-
-    ev.ak_certificate_rp_len = rp_ak_cert_der_len[verifier_index];
-    ev.ak_certificate_rp = rp_ak_cert_der[verifier_index];
+    /* Straight from the derivation that produced rp_signature above, so
+     * the key and the signature cannot disagree. */
+    ev.rp_public_key_len = sizeof(ak_public_key);
+    memcpy(ev.rp_public_key, &ak_public_key, sizeof(ak_public_key));
 
     /* the nonce the RP itself sent to the Attester */
     ev.attester_nonce_len = (uint32_t)last_request.nonce_len;
@@ -419,50 +330,31 @@ CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
     memcpy(ev.tpm2_public_key, last_response.tpm2_public_key,
             last_response.tpm2_public_key_len);
 
-    /* EK_a/AK_a: the Attester's AK certificate issued by THIS Verifier's
-     * own CA -- substituted from RP's own per-Verifier cache
-     * (attester_ak_cert_by_verifier_der[], populated by ensure_attester_
-     * identity_certified_by_verifier()), not whatever last_response itself
-     * carries. Only RP knows which certificate belongs to which Verifier
-     * now that each Verifier has an independent CA; the certificate's
-     * validity depends only on its own CA signature, not on who forwarded
-     * the bytes, so this is not a trust shortcut. */
-    ev.ak_certificate_attester_by_verifier_len =
-            attester_ak_cert_by_verifier_der_len[verifier_index];
-    ev.ak_certificate_attester_by_verifier =
-            attester_ak_cert_by_verifier_der[verifier_index];
-
-    /* RP-issued cert, forwarded alongside the Verifier-issued one above */
-    ev.ak_certificate_attester_by_rp_len =
-            last_response.ak_certificate_attester_by_rp_len;
-    ev.ak_certificate_attester_by_rp =
-            last_response.ak_certificate_attester_by_rp;
-
     ev.log_r = rp_log_r;
     ev.log_r_len = rp_log_r_len;
 
     /* --- simulated TEE Attestation Document (see TEE.h) ------------------
      * REPORT_DATA = hash(verifier_nonce || pcrdigest_a || log_r): binds
-     * this attestation to the exact challenge this Verifier issued, the
-     * exact TPM-signed digest appraisal checked log_a's replay against, and
-     * the exact log_r this message carries -- so it cannot be replayed
-     * against a different nonce, a different Attester evidence, or a
-     * different redacted log. */
+     * this attestation to the exact challenge this Verifier issued (the
+     * same nonce bytes just quoted above, not a second independent copy),
+     * the exact TPM-signed digest appraisal checked log_a's replay
+     * against, and the exact log_r this message carries -- so it cannot be
+     * replayed against a different nonce, a different Attester evidence,
+     * or a different redacted log. */
     charra_log_info(
             "[" LOG_NAME "]  +------------ RP TEE Attestation --------------+");
     size_t report_data_input_len =
-            (size_t)ev.verifier_nonce_len + rp_pcrdigest_a_len + rp_log_r_len;
+            (size_t)nonce_len + rp_pcrdigest_a_len + rp_log_r_len;
     uint8_t* report_data_input = malloc(report_data_input_len);
     if (report_data_input == NULL) {
         charra_log_error(
                 "[" LOG_NAME "] Out of memory building TEE REPORT_DATA.");
         return CHARRA_RC_ERROR;
     }
-    memcpy(report_data_input, ev.verifier_nonce, ev.verifier_nonce_len);
-    memcpy(report_data_input + ev.verifier_nonce_len, rp_pcrdigest_a,
-            rp_pcrdigest_a_len);
-    memcpy(report_data_input + ev.verifier_nonce_len + rp_pcrdigest_a_len,
-            rp_log_r, rp_log_r_len);
+    memcpy(report_data_input, verifier_nonces[verifier_index], nonce_len);
+    memcpy(report_data_input + nonce_len, rp_pcrdigest_a, rp_pcrdigest_a_len);
+    memcpy(report_data_input + nonce_len + rp_pcrdigest_a_len, rp_log_r,
+            rp_log_r_len);
 
     uint8_t report_data[TPM2_SHA256_DIGEST_SIZE] = {0};
     CHARRA_RC tee_rc =

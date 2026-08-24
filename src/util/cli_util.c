@@ -25,7 +25,6 @@
 #include "io_util.h"
 #include <errno.h>
 #include <getopt.h>
-#include <limits.h>
 #include <stdbool.h>
 #include <stdlib.h>
 
@@ -41,8 +40,7 @@ static const struct option verifier_options[] = {
         {"public-key", required_argument, 0, '2'},
         {"peer-public-key", required_argument, 0, '3'},
         {"verify-peer", required_argument, 0, '4'},
-        {"port", required_argument, 0, 'b'},
-        {"ak-validity", required_argument, 0, '6'}, {0}};
+        {"port", required_argument, 0, 'b'}, {0}};
 
 static const struct option attester_options[] = {
         {"verbose", no_argument, 0, 'v'},
@@ -157,11 +155,6 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
                 printf("     --port=PORT:                Connect to PORT "
                        "instead of default port %u.\n",
                         *(variables->common_config.port));
-                printf("     --ak-validity=SECONDS:      Lifetime of AK "
-                       "certificates this Verifier issues, measured from "
-                       "issuance. Default %ld.\n",
-                        (long)*(variables->verifier_config
-                                        .ak_cert_validity_seconds));
                 printf("DTLS-PSK Options:\n");
                 printf(" -p, --psk:                      Enable DTLS protocol "
                        "with PSK. By default the key '%s' and identity '%s' "
@@ -342,16 +335,7 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
             continue;
         }
 
-        if (caller == VERIFIER && identifier == '6') {
-            // set AK certificate lifetime
-            long value = 0;
-            if (!charra_cli_parse_uint_arg(log_name, "--ak-validity", optarg, 1,
-                        LONG_MAX, &value)) {
-                return -1;
-            }
-            *(variables->verifier_config.ak_cert_validity_seconds) =
-                    (time_t)value;
-        } else if (caller == VERIFIER && identifier == 'i') {
+        if (caller == VERIFIER && identifier == 'i') {
             *variables->common_config.use_dtls_psk = true;
             char* identity =
                     charra_cli_dup_arg(log_name, "--identity", optarg);

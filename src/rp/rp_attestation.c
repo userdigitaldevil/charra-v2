@@ -22,10 +22,8 @@
 #include "../util/charra_util.h"
 #include "../util/coap_util.h"
 #include "../util/io_util.h"
-#include "rp_attester_identity.h"
 #include "rp_coap.h"
 #include "rp_evidence.h"
-#include "rp_identity.h"
 #include "rp_shared.h"
 
 #define LOG_NAME "relying party"
@@ -419,20 +417,6 @@ void* get_attestation_results_thread(void* arg) {
     attestation_results[verifier_index] = false;
     verifier_latency_ms[verifier_index] = -1;
 
-    /* Per-Verifier: this Verifier's certificate for RP's AK, and its
-     * certificate for the Attester's. Both are best-effort -- send the
-     * evidence either way and let the Verifier judge Step 3a/3b and record
-     * its own decision. */
-    if (ensure_rp_ak_certificate(verifier_index) != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not provision RP's AK "
-                         "certificate; forwarding evidence anyway.");
-    }
-    if (ensure_attester_identity_certified_by_verifier(verifier_index) !=
-            CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not provision the Attester's "
-                         "AK certificate; forwarding evidence anyway.");
-    }
-
     /* --- ask this Verifier for its own freshness challenge --------------
      * The body is the same attestation request RP built for the Attester:
      * verifier.c's coap_nonce_handler() unmarshals it, keeps req.nonce for
@@ -541,43 +525,18 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
         pthread_join(threads[i], NULL);
     }
 
-    /* Identity readiness, as of right now -- not "did we redo this cycle":
-     * rp_ak_cert_ready[] is per-Verifier, independently cached on disk and
-     * only touched when the cache was missing or expired, so most cycles
-     * this just reports cache state untouched this round. */
-    int num_not_ready = 0;
-    for (int i = 0; i < num_verifiers; ++i) {
-        bool ak_ready = rp_ak_cert_ready[i];
-        if (ak_ready) {
-            charra_log_info(
-                    "[" LOG_NAME "] Verifier %d (port %u): ready (AK "
-                    "certified).",
-                    i + 1, verifiers[i].port_number);
-        } else {
-            num_not_ready++;
-            charra_log_info(
-                    "[" LOG_NAME "] Verifier %d (port %u): NOT ready (AK "
-                    "certificate not provisioned).",
-                    i + 1, verifiers[i].port_number);
-        }
-    }
-    if (num_not_ready > 0) {
-        charra_log_info("[" LOG_NAME "] %d/%d Verifier(s) not yet ready "
-                        "(missing AK certificate).",
-                num_not_ready, num_verifiers);
-    }
-
     for (int i = 0; i < num_verifiers; ++i) {
         charra_log_info("[" LOG_NAME "] Verifier %d (port %u): %s", i+1, verifiers[i].port_number, attestation_results[i] ? "Attestation successful!" : "Attestation failed!");
     }
 
     /* Fail-closed majority over every configured Verifier. A Verifier
      * counts as a pass only if it appraised the evidence and accepted it.
-     * Everything else is a NO: any failed check (Step 3a's RP EK/AK,
-     * Quote_r, RP nonce; Step 3b's Attester EK/AK, Quote_a, Attester
-     * nonce), a rejection we could not recover from, an unreachable
-     * Verifier, or evidence we never managed to send. Not completing the
-     * exchange is never a reason to accept. */
+     * Everything else is a NO: any failed check (Step 3a's RP signing key,
+     * Quote_r, RP nonce, log_r-vs-PCR; Step 3b's Attester signing key,
+     * Quote_a, Attester nonce; the TEE Attestation Document), a rejection
+     * we could not recover from, an unreachable Verifier, or evidence we
+     * never managed to send. Not completing the exchange is never a reason
+     * to accept. */
     int num_true = 0;
     for (int i = 0; i < num_verifiers; ++i) {
         if (attestation_results[i]) {
@@ -619,16 +578,10 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
             snprintf(latency_str, sizeof(latency_str), "%5ld", verifier_latency_ms[i]);
         }
         charra_log_info("[" LOG_NAME
-                        "] Verifier %d (%s:%u): %-4s | AK %-6s | %s ms | "
-                        "%s",
+                        "] Verifier %d (%s:%u): %-4s | %s ms | %s",
                 i + 1, verifiers[i].ip_address, verifiers[i].port_number,
-                attestation_results[i] ? "PASS" : "FAIL",
-                /* "issued", not "fresh": freshness is a RATS term of art
-                 * for replay resistance (see the nonce checks above), and
-                 * this column is about certificate provenance -- reused from
-                 * cache, or issued by /certify_ak this cycle. */
-                rp_ak_cert_was_cached[i] ? "cached" : "issued",
-                latency_str, reason);
+                attestation_results[i] ? "PASS" : "FAIL", latency_str,
+                reason);
     }
 
     result = CHARRA_RC_SUCCESS;

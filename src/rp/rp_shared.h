@@ -35,46 +35,18 @@
 /* verifiers config */
 #define MAX_VERIFIERS 10
 
-/* Default for --ak-renew-margin: re-provision any cached certificate once
- * it is this close to expiring, rather than waiting for it to lapse and be
- * rejected mid-cycle. Applies to all three AK certificates -- RP's own (per
- * Verifier), and the Attester's as issued by RP's CA and by each Verifier's
- * CA -- since RP makes all three renewal decisions. Seconds, matching the
- * --ak-validity flags it has to be compared against. 45s by default,
- * against a 5-minute default certificate lifetime.
- *
- * It cannot be validated at parse time: the certificate lifetime is chosen
- * by whoever issues it (--ak-validity on the Verifier, --attester-ak-validity
- * on RP), so RP only learns it when it parses an issued certificate. A
- * margin larger than the whole lifetime is satisfiable only by renewing on
- * every cycle. */
-#define RP_DEFAULT_AK_RENEW_MARGIN_S 45
-
 /** Default wait for a Verifier's reply, and for the Attester's. Both feed
  * libcoap's ack_timeout AND a wall-clock ceiling on the wait loop, so a
  * stalled exchange cannot outlive them via CoAP's own retransmissions.
  * Six seconds is generous against measured round trips (~0.4s steady
- * state); the tightest real case is the Attester's one-time AK
- * provisioning, ~3.2s in this dev environment. */
+ * state). */
 #define RP_DEFAULT_VERIFIER_TIMEOUT_S 6
 #define RP_DEFAULT_ATTESTER_TIMEOUT_S 6
-
-/** Effective margin, settable with --ak-renew-margin. */
-extern time_t rp_ak_renew_margin_s;
-
-/** @brief Does a certificate expiring at expires_at need renewing now?
- * expires_at == 0 means "unknown", which counts as needing renewal. Kept in
- * memory and re-checked on EVERY call rather than a boolean "ready" flag
- * consulted once, which would let a certificate's expiry pass unnoticed. */
-static inline bool charra_cert_needs_renewal(time_t expires_at) {
-    return expires_at <= time(NULL) + rp_ak_renew_margin_s;
-}
 
 #define RP_DEFAULT_NUM_VERIFIERS 1
 
 /* --- config (set by parse_rp_command_line) ------------------------------ */
 extern int rp_num_verifiers;
-extern time_t attester_ak_cert_validity_seconds;
 
 extern charra_log_t charra_log_level;
 
@@ -91,21 +63,10 @@ typedef struct verifier_info {
 /* --- Verifier endpoints, resolved once per cycle by get_verifiers() ----- */
 extern verifier_info verifiers[MAX_VERIFIERS];
 
-/* --- RP's own identity, provisioned per Verifier ------------------------ */
-extern bool rp_ak_cert_ready[MAX_VERIFIERS];
-extern time_t rp_ak_cert_expires_at[MAX_VERIFIERS];
-extern uint8_t* rp_ak_cert_der[MAX_VERIFIERS];
-extern uint32_t rp_ak_cert_der_len[MAX_VERIFIERS];
-extern uint8_t rp_public_key_der[CHARRA_RSA_PUB_KEY_DER_MAX];
-extern uint32_t rp_public_key_der_len;
-
 /* --- locks -------------------------------------------------------------
- * Ordering matters and is easy to lose sight of once the callers live in
- * different files: take rp_ak_reprovision_mutex *before* rp_tpm_mutex, and
- * never hold one across the other's critical section. rp_tpm_mutex is
- * additionally kept short-lived on purpose -- the dev TPM simulator serves
- * one client at a time, and an RP that held it across a CoAP wait once
- * starved the Verifier's own TPM work outright. */
+ * Kept short-lived on purpose: the dev TPM simulator serves one client at
+ * a time, and an RP that held this across a CoAP wait once starved the
+ * Verifier's own TPM work outright. */
 extern pthread_mutex_t rp_tpm_mutex;
 
 
@@ -117,77 +78,26 @@ extern msg_attestation_request_dto last_request;
  * release with charra_free_attestation_response() before overwriting. */
 extern msg_attestation_response_dto last_response;
 
-/** log_r: the redacted log, and the PCR digest replayed from it. */
+/** log_r: the redacted log. There is no PCR_r global to go with it -- the
+ * PCR now lives in the RP's TPM, replayed once per cycle by
+ * rp_replay_log_into_pcr() (see rp_signing_key.h). */
 extern uint8_t* rp_log_r;
 extern uint32_t rp_log_r_len;
-extern uint8_t rp_pcr_r[TPM2_SHA256_DIGEST_SIZE];
 
 /** Per-Verifier nonces, indexed the same way as verifiers[]. */
 extern uint8_t verifier_nonces[MAX_VERIFIERS][sizeof(TPMU_HA)];
 extern uint32_t verifier_nonce_lens[MAX_VERIFIERS];
-
-/** The Attester's AK certificate as issued by each Verifier's own CA. */
-extern bool attester_ak_cert_by_verifier_ready[MAX_VERIFIERS];
-extern time_t attester_ak_cert_by_verifier_expires_at[MAX_VERIFIERS];
-extern uint8_t* attester_ak_cert_by_verifier_der[MAX_VERIFIERS];
-extern uint32_t attester_ak_cert_by_verifier_der_len[MAX_VERIFIERS];
 
 /* --- policy inputs ------------------------------------------------------ */
 extern uint8_t tpm_pcr_selection[TPM2_MAX_PCRS];
 extern uint32_t tpm_pcr_selection_len;
 extern char* whitelist_hashes_path;
 extern char* blacklist_hashes_path;
-extern char* attester_ak_state_file_path;
-extern char* rp_ca_cert_path;
 
 
 /* --- Attester endpoint -------------------------------------------------- */
 extern char attester_host[16];
 extern unsigned int attester_port;
-
-/* --- Attester identity provisioning ------------------------------------ */
-/** Guards the Attester-relay round trips against concurrent Verifier
- * threads: ACTIVATE and DELIVER_VERIFIER both use the shared response
- * globals below. Held for a whole per-Verifier leg rather than per
- * exchange -- attester.c is single-threaded, so it serialises these
- * regardless and there is no concurrency to preserve. */
-extern pthread_mutex_t attester_identity_relay_mutex;
-extern bool attester_identity_provisioned;
-extern time_t attester_ak_cert_rp_expires_at;
-extern pthread_mutex_t attester_identity_provision_mutex;
-/** The Attester's EK cert + AK public key + AK name, FETCHed once and
- * reused for every Verifier rather than re-fetched per Verifier. */
-extern msg_ak_identity_response_dto attester_identity_cached;
-extern msg_ak_identity_response_dto ak_identity_response;
-extern CHARRA_RC ak_identity_rc;
-extern bool processing_ak_identity_response;
-extern msg_activate_credential_response_dto activate_credential_response;
-extern CHARRA_RC activate_credential_rc;
-extern bool processing_activate_credential_response;
-extern bool processing_certify_ak_of_attester_deliver_response;
-extern char* attester_ak_cert_rp_cache_path;
-extern char* rp_ca_key_path;
-extern char* manufacturer_root_cert_path;
-
-
-/* --- RP's own identity -------------------------------------------------- */
-extern bool rp_ak_keypair_ready;
-extern char* rp_ak_public_path;
-extern char* rp_ak_private_path;
-extern char* rp_ek_cert_cache_path;
-extern char* manufacturer_root_key_path;
-extern const char* rp_ek_cert_not_before_utc;
-extern const char* rp_ek_cert_not_after_utc;
-/** Reported in the run summary: whether this cycle reused a cached
- * certificate or had to provision a fresh one. */
-extern bool rp_ak_cert_was_cached[MAX_VERIFIERS];
-/** Shared /certify_ak response slot, guarded by rp_ak_reprovision_mutex --
- * several Verifier threads can legitimately be mid-handshake at once. */
-extern msg_certify_ak_response_dto certify_ak_response;
-extern CHARRA_RC certify_ak_rc;
-extern bool processing_certify_ak_response;
-extern pthread_mutex_t rp_ak_reprovision_mutex;
-
 
 #define TPM_SIG_KEY_ID_LEN 14
 #define TPM_SIG_KEY_ID "PK.RSA.default"

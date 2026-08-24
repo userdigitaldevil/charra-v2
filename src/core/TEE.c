@@ -80,12 +80,13 @@ CHARRA_RC tee_attestation(const char* const* file_paths, size_t file_count,
 
 /* --- the TEE's private key: never read from outside this file ----------
  * Generated lazily, once per process, the first time it is needed -- same
- * pattern the RP's own AK keypair uses (ensure_rp_ak_keypair() in
- * rp_identity.c), and for the same reason: a fresh identity per process run
- * is a fine simplification for a PoC, and it means there is no key file on
- * disk to provision or protect. Guarded by one mutex covering both
- * generation and every use, since mbedTLS's RSA context is not safe for
- * concurrent signing from multiple threads and the RP appraises for several
+ * pattern AK_r uses (rp_sign_with_ak() in rp_signing_key.c re-derives its
+ * TPM-resident key on every call rather than caching one), and for a
+ * related reason: a fresh identity per process run is a fine
+ * simplification for a PoC, and it means there is no key file on disk to
+ * provision or protect. Guarded by one mutex covering both generation and
+ * every use, since mbedTLS's RSA context is not safe for concurrent
+ * signing from multiple threads and the RP appraises for several
  * Verifiers concurrently. */
 static pthread_mutex_t tee_key_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool tee_key_ready = false;

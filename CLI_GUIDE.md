@@ -38,19 +38,23 @@ make test          # unit-test suites
 Everything runs from the **repository root** — paths to `keys/`, `state/`,
 `verifiers_config.txt` and `reference-pcrs.txt` are relative.
 
-### One-time key generation
+### One-time trust anchor generation
 
 ```bash
-cd keys && ./gen-ak-pki.sh && cd ..
+make provision_trusted_keys
+./keys/gen-trusted-keys.sh
 ```
 
-Generates one **independent CA per Verifier port** (`verifier-ca-<port>.{key,crt}`,
-one for every port in `verifiers_config.txt`), RP's own CA, a synthetic TPM
-manufacturer root, and synthetic EK certificates. Test-only — never reuse in
-production.
+Writes `keys/trusted_keys.txt`: the public halves of the Attester's and the
+RP's TPM-resident signing keys, read straight off the (single, shared) TPM
+simulator. There is no CA and no certificate here — a signing key is trusted
+if and only if it appears in this file. See `keys/README.md` and
+`src/core/charra_trusted_keys.h`.
 
-> If you add a port to `verifiers_config.txt`, re-run this script or that
-> Verifier will have no CA to sign with.
+> **Re-run this after every TPM reset.** Both keys are derived from the
+> TPM's owner-hierarchy seed, so wiping the simulator's NVChip changes them
+> and invalidates this file. Skipping this step fails every later
+> attestation as "key not in the trust anchor."
 
 ---
 
@@ -90,26 +94,13 @@ bin/relying_party [OPTIONS]
 | `-v`, `--verbose` | | CHARRA log-level → DEBUG |
 | `-l`, `--log-level=LEVEL` | INFO | `TRACE\|DEBUG\|INFO\|WARN\|ERROR\|FATAL`. Overrides `$LOG_LEVEL_CHARRA` |
 | `-n`, `--verifiers=COUNT` | 1 | Verifiers to attest against (1..10), taken from `verifiers_config.txt` |
-| `-R`, `--ak-renew-margin=SECONDS` | 45 | Renew an **AK certificate** once it is within this long of expiring. Covers all three: RP's own (per Verifier), and the Attester's from RP's CA and from each Verifier's CA |
-| `-A`, `--attester-ak-validity=SECONDS` | 300 (5 min) | Lifetime of the Attester AK cert **RP** issues under its own CA |
-| `--verifier-timeout=SECONDS` | 6 | Wait for a Verifier's reply before giving up. Also bounds **every other** RP round trip — Trust Manager, `/certify_ak`. A Verifier that times out counts against the majority exactly like a NO vote |
+| `--verifier-timeout=SECONDS` | 6 | Wait for a Verifier's reply before giving up. Also bounds **every other** RP round trip — the Trust Manager included. A Verifier that times out counts against the majority exactly like a NO vote |
 | `--attester-timeout=SECONDS` | 6 | Wait for the Attester's evidence before giving up, which ends the run |
 
 Every run opens by listing all of the above, tagging each value it took from
 the table rather than the command line with `(default)`. So a log file
 records what the run was actually configured with, without needing the
 command that started it.
-
-### `--ak-renew-margin`
-
-Checked once, synchronously, while this cycle is provisioning each
-certificate — not on a timer. If a cached AK certificate is already within
-the margin of expiring, this run re-provisions it via `/certify_ak` before
-using it, instead of using a certificate that would be rejected moments
-later. Must stay comfortably below whatever validity the issuer set
-(`--ak-validity` on the Verifier, `--attester-ak-validity` here), or every
-run re-provisions every certificate regardless of how recently it was
-issued.
 
 ---
 
@@ -122,29 +113,27 @@ Lines 1–2 are one-time setup; 3–6 run one cycle.
 # 1. Build everything into bin/.
 make -j
 
-# 2. Mint the test-only PKI: one CA per Verifier port listed in
-#    verifiers_config.txt, RP's own CA, a synthetic TPM manufacturer root,
-#    and synthetic EK certificates. One-time — skip on later runs.
-cd keys && ./gen-ak-pki.sh && cd ..
+# 2. Regenerate the trust anchor from this TPM's own signing keys.
+#    One-time per TPM reset — skip if keys/trusted_keys.txt is already
+#    current for this TPM.
+make provision_trusted_keys
+./keys/gen-trusted-keys.sh
 
 # 3. Directory service on fixed port 6000. Maps Verifier IDs 1,2,3... to
 #    ip:port using verifiers_config.txt. RP asks it who the Verifiers are.
 bin/trust_manager &
 
 # 4. The thing being attested. Passive: listens on 5683 and answers
-#    /attest and /certify_ak_of_attester. Never calls anyone.
+#    /attest. Never calls anyone.
 bin/attester &
 
-# 5. One passive appraiser on port 5684, its own Privacy CA with its own
-#    CA key, ledger and nonce. Pass a count to start more, e.g.
+# 5. One passive appraiser on port 5684. Pass a count to start more, e.g.
 #    ./start_verifiers.sh 3.
 ./start_verifiers.sh
 
 # 6. The only active party. Runs one attestation cycle and exits.
 bin/relying_party \
     --verifiers 1 \
-    --ak-renew-margin 60 \
-    --attester-ak-validity 600 \
     --log-level INFO
 ```
 
@@ -153,8 +142,6 @@ What each RP flag on line 6 does:
 | Flag | Effect here |
 |---|---|
 | `--verifiers 1` | Ask the Trust Manager for ID 1 → port 5684. Must be ≤ the number actually running, or RP waits on a dead port |
-| `--ak-renew-margin 60` | Re-provision an AK certificate (RP's own, plus both of the Attester's) if the cached one is within 60s of expiring. Must be < the shortest certificate lifetime in play (default: 300) |
-| `--attester-ak-validity 600` | The Attester AK certificate **RP itself** signs lives 10 min. Only affects RP's own CA leg; each Verifier's leg uses that Verifier's `--ak-validity` |
 | `--log-level INFO` | Default. Use `DEBUG` (or `-v`) to see CoAP and TPM detail |
 
 **What you should see.** Startup echoes the resolved configuration, so the
@@ -163,11 +150,9 @@ logs its phases (`get_verifiers`, `get_evidence`, `get_attestation_results`)
 with timings, a per-Verifier pass/fail line, the majority-vote tally, and
 exits.
 
-**The first run against a fresh `state/` is much slower and noisier than a
-later one** — it pays for `/certify_ak` (CHALLENGE → `ActivateCredential` →
-CONFIRM) against each Verifier and provisions the Attester's identity under
-two CAs. A second run reuses those cached credentials and goes straight to
-`/attest` → `/nonce` → `/appraise`.
+**Every run costs the same** — nothing is cached or provisioned on disk, so
+there is no "slow first run": every cycle derives both signing keys fresh
+from their TPMs, the same as the one before it.
 
 Tear the background processes down with `pkill -f '^bin/'` — anchored on
 purpose: an unanchored `pkill -f bin/verifier` also matches the command line
@@ -177,7 +162,7 @@ of whatever shell or script you typed it from, and kills that too.
 
 ## 5. `bin/verifier`
 
-Passive appraiser and its own Privacy CA. **Run one instance per port.**
+Passive appraiser. **Run one instance per port.**
 
 ```bash
 bin/verifier --port 5684 [OPTIONS]
@@ -190,7 +175,6 @@ bin/verifier --port 5684 [OPTIONS]
 | `-l`, `--log-level=LEVEL` | INFO | CHARRA log-level |
 | `-c`, `--coap-log-level=LEVEL` | INFO | libcoap log-level |
 | `--port=PORT` | 31415 | **Port to listen on** |
-| `--ak-validity=SECONDS` | 300 (5 min) | Lifetime of AK certs **this Verifier** issues, from issuance |
 | `-f`, `--pcr-file=PATH` | `reference-pcrs.txt` | Reference PCRs. **Vestigial** — see below |
 | `-s`, `--pcr-selection=X1[,X2…]` | 0,1,2,3,4,5,6,7,10 | PCRs to check. **Vestigial** — see below |
 | `--ima[=PATH]` | kernel IMA log | Request an IMA event log. **Vestigial** — see below |
@@ -210,17 +194,16 @@ bin/verifier --port 5684 [OPTIONS]
 
 Like the RP, a Verifier opens by listing every setting above with `(default)`
 against any it took from this table rather than the command line, followed by
-the state files and CA this instance will use.
+the trust anchor path it will read.
 
-Each port has its **own CA key** (`keys/verifier-ca-<port>.key`), its own
-issuance ledger and its own nonce, so Verifiers are genuinely independent —
-one being compromised or down doesn't affect the others.
+A Verifier holds no key and issues nothing, so every instance reads the same
+`keys/trusted_keys.txt` and needs nothing of its own beyond `--port`.
 
 ---
 
 ## 6. `bin/attester`
 
-Pure responder. Provides `attest` and `certify_ak_of_attester`.
+Pure responder. Provides `attest`.
 
 ```bash
 bin/attester [OPTIONS]
@@ -296,57 +279,25 @@ LOG_LEVEL_CHARRA=DEBUG bin/verifier --port 5684
 
 ---
 
-## 10. Tuning `--ak-renew-margin`
+## 10. Runtime state
 
-`--ak-renew-margin` (RP) must stay **smaller than the shortest AK certificate
-lifetime in play**:
+There is none. No role provisions, caches or renews anything on disk: every
+signing key is derived fresh from its TPM on every use (see
+`src/rp/rp_signing_key.h` for the RP, and `charra_load_tpm2_key()` for the
+Attester), and the one thing that *does* need to persist across process
+restarts -- which keys are trusted -- lives in the single file
+`keys/trusted_keys.txt`, generated offline (see §2) rather than provisioned
+at runtime.
 
-```
---ak-renew-margin  <  --ak-validity / --attester-ak-validity
-       45           <              300                    (defaults)
-```
-
-Otherwise every certificate is always "about to expire" and RP re-provisions
-it on every single run — a `/certify_ak` round trip per Verifier, every time.
-
-AK validity is *per issuer*: `--ak-validity` on the Verifier,
-`--attester-ak-validity` on RP. Each certificate carries its own `notAfter`,
-so consumers read the real value; RP cannot check the margin against it at
-startup, only once it has actually parsed an issued certificate.
-
-### Short-lived setup, to watch renewal happen
-
-```bash
-bin/verifier --port 5684 --ak-validity 90 &
-bin/relying_party --verifiers 1 --ak-renew-margin 60
-# run it again a minute later -- the cached cert is now within the margin,
-# so this run re-provisions it instead of reusing it
-```
+> **After resetting the TPM simulator, regenerate the trust anchor**
+> (`make provision_trusted_keys && ./keys/gen-trusted-keys.sh`). Both
+> signing keys are derived from the TPM's owner-hierarchy seed, so a reset
+> changes them and invalidates the old file -- every attestation then fails
+> as "key not in the trust anchor" until it's regenerated.
 
 ---
 
-## 11. Runtime state
-
-All under `state/`, gitignored, created on startup. Delete it to force full
-re-provisioning:
-
-```
-state/verifier/ak-provisioning/rp/        AK issuance ledger, RP identities
-state/verifier/ak-provisioning/attester/  AK issuance ledger, Attester identities
-state/relying-party/identity/             RP's EK cert + AK keypair
-state/relying-party/ak-certificates/      RP's AK cert, per Verifier port
-state/relying-party/attester-ak-certificates/  Attester certs RP holds
-state/relying-party/ak-provisioning/      RP's own issuance ledger
-state/attester/                           Attester's EK/AK + its certs
-```
-
-> **After resetting the TPM simulator, delete `state/`.** Cached AK blobs no
-> longer load against re-randomised seeds, and every attestation fails with a
-> confusing cascade.
-
----
-
-## 12. Docker
+## 11. Docker
 
 ```bash
 docker run -v "$PWD/:/home/bob/charra" -it --rm --group-add tss \
@@ -354,20 +305,18 @@ docker run -v "$PWD/:/home/bob/charra" -it --rm --group-add tss \
 ```
 
 Inside: `cd ~/charra && make -j`. The TPM simulator starts automatically;
-`tpm-reset` clears it (then delete `state/`).
+`tpm-reset` clears it (then regenerate `keys/trusted_keys.txt`, see §10).
 
 `./run_live_test.sh` does all of this end to end.
 
 ---
 
-## 13. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom | Cause |
 |---|---|
 | RP hangs, no verifier answers | Fewer Verifiers running than `--verifiers` |
-| Every attestation fails after a TPM reset | Stale `state/` — delete it |
+| Every attestation fails as "key not in the trust anchor" | Stale `keys/trusted_keys.txt` after a TPM reset -- regenerate it (§2, §10) |
 | `Esys_Create: 0x921`, Attester cannot create its AK | TPM is in dictionary-attack lockout; run `tpm2_dictionarylockout --clear-lockout`. Every later step fails in a confusing cascade from this one cause |
-| `could not read keys/verifier-ca-<port>.crt` | Port not in `verifiers_config.txt` when `gen-ak-pki.sh` ran |
-| RP re-provisions AK certs every run | `--ak-renew-margin` ≥ the certificate lifetime (`--ak-validity` / `--attester-ak-validity`) |
 | `timeout`/`docker stop` kills RP mid-run | Expected — a single cycle installs no signal handler, so SIGTERM terminates immediately, same as any short-lived CLI command. Give it longer than `--verifier-timeout` + `--attester-timeout` if you need it to finish cleanly |
 | A Verifier votes NO and RP doesn't say why | By design. `/appraise` always answers `2.05` with `Attestation successful!`/`Attestation failed!` — any failed check is just a NO. **The reasons are logged on the Verifier**, so read that Verifier's log, not RP's |

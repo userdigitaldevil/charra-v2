@@ -11,15 +11,14 @@
 #include <string.h>
 #include <time.h>
 
-#include <tss2/tss2_tctildr.h>
 #include <tss2/tss2_tpm2_types.h>
 
 #include "../common/charra_log.h"
-#include "../core/charra_ak_state.h"
 #include "../core/charra_dto.h"
+#include "../core/charra_event_log.h"
 #include "../core/charra_helper.h"
-#include "../core/charra_key_mgr.h"
 #include "../core/charra_marshaling.h"
+#include "../core/charra_trusted_keys.h"
 #include "../util/charra_util.h"
 #include "../util/coap_util.h"
 #include "../util/crypto_util.h"
@@ -97,7 +96,6 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                                 const struct coap_string_t* query,
                                 struct coap_pdu_t* response) {
     int coap_r = 0;
-    TSS2_RC tss_r = 0;
     CHARRA_RC charra_r = CHARRA_RC_ERROR;
     /* Set by any exit that jumps to cleanup BEFORE a verdict is reached, so
      * those still tell the RP why rather than closing silently -- an
@@ -106,18 +104,6 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     bool verdict_reached = false;
 
     charra_coap_log_peer_address(LOG_NAME, "/appraise", session);
-
-    ESYS_TR sig_key_handle = ESYS_TR_NONE;
-    TPMT_TK_VERIFIED* validation = NULL;
-    /* Declared here (rather than at first use) and NULLed so every earlier
-     * 'goto cleanup' leaves cleanup able to check them safely. */
-    ESYS_CONTEXT* esys_ctx = NULL;
-    TSS2_TCTI_CONTEXT* tcti_ctx = NULL;
-    /* Trust anchor for Step 3a/3b item 1 (EK_r/AK_r, EK_a/AK_a) -- both AK
-     * certificates are checked against the Verifier's own CA, since the
-     * Verifier is the sole issuer via /certify_ak. */
-    char* verifier_ca_cert_der = NULL;
-    size_t verifier_ca_cert_der_len = 0;
 
     /* Appended, not truncated, and per-port: several Verifiers share one
      * working directory, and each round's timings are wanted, not just the
@@ -157,7 +143,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     start_unmarshal = clock();
     charra_log_info("[" LOG_NAME "] Parsing received CBOR data.");
     /* Quote_a (Attester's evidence, forwarded) + Quote_r (RP's own,
-     * software-PCR-replay-based quote, signed by RP's TPM-resident AK) +
+     * TPM-produced quote, signed by RP's TPM-resident signing key) +
      * log_r (RP's redacted log, not Attester's raw one) -- see
      * msg_rp_evidence_dto in charra_dto.h. */
     msg_rp_evidence_dto res = {0};
@@ -200,6 +186,14 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     /* Quote_r's fields -- re-checked independently of whatever bounds
      * charra_unmarshal_rp_evidence() applies, same defense-in-depth style as
      * the rest of this function. */
+    if (res.rp_attestation_data_len == 0 ||
+            res.rp_attestation_data_len > sizeof(res.rp_attestation_data)) {
+        charra_log_error("[" LOG_NAME "] Quote_r attestation data has an "
+                         "unusable length.");
+        early_fail_reason = "malformed request: Quote_r attestation data "
+                            "length unusable";
+        goto cleanup;
+    }
     if (res.rp_signature_len != CHARRA_RSA_SIGNATURE_LEN) {
         charra_log_error(
                 "[" LOG_NAME "] RP signature is not exactly the expected "
@@ -236,179 +230,78 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     /* --- verify TPM Quote --- */
     charra_log_info("[" LOG_NAME "] Starting verification.");
 
-    clock_t start_init, end_init;
-    double init_duration;
-    start_init = clock();
-    /* initialize ESAPI */
-    if ((tss_r = Tss2_TctiLdr_Initialize(getenv("CHARRA_TCTI"), &tcti_ctx)) !=
-            TSS2_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Tss2_TctiLdr_Initialize.");
-        early_fail_reason =
-                "Verifier-side error: could not initialise the TPM TCTI";
-        goto cleanup;
-    }
-    if ((tss_r = Esys_Initialize(&esys_ctx, tcti_ctx, NULL)) !=
-            TSS2_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Esys_Initialize.");
-        early_fail_reason = "Verifier-side error: could not initialise ESAPI";
-        goto cleanup;
-    }
-    end_init = clock();
-    init_duration = ((double) (end_init - start_init)) / CLOCKS_PER_SEC;
-    fprintf(p_file, "init took %f seconds to execute \n", init_duration);
-    charra_log_info("[" LOG_NAME "] Timing: TPM init took %f second(s).",
-            init_duration);
-
-    /* Trust anchor for the EK/AK checks below. The EK certificate itself was
-     * validated once during /certify_ak, so only the AK certificate that
-     * call issued needs checking here, against the same CA it signs with. */
-    if ((charra_r = charra_io_read_file(verifier_ca_cert_path,
-                 &verifier_ca_cert_der, &verifier_ca_cert_der_len)) !=
-            CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not read Verifier CA "
-                         "certificate ('%s').",
-                verifier_ca_cert_path);
-        early_fail_reason =
-                "Verifier-side error: could not read this Verifier's CA certificate";
-        goto cleanup;
-    }
+    /* No TPM is opened here. Every check in Steps 3a and 3b is public-key
+     * math over data the RP sent, so mbedTLS does all of it -- see the
+     * Quote_a/Quote_r signature checks below. Keeping a TCTI open would
+     * have made a Verifier that can answer perfectly well in software vote
+     * NO whenever the (single-client) TPM simulator was busy or down. */
 
     /* =====================================================================
      * Step 3a -- New Evidence Verification (Evidence_r = Quote_r, log_r,
-     * EK_r/AK_r), per the supervisor's DRA-TLS spec.
+     * AK_r), per the supervisor's DRA-TLS spec.
      * ===================================================================== */
 
-    /* Step 3a item 1: validate EK_r/AK_r certificate -- checks that RP's AK
-     * certificate (from its own earlier /certify_ak call) chains to the
-     * Verifier's CA, and that its embedded key matches rp_public_key, the
-     * key that actually signs Quote_r below. Uses charra_crypto_verify_cert_
-     * public_key_matches_der_key() rather than the TPM2B_PUBLIC-based
-     * charra_crypto_verify_ekak_certificate() used for Step 3b, because
-     * rp_public_key travels as plain DER -- see msg_rp_evidence_dto. */
-    uint8_t ak_serial_rp[CHARRA_AK_STATE_SERIAL_LEN] = {0};
+    /* Step 3a item 1: is AK_r an identity we trust? We look the RP's
+     * Quote_r signing key up in the trust anchor (keys/trusted_keys.txt).
+     * A key that appears there was vouched for before any of this ran,
+     * which is the whole of the identity check -- no certificate, no chain
+     * walk, no serial, no issuance ledger, because nothing is issued at
+     * runtime. See charra_trusted_keys.h for what that does and does not
+     * buy. */
     bool attestation_result_ekak_rp = false;
     /* Why this check failed, for the consolidated reason list at the
      * verdict. Only read when the check actually failed. */
     const char* ekak_rp_why = "not verified";
-    if (res.ak_certificate_rp_len == 0) {
-        /* The RP sends its own AK certificate; an empty field means it never
-         * obtained one from this Verifier. Still a NO -- unverified is
-         * unverified -- but attributed to the RP, so the record shows what
-         * was received rather than implying the RP went silent. */
-        ekak_rp_why = "MISSING -- the RP sent no certificate for itself";
-        charra_log_error("[" LOG_NAME "]     => the RP sent an EMPTY AK "
-                         "certificate for itself -- nothing to verify "
-                         "(Step 3a item 1). Rejecting.");
+    char rp_key_name[128] = {0};
+    if (res.rp_public_key_len == 0) {
+        ekak_rp_why = "MISSING -- the RP sent no public key for itself";
+        charra_log_error("[" LOG_NAME "]     => the RP sent an EMPTY public "
+                         "key -- nothing to identify it by (Step 3a item 1). "
+                         "Rejecting.");
     } else {
-        mbedtls_x509_crt ak_cert_rp_leaf;
-        CHARRA_RC chain_rc = charra_crypto_verify_x509_cert_chain(
-                res.ak_certificate_rp, res.ak_certificate_rp_len,
-                (uint8_t*)verifier_ca_cert_der, verifier_ca_cert_der_len,
-                &ak_cert_rp_leaf);
-        if (chain_rc != CHARRA_RC_SUCCESS) {
-            ekak_rp_why = "WRONG -- does not chain to this Verifier's CA";
-            charra_log_error("[" LOG_NAME "]     => the AK certificate the RP "
-                             "sent for itself did NOT chain to this "
-                             "Verifier's CA (Step 3a item 1). Rejecting.");
-        } else {
-            /* A serial of any other width is not one we issued; looking it
-             * up zero-padded would query the ledger for a serial nobody
-             * holds, reading as "revoked" rather than "malformed". */
-            if (ak_cert_rp_leaf.serial.len != sizeof(ak_serial_rp)) {
-                ekak_rp_why = "WRONG -- serial number is not the width this "
-                              "Verifier issues";
-                charra_log_error("[" LOG_NAME "]     => the AK certificate the "
-                                 "RP sent for itself chains correctly but its "
-                                 "serial is %zu byte(s), not %zu. Rejecting.",
-                        ak_cert_rp_leaf.serial.len, sizeof(ak_serial_rp));
-            } else {
-                memcpy(ak_serial_rp, ak_cert_rp_leaf.serial.p,
-                        sizeof(ak_serial_rp));
-                attestation_result_ekak_rp =
-                        charra_crypto_verify_cert_public_key_matches_der_key(
-                                &ak_cert_rp_leaf, res.rp_public_key,
-                                res.rp_public_key_len) == CHARRA_RC_SUCCESS;
-                if (attestation_result_ekak_rp) {
-                    charra_crypto_log_cert_summary(
-                            "RP's AK cert", &ak_cert_rp_leaf);
-                } else {
-                    ekak_rp_why = "MISMATCH -- does not match the key that "
-                                  "signed Quote_r";
-                    charra_log_error("[" LOG_NAME "]     => the AK certificate "
-                                     "the RP sent for itself chains correctly "
-                                     "but does NOT match the key that signed "
-                                     "Quote_r. Rejecting.");
-                }
-            }
-            mbedtls_x509_crt_free(&ak_cert_rp_leaf);
-        }
-    }
-    uint8_t ek_fingerprint_rp[32] = {0};
-    if (attestation_result_ekak_rp) {
-        char ak_serial_rp_hex[33] = {0};
-        charra_hex_encode_prefix(ak_serial_rp, sizeof(ak_serial_rp), ak_serial_rp_hex,
-                sizeof(ak_serial_rp_hex));
-        charra_log_info(
-                "[" LOG_NAME "]     => RP's AK certificate is valid! "
-                "(serial %s...)",
-                ak_serial_rp_hex);
-        time_t ak_cert_expires_at_rp = 0;
-        attestation_result_ekak_rp = charra_ak_state_check_serial_valid(
-                rp_ak_state_file_path, ak_serial_rp, ek_fingerprint_rp,
-                &ak_cert_expires_at_rp);
+        attestation_result_ekak_rp =
+                res.rp_public_key_len == sizeof(TPM2B_PUBLIC) &&
+                charra_trusted_keys_check(NULL,
+                        (const TPM2B_PUBLIC*)res.rp_public_key, rp_key_name,
+                        sizeof(rp_key_name)) == CHARRA_RC_SUCCESS;
         if (attestation_result_ekak_rp) {
-            char ek_fingerprint_rp_hex[17] = {0};
-            charra_hex_encode_prefix(ek_fingerprint_rp, sizeof(ek_fingerprint_rp),
-                    ek_fingerprint_rp_hex, sizeof(ek_fingerprint_rp_hex));
-            charra_log_info(
-                    "[" LOG_NAME "]     => RP identity %s...: AK certificate "
-                    "is currently valid (expires at %ld, in %ld second(s)).",
-                    ek_fingerprint_rp_hex, (long)ak_cert_expires_at_rp,
-                    (long)(ak_cert_expires_at_rp - time(NULL)));
+            charra_log_info("[" LOG_NAME "]     => RP's signing key is "
+                            "trusted: '%s'",
+                    rp_key_name);
         } else {
-            ekak_rp_why = "REVOKED or EXPIRED in this Verifier's ledger";
-            charra_log_error("[" LOG_NAME "]     => the AK certificate the RP "
-                             "sent for itself chains correctly but is REVOKED "
-                             "or EXPIRED in this Verifier's issuance ledger!");
+            ekak_rp_why = "UNTRUSTED -- not in the trust anchor";
+            charra_log_error("[" LOG_NAME "]     => the key that signed "
+                             "Quote_r is NOT in the trust anchor "
+                             "(Step 3a item 1). Rejecting.");
         }
     }
 
-    /* Step 3a item 2: verify Quote_r signature -- RSA-PSS/SHA-256 over
-     * (PCR_r || verifier_nonce) under RP's AK public key (DER-encoded), NOT
-     * a TPM quote verification: PCR_r is a software replay of log_r, so
-     * there is no TPMT_SIGNATURE/TPM2B_ATTEST to check. There is likewise no
-     * TPM-side second opinion to AND in, the way Step 3b item 2 has. */
+    /* Step 3a item 2: verify Quote_r's signature -- RSA-PSS/SHA-256 over
+     * the TPMS_ATTEST the RP's TPM built, under RP's public key. Same shape
+     * as Step 3b item 2 now: both roles send a real TPM2_Quote, so both are
+     * checked the same way. */
     clock_t start_verifiy_signature, end_verifiy_signature;
     double verify_signature_duration;
     start_verifiy_signature = clock();
 
-    mbedtls_pk_context rp_pub_key_ctx;
-    mbedtls_pk_init(&rp_pub_key_ctx);
+    mbedtls_rsa_context rp_rsa_pub_key = {0};
     bool attestation_result_signature_rp = false;
-    if (mbedtls_pk_parse_public_key(&rp_pub_key_ctx, res.rp_public_key,
-                res.rp_public_key_len) != 0) {
+    if (res.rp_public_key_len != sizeof(TPM2B_PUBLIC)) {
+        charra_log_error("[" LOG_NAME "]     => RP's public key is not a "
+                         "TPM2B_PUBLIC!");
+    } else if (charra_crypto_tpm_pub_key_to_mbedtls_pub_key(
+                       (const TPM2B_PUBLIC*)res.rp_public_key,
+                       &rp_rsa_pub_key) != CHARRA_RC_SUCCESS) {
         charra_log_error(
-                "[" LOG_NAME "]     => Could not parse RP's public key!");
-    } else if (mbedtls_pk_get_type(&rp_pub_key_ctx) != MBEDTLS_PK_RSA) {
-        charra_log_error(
-                "[" LOG_NAME "]     => RP's public key is not RSA!");
-    } else if (mbedtls_rsa_set_padding(mbedtls_pk_rsa(rp_pub_key_ctx),
-                       MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA256) != 0) {
-        charra_log_error(
-                "[" LOG_NAME "]     => Could not select RSA-PSS padding!");
+                "[" LOG_NAME "]     => Could not convert RP's public key!");
     } else {
-        uint8_t signed_data[sizeof(res.pcr_r) + sizeof(res.verifier_nonce)] =
-                {0};
-        memcpy(signed_data, res.pcr_r, sizeof(res.pcr_r));
-        memcpy(signed_data + sizeof(res.pcr_r), res.verifier_nonce,
-                res.verifier_nonce_len);
         attestation_result_signature_rp =
-                charra_crypto_rsa_verify_signature(
-                        mbedtls_pk_rsa(rp_pub_key_ctx), MBEDTLS_MD_SHA256,
-                        signed_data, sizeof(res.pcr_r) + res.verifier_nonce_len,
+                charra_crypto_rsa_verify_signature(&rp_rsa_pub_key,
+                        MBEDTLS_MD_SHA256, res.rp_attestation_data,
+                        res.rp_attestation_data_len,
                         res.rp_signature) == CHARRA_RC_SUCCESS;
+        mbedtls_rsa_free(&rp_rsa_pub_key);
     }
-    mbedtls_pk_free(&rp_pub_key_ctx);
     if (attestation_result_signature_rp) {
         charra_log_info("[" LOG_NAME "]     => Quote_r signature is valid!");
     } else {
@@ -428,8 +321,21 @@ void coap_appraise_handler(struct coap_resource_t* resource,
      * local-verification gate, run against the log it receives from the
      * Attester, before cleansing. See charra_event_log.h. */
 
-    /* Step 3a item 3: check nonce consistency -- Quote_r's verifier_nonce
-     * must be exactly the challenge coap_nonce_handler() generated, a
+    /* Unmarshal Quote_r's attestation data -- the nonce and the PCR digest
+     * both live inside it, put there by the RP's TPM. */
+    TPMS_ATTEST rp_attest = {0};
+    bool rp_attest_parsed =
+            charra_unmarshal_tpm2_quote(res.rp_attestation_data_len,
+                    res.rp_attestation_data, &rp_attest) == CHARRA_RC_SUCCESS;
+    if (!rp_attest_parsed) {
+        charra_log_error("[" LOG_NAME "]     => Quote_r's attestation data is "
+                         "not a valid TPM2 quote structure!");
+    }
+
+    /* Step 3a item 3: check nonce consistency -- read from the quote's
+     * extraData, not from a field beside it: the TPM put it there, so it is
+     * covered by the signature just checked. Quote_r's extraData must be
+     * exactly the challenge coap_nonce_handler() generated, a
      * Verifier-picked value rather than something RP chose itself. */
     clock_t start_verifiy_nonce, end_verifiy_nonce;
     double verify_nonce_duration;
@@ -441,10 +347,10 @@ void coap_appraise_handler(struct coap_resource_t* resource,
          * challenge outstanding both lengths are 0 and memcmp(_, _, 0)
          * returns 0, so an empty nonce would match. */
         attestation_result_nonce_rp =
-                verifier_challenge_nonce_len != 0 &&
-                res.verifier_nonce_len == verifier_challenge_nonce_len &&
-                memcmp(res.verifier_nonce, verifier_challenge_nonce,
-                        verifier_challenge_nonce_len) == 0;
+                rp_attest_parsed && verifier_challenge_nonce_len != 0 &&
+                charra_verify_tpm2_quote_qualifying_data(
+                        (uint16_t)verifier_challenge_nonce_len,
+                        verifier_challenge_nonce, &rp_attest);
         /* Snapshot for the failure diagnostic below -- the challenge is
          * spent immediately after. */
         uint8_t expected_nonce[TPM2_SHA256_DIGEST_SIZE] = {0};
@@ -464,8 +370,9 @@ void coap_appraise_handler(struct coap_resource_t* resource,
             char received_nonce_hex[17] = {0};
             charra_hex_encode_prefix(expected_nonce, expected_nonce_len, expected_nonce_hex,
                     sizeof(expected_nonce_hex));
-            charra_hex_encode_prefix(res.verifier_nonce, res.verifier_nonce_len,
-                    received_nonce_hex, sizeof(received_nonce_hex));
+            charra_hex_encode_prefix(rp_attest.extraData.buffer,
+                    rp_attest.extraData.size, received_nonce_hex,
+                    sizeof(received_nonce_hex));
             charra_log_error("[" LOG_NAME
                              "]     => Nonce in Quote_r is NOT valid! (%s)",
                     expected_nonce_len == 0
@@ -476,7 +383,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                     "[" LOG_NAME "]     => expected %u byte(s), starting "
                     "%s...; received %u byte(s), starting %s...",
                     expected_nonce_len, expected_nonce_hex,
-                    res.verifier_nonce_len, received_nonce_hex);
+                    rp_attest.extraData.size, received_nonce_hex);
         }
     }
     end_verifiy_nonce = clock();
@@ -486,27 +393,81 @@ void coap_appraise_handler(struct coap_resource_t* resource,
             "[" LOG_NAME "] Timing: verify RP nonce took %f second(s).",
             verify_nonce_duration);
 
+    /* Step 3a item 4: does log_r actually produce the PCR digest the quote
+     * attests? This is what binds the quote to the log. Without it Quote_r
+     * would only prove that SOME PCR held SOME value freshly -- the RP
+     * could replay a log of its choosing, quote the result honestly, and
+     * send an unrelated log_r alongside it.
+     *
+     * The RP extended log_r's PCR-10-tagged entries into its own replay
+     * PCR, which started at zero; replaying the same entries in software
+     * from zero must give the same value. One PCR is selected, so the
+     * composite the TPM signed is SHA-256 of just that value. */
+    clock_t start_replay = clock();
+    bool attestation_result_pcr_rp = false;
+    {
+        charra_log_info("[" LOG_NAME "] Replaying log_r against Quote_r's PCR "
+                        "digest ...");
+        uint8_t replayed_pcr[TPM2_SHA256_DIGEST_SIZE] = {0};
+        uint8_t expected_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
+        if (!rp_attest_parsed) {
+            /* already reported above */
+        } else if (charra_replay_ima_log(res.log_r, res.log_r_len,
+                           CHARRA_IMA_PCR_INDEX, replayed_pcr) !=
+                   CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "]     => log_r does not replay -- "
+                             "it is malformed.");
+        } else if (hash_sha256(sizeof(replayed_pcr), replayed_pcr,
+                           expected_digest) != CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "]     => Could not compute the "
+                             "expected PCR composite digest.");
+        } else {
+            const TPM2B_DIGEST* quoted = &rp_attest.attested.quote.pcrDigest;
+            attestation_result_pcr_rp =
+                    quoted->size == sizeof(expected_digest) &&
+                    memcmp(quoted->buffer, expected_digest,
+                            sizeof(expected_digest)) == 0;
+            if (attestation_result_pcr_rp) {
+                charra_log_info("[" LOG_NAME "]     => log_r replays to the "
+                                "PCR digest Quote_r attests!");
+            } else {
+                char want[17] = {0};
+                char got[17] = {0};
+                charra_hex_encode_prefix(expected_digest,
+                        sizeof(expected_digest), want, sizeof(want));
+                charra_hex_encode_prefix(quoted->buffer, quoted->size, got,
+                        sizeof(got));
+                charra_log_error("[" LOG_NAME "]     => log_r does NOT match "
+                                 "Quote_r's PCR digest! (expected %s..., "
+                                 "quote says %s...)",
+                        want, got);
+            }
+        }
+    }
+    charra_log_info("[" LOG_NAME "] Timing: replay log_r took %f second(s).",
+            ((double)(clock() - start_replay)) / CLOCKS_PER_SEC);
+
     bool step_3a_passed = attestation_result_ekak_rp &&
                           attestation_result_signature_rp &&
-                          attestation_result_nonce_rp;
+                          attestation_result_nonce_rp &&
+                          attestation_result_pcr_rp;
 
     bool attestation_result_ekak = false;
     /* Why Step 3b item 1 failed, for the reason list at the verdict. */
     const char* ekak_att_why = "not verified";
     bool attestation_result_signature = false;
-    bool attestation_result_signature_mbedtls = false;
     bool attestation_result_nonce = false;
     bool attestation_result_tee = false;
     /* Why the TEE Attestation Document check failed, for the reason list at
      * the verdict. */
     const char* tee_why = "not verified";
 
-    /* Step 3b runs whatever Step 3a decided. Its three checks read only
-     * fields of the received evidence (the Attester's certificate, Quote_a,
-     * and the nonce), so nothing here depends on RP's identity having
-     * verified -- the spec's "if 3a passes, proceed to 3b" gate was policy,
-     * not a data dependency. Running it always means one appraisal reports
-     * every problem at once instead of one round trip at a time.
+    /* Step 3b runs whatever Step 3a decided. Its checks read only fields of
+     * the received evidence (the Attester's public key, Quote_a, and the
+     * nonce), so nothing here depends on RP's identity having verified --
+     * the spec's "if 3a passes, proceed to 3b" gate was policy, not a data
+     * dependency. Running it always means one appraisal reports every
+     * problem at once instead of one round trip at a time.
      *
      * The verdict is unchanged and still fail-closed: every result below is
      * ANDed with Step 3a's. Note this does tell a peer that failed Step 3a
@@ -522,117 +483,58 @@ void coap_appraise_handler(struct coap_resource_t* resource,
 
         /* =================================================================
          * Step 3b -- Original Evidence Verification (Evidence_a' =
-         * Quote_a, EK_a/AK_a; log_a itself is never forwarded here).
+         * Quote_a, AK_a; log_a itself is never forwarded here).
          * ================================================================= */
 
-        /* Step 3b item 1: validate EK_a/AK_a certificate -- same check as
-         * Step 3a item 1, against the Attester's AK certificate (obtained
-         * via its own /certify_ak call, forwarded here by RP) and the key
-         * that actually signed Quote_a. */
-        uint8_t ak_serial[CHARRA_AK_STATE_SERIAL_LEN] = {0};
-        if (res.ak_certificate_attester_by_verifier_len == 0) {
-            /* Attributed to the sender, not the subject: the RP fills this
-             * in from its own per-Verifier cache (see
-             * charra_rp_build_evidence_message()), so an empty one usually
-             * means /certify_ak_of_attester never completed for this
-             * Verifier -- not evidence of anything about the Attester.
-             * Still a NO: unverified is unverified. */
-            ekak_att_why = "MISSING -- the RP forwarded no certificate";
+        /* Step 3b item 1: is AK_a an identity we trust? Same lookup as
+         * Step 3a item 1, against the key that actually signed Quote_a
+         * (tpm2_public_key, forwarded verbatim by the RP). Nothing is
+         * relayed alongside it, because there is nothing to relay: both
+         * roles' public keys were written offline into the one trust
+         * anchor every Verifier reads. */
+        if (res.tpm2_public_key_len == 0) {
+            ekak_att_why = "MISSING -- the RP forwarded no Attester key";
             charra_log_error(
-                    "[" LOG_NAME "]     => the RP forwarded an EMPTY AK "
-                    "certificate for the Attester -- nothing to verify. The "
-                    "RP relays this certificate (/certify_ak_of_attester); "
-                    "an empty one points at the RP, not the Attester.");
+                    "[" LOG_NAME "]     => the RP forwarded an EMPTY public "
+                    "key for the Attester -- nothing to verify. Rejecting.");
         } else {
-            /* Chain check, then the ledger check below. The ledger lookup
-             * used to be skipped here because the Attester was certified by
-             * a single relayed Verifier, so every other Verifier's ledger
-             * had no record of it. That premise is gone: each Verifier now
-             * certifies the Attester under its own CA and records the
-             * issuance, so the appraising Verifier always has its own
-             * record of the serial it is looking at. */
-            attestation_result_ekak = charra_crypto_verify_ekak_certificate(
-                    res.ak_certificate_attester_by_verifier,
-                    res.ak_certificate_attester_by_verifier_len,
-                    (uint8_t*)verifier_ca_cert_der, verifier_ca_cert_der_len,
-                    (TPM2B_PUBLIC*)res.tpm2_public_key, ak_serial) ==
-                    CHARRA_RC_SUCCESS;
+            char attester_key_name[128] = {0};
+            attestation_result_ekak =
+                    charra_trusted_keys_check(NULL,
+                            (const TPM2B_PUBLIC*)res.tpm2_public_key,
+                            attester_key_name,
+                            sizeof(attester_key_name)) == CHARRA_RC_SUCCESS;
             if (attestation_result_ekak) {
-                char ak_serial_hex[33] = {0};
-                charra_hex_encode_prefix(ak_serial, sizeof(ak_serial), ak_serial_hex,
-                        sizeof(ak_serial_hex));
-                /* Chain validity alone cannot see a certificate superseded
-                 * by a later renewal for the same EK -- only the ledger
-                 * knows that. Same check Step 3a item 1 runs for the RP. */
-                time_t attester_cert_expires_at = 0;
-                attestation_result_ekak = charra_ak_state_check_serial_valid(
-                        attester_ak_state_file_path, ak_serial, NULL,
-                        &attester_cert_expires_at);
-                if (attestation_result_ekak) {
-                    charra_log_info(
-                            "[" LOG_NAME "]     => Attester's AK certificate "
-                            "is valid! (serial %s..., expires at %ld, in %ld "
-                            "second(s))",
-                            ak_serial_hex, (long)attester_cert_expires_at,
-                            (long)(attester_cert_expires_at - time(NULL)));
-                } else {
-                    ekak_att_why =
-                            "REVOKED or EXPIRED in this Verifier's ledger";
-                    charra_log_error(
-                            "[" LOG_NAME "]     => the AK certificate the RP "
-                            "forwarded for the Attester (serial %s...) chains "
-                            "correctly but is REVOKED or EXPIRED in this "
-                            "Verifier's issuance ledger!",
-                            ak_serial_hex);
-                }
+                charra_log_info("[" LOG_NAME "]     => Attester's signing key "
+                                "is trusted: '%s'",
+                        attester_key_name);
             } else {
-                /* Same attribution point as the empty case: the RP chose
-                 * which certificate to forward, so a chain or key mismatch
-                 * can equally mean the RP sent the wrong one (e.g. another
-                 * Verifier's) as that the Attester's identity is bad. */
-                ekak_att_why = "WRONG -- not issued by this Verifier's CA, "
-                               "or does not match the key that signed Quote_a";
-                charra_log_error(
-                        "[" LOG_NAME "]     => the AK certificate the RP "
-                        "forwarded for the Attester did NOT verify (chain or "
-                        "key mismatch) -- either it was not issued by this "
-                        "Verifier's CA, or it does not match the key that "
-                        "signed Quote_a.");
+                ekak_att_why = "UNTRUSTED -- not in the trust anchor";
+                charra_log_error("[" LOG_NAME "]     => the key that signed "
+                                 "Quote_a is NOT in the trust anchor. "
+                                 "Rejecting.");
             }
         }
 
-        /* Step 3b item 2: verify Quote_a signature */
+        /* Step 3b item 2: verify Quote_a signature. Verifying an RSA-PSS
+         * signature needs only the public key, so this runs in software --
+         * the same choice, for the same reason, that
+         * charra_rp_appraise_evidence() makes for its own Quote_a check. */
         TPM2B_PUBLIC* tpm2_public_key = (TPM2B_PUBLIC*)res.tpm2_public_key;
-        charra_log_info("[" LOG_NAME "] Loading TPM key.");
-        if ((charra_r = charra_load_external_public_key(esys_ctx,
-                     tpm2_public_key, &sig_key_handle)) != CHARRA_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] Loading external public key failed.");
-            early_fail_reason = "the Attester's public key could not be loaded "
-                                "into the TPM (Step 3b item 2)";
-            goto cleanup;
-        }
-        charra_log_info("[" LOG_NAME "] External public key loaded.");
-
-        charra_log_info("[" LOG_NAME "] Preparing TPM Quote verification.");
-        TPM2B_ATTEST attest = {0};
-        attest.size = res.attestation_data_len;
-        memcpy(attest.attestationData, res.attestation_data,
-                res.attestation_data_len);
         TPMT_SIGNATURE signature = {0};
         memcpy(&signature, res.tpm2_signature, res.tpm2_signature_len);
 
-        attestation_result_signature =
-                charra_verify_tpm2_quote_signature_with_tpm_logged(esys_ctx,
-                        sig_key_handle, &attest, &signature, &validation);
+        charra_log_info("[" LOG_NAME "] Verifying Quote_a signature ...");
         if (!charra_crypto_verify_quote_signature_mbedtls(tpm2_public_key,
                     res.attestation_data, res.attestation_data_len,
-                    &signature, &attestation_result_signature_mbedtls)) {
+                    &signature, &attestation_result_signature)) {
             early_fail_reason = "Quote_a signature (Step 3b item 2): could not "
                                 "be checked -- the Attester's public key is "
                                 "unusable";
             goto cleanup;
         }
+        charra_log_info("[" LOG_NAME "]     => Quote_a signature is %s!",
+                attestation_result_signature ? "valid" : "NOT valid");
 
         /* unmarshal Quote_a's attestation data -- needed for its nonce
          * check right below */
@@ -688,7 +590,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                     attest_struct.extraData.size, received_nonce_hex);
         }
 
-        /* Step 3a item 4: simulated TEE Attestation Document (see TEE.h).
+        /* Step 3a item 5: simulated TEE Attestation Document (see TEE.h).
          *
          * Proves the RP's appraisal-and-redaction actually ran the code
          * this Verifier itself expects, against exactly this evidence: the
@@ -699,7 +601,9 @@ void coap_appraise_handler(struct coap_resource_t* resource,
          * different Quote_r, or answering a different nonce. Placed here,
          * after Quote_a's own nonce check above, because it needs
          * attest_struct's pcrdigest_a, which that check already
-         * unmarshaled. */
+         * unmarshaled. verifier_nonce itself comes from rp_attest.extraData
+         * -- the actual nonce value Quote_r's own signature covers, not a
+         * separately-carried field (see msg_rp_evidence_dto). */
         charra_log_info(
                 "[" LOG_NAME "] Verifying TEE Attestation Document ...");
         mbedtls_pk_context tee_pub_key_ctx;
@@ -765,7 +669,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
 
         bool tee_report_data_ok = false;
         if (tee_file_hash_ok) {
-            size_t expected_input_len = (size_t)res.verifier_nonce_len +
+            size_t expected_input_len = (size_t)rp_attest.extraData.size +
                     attest_struct.attested.quote.pcrDigest.size +
                     res.log_r_len;
             uint8_t* expected_input = malloc(expected_input_len);
@@ -777,9 +681,9 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                         "REPORT_DATA!");
             } else {
                 size_t off = 0;
-                memcpy(expected_input + off, res.verifier_nonce,
-                        res.verifier_nonce_len);
-                off += res.verifier_nonce_len;
+                memcpy(expected_input + off, rp_attest.extraData.buffer,
+                        rp_attest.extraData.size);
+                off += rp_attest.extraData.size;
                 memcpy(expected_input + off,
                         attest_struct.attested.quote.pcrDigest.buffer,
                         attest_struct.attested.quote.pcrDigest.size);
@@ -819,13 +723,8 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     /* Order matches Step 3a then Step 3b, RP's evidence before Attester's. */
     bool attestation_result = step_3a_passed && attestation_result_ekak &&
                               attestation_result_signature &&
-                              attestation_result_signature_mbedtls &&
                               attestation_result_nonce &&
                               attestation_result_tee;
-
-    char ek_fingerprint_rp_hex_result[17] = {0};
-    charra_hex_encode_prefix(ek_fingerprint_rp, sizeof(ek_fingerprint_rp),
-            ek_fingerprint_rp_hex_result, sizeof(ek_fingerprint_rp_hex_result));
 
     /* Every reason this vote is a NO, in one place. Logged HERE ONLY -- the
      * RP is told the verdict, not the analysis. It cannot act on most of
@@ -841,22 +740,26 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         charra_log_error("[" LOG_NAME "]   - %s", one);                        \
     } while (0)
         if (!attestation_result_ekak_rp) {
-            LOG_REASON("RP AK certificate (Step 3a item 1): %s", ekak_rp_why);
+            LOG_REASON("RP signing key (Step 3a item 1): %s", ekak_rp_why);
         }
         if (!attestation_result_signature_rp) {
-            LOG_REASON("Quote_r signature (Step 3a item 2): MISMATCH -- not a "
-                       "valid signature by RP's AK over PCR_r");
+            LOG_REASON("Quote_r signature (Step 3a item 2): MISMATCH -- not "
+                       "a valid signature by RP's AK over the attestation");
         }
         if (!attestation_result_nonce_rp) {
             LOG_REASON("RP nonce (Step 3a item 3): WRONG -- Quote_r is not "
                        "bound to the challenge this Verifier issued");
         }
+        if (!attestation_result_pcr_rp) {
+            LOG_REASON("log_r vs Quote_r (Step 3a item 4): MISMATCH -- the "
+                       "log sent does not replay to the PCR the quote "
+                       "attests");
+        }
         if (!attestation_result_ekak) {
-            LOG_REASON("Attester AK certificate (Step 3b item 1): %s",
+            LOG_REASON("Attester signing key (Step 3b item 1): %s",
                     ekak_att_why);
         }
-        if (!attestation_result_signature ||
-                !attestation_result_signature_mbedtls) {
+        if (!attestation_result_signature) {
             LOG_REASON("Quote_a signature (Step 3b item 2): MISMATCH -- not a "
                        "valid signature by the Attester's AK");
         }
@@ -865,7 +768,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                        "not bound to the expected nonce");
         }
         if (!attestation_result_tee) {
-            LOG_REASON("TEE Attestation Document (Step 3a item 4): %s",
+            LOG_REASON("TEE Attestation Document (Step 3a item 5): %s",
                     tee_why);
         }
 #undef LOG_REASON
@@ -877,9 +780,9 @@ void coap_appraise_handler(struct coap_resource_t* resource,
      * is in this Verifier's own log; the wire carries only the verdict. */
     const char* message;
     charra_log_info("[" LOG_NAME "] +----------------------------+");
-    charra_log_info("[" LOG_NAME "]   RP identity: %s...",
-            attestation_result_ekak_rp ? ek_fingerprint_rp_hex_result
-                                       : "(unknown -- AK cert rejected)");
+    charra_log_info("[" LOG_NAME "]   RP identity: %s",
+            attestation_result_ekak_rp ? rp_key_name
+                                       : "(unknown -- key not trusted)");
     if (attestation_result) {
         message = "Attestation successful!";
         charra_log_info("[" LOG_NAME "] |   ATTESTATION SUCCESSFUL   |");
@@ -888,9 +791,9 @@ void coap_appraise_handler(struct coap_resource_t* resource,
          * headline cause; the full list is logged above either way. */
         message = "Attestation failed!    ";
         if (!attestation_result_ekak_rp) {
-            charra_log_info("[" LOG_NAME "] | RP AK CERTIFICATE REJECTED |");
+            charra_log_info("[" LOG_NAME "] |    RP KEY NOT TRUSTED      |");
         } else if (!attestation_result_ekak) {
-            charra_log_info("[" LOG_NAME "] | ATTESTER AK CERT REJECTED  |");
+            charra_log_info("[" LOG_NAME "] | ATTESTER KEY NOT TRUSTED   |");
         } else {
             charra_log_info("[" LOG_NAME "] |     ATTESTATION FAILED     |");
         }
@@ -903,7 +806,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     end_appraise = clock();
     appraise_duration = ((double) (end_appraise - start_appraise)) / CLOCKS_PER_SEC;
     fprintf(p_file, "appraising took %f seconds to execute \n", appraise_duration);
-    double total_measured = unmarshal_duration + init_duration + verify_nonce_duration + verify_signature_duration;
+    double total_measured = unmarshal_duration + verify_nonce_duration + verify_signature_duration;
     fprintf(p_file, "total measured %f  \n", total_measured);
     charra_log_info(
             "[" LOG_NAME "] Timing: total /appraise handling took %f "
@@ -940,31 +843,9 @@ cleanup:
         fclose(p_file);
     }
 
-    /* flush handles */
-    if (sig_key_handle != ESYS_TR_NONE) {
-        if (Esys_FlushContext(esys_ctx, sig_key_handle) != TSS2_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] TSS cleanup sig_key_handle failed.");
-        }
-    }
-    /* log_r, ak_certificate_* and rp's own AK cert are NOT freed here:
-     * charra_unmarshal_rp_evidence() points them straight into the CoAP
-     * request buffer (the borrowed-pointer convention msg_rp_evidence_dto
-     * uses throughout, see charra_dto.h) rather than heap-allocating a
-     * copy -- freeing them would free memory this handler never owned. */
-
-    /* free ESAPI objects */
-    if (validation != NULL) {
-        Esys_Free(validation);
-    }
-
-    /* finalize ESAPI & TCTI */
-    if (esys_ctx != NULL) {
-        Esys_Finalize(&esys_ctx);
-    }
-    if (tcti_ctx != NULL) {
-        Tss2_TctiLdr_Finalize(&tcti_ctx);
-    }
-
-    charra_io_free_file_buffer(&verifier_ca_cert_der);
+    /* log_r is NOT freed here: charra_unmarshal_rp_evidence() points it
+     * straight into the CoAP request buffer (the borrowed-pointer
+     * convention msg_rp_evidence_dto uses, see charra_dto.h) rather than
+     * heap-allocating a copy -- freeing it would free memory this handler
+     * never owned. */
 }

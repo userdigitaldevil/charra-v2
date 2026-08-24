@@ -18,7 +18,6 @@
 #define CHARRA_VERIFIER_SHARED_H
 
 #include <stdint.h>
-#include <time.h>
 
 #include <tss2/tss2_tpm2_types.h>
 
@@ -38,29 +37,7 @@ extern msg_attestation_request_dto last_request;
 extern uint8_t verifier_challenge_nonce[TPM2_SHA256_DIGEST_SIZE];
 extern uint32_t verifier_challenge_nonce_len;
 
-/* --- paths, finalized in verifier.c's main() once --port is known -------
- * All point into verifier.c's own buffers, not string literals, so they
- * must not be freed or reassigned. */
-
-/** Synthetic TPM manufacturer root, for validating EK certificates. */
-extern char* manufacturer_root_cert_path;
-
-/** This Verifier's own Privacy CA (per port -- genuine key isolation, not
- * just separate ledgers, so one Verifier's compromise doesn't spread). */
-extern char* verifier_ca_cert_path;
-extern char* verifier_ca_key_path;
-
-/** Lifetime of AK certificates this Verifier issues, as a duration from
- * issuance rather than a fixed instant. Settable with --ak-validity. */
-extern time_t ak_cert_validity_seconds;
-
-/** AK issuance ledgers, split by subject: an RP AK and a relayed Attester
- * AK must never be tracked -- or revoked -- as the same identity. Per port,
- * because charra_ak_state_renew() revokes any existing record for the same
- * EK, so a shared file would have each Verifier revoking every other's
- * separately-issued certificate. */
-extern char* rp_ak_state_file_path;
-extern char* attester_ak_state_file_path;
+/* --- paths, finalized in verifier.c's main() once --port is known ------ */
 
 /** Per-round /appraise timings. Per port, since sibling Verifiers share one
  * working directory and would otherwise interleave into one file. */

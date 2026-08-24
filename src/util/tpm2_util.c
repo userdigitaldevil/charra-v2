@@ -22,6 +22,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>
 #include <tss2/tss2_esys.h>
 #include <tss2/tss2_mu.h>
 #include <tss2/tss2_tpm2_types.h>
@@ -29,8 +30,54 @@
 #include "../common/charra_error.h"
 #include "../common/charra_log.h"
 
-TSS2_RC tpm2_create_primary_key_rsa2048(
-        ESYS_CONTEXT* ctx, ESYS_TR* primary_handle, TPM2B_PUBLIC** out_public) {
+TSS2_RC tpm2_pcr_reset(ESYS_CONTEXT* ctx, const uint32_t pcr_idx) {
+    TSS2_RC r = TSS2_RC_SUCCESS;
+    char* error_msg = NULL;
+
+    if (ctx == NULL) {
+        error_msg = "Bad ESAPI context.";
+        r = TSS2_ESYS_RC_BAD_VALUE;
+        goto error;
+    }
+
+    r = Esys_PCR_Reset(
+            ctx, pcr_idx, ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE);
+    if (r != TSS2_RC_SUCCESS) {
+        /* A non-resettable PCR fails here with TPM_RC_LOCALITY, which reads
+         * as an ordinary command failure. Name the likely cause. */
+        error_msg = "Esys_PCR_Reset (is this PCR resettable from locality 0? "
+                    "only 16 and 23 are)";
+        goto error;
+    }
+
+    return TSS2_RC_SUCCESS;
+
+error:
+    if (error_msg != NULL) {
+        charra_log_error("%s", error_msg);
+    }
+
+    return r;
+}
+
+/**
+ * @brief The body behind both primary-key entry points below.
+ *
+ * `restricted` is the only difference between them, and it is not a
+ * stylistic one: a RESTRICTED signing key may only sign digests the TPM
+ * produced itself, which is exactly what TPM2_Quote needs and exactly what
+ * forbids signing a caller-supplied buffer. The Attester quotes, so it
+ * needs the restricted key; the RP additionally signs caller-supplied
+ * digests (rp_sign_with_ak), which only the unrestricted one may do.
+ *
+ * Because TPM2_CreatePrimary derives its key deterministically from the
+ * hierarchy seed and the template, the two flags yield two different but
+ * individually stable keys -- reproduced identically on every call and
+ * every process restart, which is what lets a trust anchor written once
+ * offline keep matching (see charra_trusted_keys.h).
+ */
+static TSS2_RC create_primary_key_rsa2048(ESYS_CONTEXT* ctx, bool restricted,
+        ESYS_TR* primary_handle, TPM2B_PUBLIC** out_public) {
     TSS2_RC r = TSS2_RC_SUCCESS;
     char* error_msg = NULL;
 
@@ -101,6 +148,10 @@ TSS2_RC tpm2_create_primary_key_rsa2048(
     };
     /* clang-format on */
 
+    if (!restricted) {
+        inPublic.publicArea.objectAttributes &= ~(UINT32)TPMA_OBJECT_RESTRICTED;
+    }
+
     /* declare/define all needed in and out parameters */
     TPM2B_DATA outsideInfo = {.size = 0, .buffer = {0}};
     TPML_PCR_SELECTION creationPCR = {.count = 0};
@@ -112,7 +163,8 @@ TSS2_RC tpm2_create_primary_key_rsa2048(
         error_msg = "Esys_CreatePrimary";
         goto error;
     } else {
-        charra_log_info("Primary Key created successfully.");
+        charra_log_info("%s primary key created successfully.",
+                restricted ? "Restricted" : "Unrestricted");
     }
 
     return TSS2_RC_SUCCESS;
@@ -123,6 +175,16 @@ error:
     }
 
     return r;
+}
+
+TSS2_RC tpm2_create_primary_key_rsa2048(
+        ESYS_CONTEXT* ctx, ESYS_TR* primary_handle, TPM2B_PUBLIC** out_public) {
+    return create_primary_key_rsa2048(ctx, true, primary_handle, out_public);
+}
+
+TSS2_RC tpm2_create_primary_key_rsa2048_unrestricted(
+        ESYS_CONTEXT* ctx, ESYS_TR* primary_handle, TPM2B_PUBLIC** out_public) {
+    return create_primary_key_rsa2048(ctx, false, primary_handle, out_public);
 }
 
 TSS2_RC tpm2_store_key_in_nvram(ESYS_CONTEXT* ctx, const ESYS_TR* key_handle) {

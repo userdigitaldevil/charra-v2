@@ -28,9 +28,9 @@ CHARRA_RC get_evidence(void);
  * parallel and tally the majority vote. */
 CHARRA_RC get_attestation_results(int num_verifiers);
 
-/** @brief One Verifier's thread body: ensure both AK certificates, get a
- * nonce, build this Verifier's evidence, /appraise, retry once on an
- * AK-certificate rejection. */
+/** @brief One Verifier's thread body: get a nonce, build this Verifier's
+ * evidence (Quote_r + log_r + the TEE Attestation Document), and
+ * /appraise. */
 void* get_attestation_results_thread(void* arg);
 
 #endif /* CHARRA_RP_ATTESTATION_H */

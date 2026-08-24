@@ -15,8 +15,8 @@ design is shaped this way).
 | Party | Binary | Role in data flow |
 |---|---|---|
 | **Attester** | `bin/attester` | Produces `Quote_a` + raw IMA log (`log_a`). Pure responder |
-| **RP** | `bin/relying_party` | The only party that initiates anything. Appraises `log_a`, redacts it to `log_r`, produces `Quote_r` |
-| **Verifier** ×N | `bin/verifier` | Appraises what RP forwards. Also its own Privacy CA. Pure responder |
+| **RP** | `bin/relying_party` | The only party that initiates anything. Appraises `log_a`, redacts it to `log_r`, produces `Quote_r`, and vouches for its own appraisal/cleaning code via a simulated TEE |
+| **Verifier** ×N | `bin/verifier` | Appraises what RP forwards. Pure responder |
 | **Trust Manager** | `bin/trust_manager` | ID → `ip:port` lookup. Pure responder |
 
 | Term | Meaning |
@@ -24,9 +24,9 @@ design is shaped this way).
 | `Quote_a` | Attester's TPM quote: `attestation_data` + `tpm2_signature` + `tpm2_public_key` |
 | `log_a` | Attester's **raw** IMA event log — real file paths. Never leaves the RP |
 | `log_r` | The redacted log. Each entry's path replaced by `SHA256(salt‖path)` |
-| `PCR_r` | Composite digest from a **software replay** of `log_r`, not a live PCR read |
-| `Quote_r` | RSA-PSS signature by RP's TPM-resident AK over `PCR_r ‖ verifier_nonce` |
-| `ek_fingerprint` | `SHA-256(EK certificate DER)` — the identity key for every ledger |
+| `PCR_r` | The composite digest inside `Quote_r` — a genuine TPM2_Quote over the PCR the RP replayed `log_r` into (`RP_REPLAY_PCR_INDEX`, see `rp_signing_key.h`), not a software-only computation |
+| `Quote_r` | A genuine `TPM2_Quote`, signed by RP's TPM-resident (unrestricted) signing key, with `extraData` = `verifier_nonce` and `pcrDigest` = `PCR_r` |
+| trust anchor | `keys/trusted_keys.txt` — the flat file of PEM public keys every role checks a signing key against. See `charra_trusted_keys.h`. There is no certificate, no CA and no ledger anywhere in this system any more |
 
 **One structural fact drives everything below:** every exchange is
 RP-initiated CoAP FETCH with a CBOR body. The Attester and Verifiers never
@@ -59,20 +59,24 @@ Verifier" is really the RP relaying in both directions.
 endpoints.
 
 ② **Collect.** RP generates a 20-byte nonce and FETCHes `/attest`. The
-Attester quotes its PCRs with that nonce as `qualifyingData` and returns
-`Quote_a`, the raw `log_a`, and **both** of its AK certificates.
+Attester quotes its PCRs with that nonce as `qualifyingData`, under a
+signing key derived fresh from its TPM every call, and returns `Quote_a`
+plus the raw `log_a`.
 
 ③ **Appraise, then cleanse — the heart of the design.** RP runs the full
-six-check Step 2a gate against the *raw* log, then Step 2b redacts it. This
-is the only place the raw log is ever examined. RP also sends its verdict
-back to the Attester (`/attest_result`), advisory only.
+six-check Step 2a gate against the *raw* log, then Step 2b redacts it and
+replays the result into its own TPM. This is the only place the raw log is
+ever examined. RP also sends its verdict back to the Attester
+(`/attest_result`), advisory only.
 
 ④ **Challenge.** Each Verifier thread FETCHes `/nonce` and gets back a
 **Verifier-generated** 32-byte challenge — not an echo of RP's own nonce.
 Freshness has to be proven to the Verifier with a value the Verifier picked.
 
-⑤ **Submit.** Each thread signs `PCR_r ‖ that Verifier's nonce` into a
-per-Verifier `Quote_r` and FETCHes `/appraise`. The Verifier runs Steps
+⑤ **Submit.** Each thread has its TPM produce a genuine `Quote_r` over the
+already-replayed PCR, under that Verifier's own nonce as `extraData`, signs
+a simulated-TEE Attestation Document vouching for the code that did the
+appraisal and cleaning, and FETCHes `/appraise`. The Verifier runs Steps
 3a/3b and answers `2.05` with `Attestation successful!` or
 `Attestation failed!` — a **vote, not a work order**. No reason codes travel;
 the reasons stay in the Verifier's own log.
@@ -81,15 +85,15 @@ the reasons stay in the Verifier's own log.
 pass — timeout, transport error, a Verifier that never answered — counts as
 NO.
 
-**What is deliberately *not* forwarded:** `log_a` (defeats redaction) and the
-Attester's **EK** certificate (a permanent hardware identifier — a stronger
-identifier than any path the redaction protects).
+**What is deliberately *not* forwarded:** `log_a` (defeats redaction). There
+is no EK, and no certificate of any kind, anywhere in this system — see
+"trust anchor" above.
 
 ## 1.2 Low level
 
 ### Phase ① — resolve verifiers
 
-`get_verifiers()` → `rp_attestation.c:321`
+`get_verifiers()` → `rp_attestation.c:305`
 
 ```
 RP → TM   FETCH /get_verifiers   msg_get_verifiers_request_dto{ verifier_ids[] }
@@ -103,68 +107,62 @@ response is logged and truncated, not over-read.
 
 ### Phase ② — get evidence
 
-`get_evidence()` → `rp_attestation.c:495`
+`get_evidence()` → `rp_attestation.c:355`
 
 `create_attestation_request()` builds:
 
 | Field | Value |
 |---|---|
 | `nonce` | 20 random bytes — `charra_random_bytes_from_tpm()` if `USE_TPM_FOR_RANDOM_NONCE_GENERATION`, else software |
-| `sig_key_id` | `"PK.RSA.default"` (legacy; the Attester now ignores it and uses its restricted AK) |
+| `sig_key_id` | `"PK.RSA.default"` — selects which of the TPM's deterministic primaries to derive; see `charra_load_tpm2_key()` |
 | `pcr_selections` | SHA-256 bank, `tpm_pcr_selection` (default `0-7,10`) |
 | `event_log_path` | `ima_test_logs.txt` or the real IMA path |
 
 Stored in the `last_request` global — Step 2a's nonce check and the
 `attester_nonce` field of the outgoing evidence both read it back.
 
-Attester side, `coap_attest_handler()` → `attester.c:1305`:
+Attester side, `coap_attest_handler()` → `attester_attest.c`:
 
-1. `ensure_attester_ak_keypair()` **before** ESAPI init — the simulator
-   accepts one connection at a time.
-2. `qualifying_data ← req.nonce`, then `Esys_Quote()` with the **restricted**
-   AK. Restricted matters: the same key is certified by `/certify_ak_of_attester`,
-   so Step 3b's "cert matches the quoting key" check can pass.
-3. Reads `log_a` from disk and both cached AK certificates
-   (`state/attester/ak-certificates/attester-ak-certificate-{rp,verifier}.der`).
+1. `charra_load_tpm2_key()` derives the TPM's deterministic RESTRICTED
+   signing primary -- the same key on every call and every process
+   restart, since it comes from `TPM2_CreatePrimary` over a fixed template
+   and the TPM's owner-hierarchy seed. No provisioning: its public half was
+   written into `keys/trusted_keys.txt` offline (see "trust anchor" above).
+2. `qualifying_data ← req.nonce`, then `Esys_Quote()` with that key.
+   Restricted matters: only a restricted key may sign `TPM2_Quote` output,
+   which is what lets the Verifier's Step 3b item 1 check the *same* key
+   against the trust anchor that produced this quote.
+3. Reads `log_a` from disk.
 
-`msg_attestation_response_dto` — exactly **six** CBOR fields, in this order:
+`msg_attestation_response_dto` — exactly **four** CBOR fields, in this order:
 
 | # | Field | Contents |
 |---|---|---|
 | 1 | `attestation_data` | The signed `TPM2B_ATTEST`. Unmarshals to `TPMS_ATTEST`: `magic`, `type`, `qualifiedSigner`, **`extraData` ← the nonce**, `clockInfo`, `firmwareVersion`, and `attested.quote` = `{pcrSelect, pcrDigest}` |
 | 2 | `tpm2_signature` | `TPMT_SIGNATURE` — RSA-PSS/SHA-256 over field 1 |
-| 3 | `tpm2_public_key` | `TPM2B_PUBLIC` of the quoting AK — the key field 2 verifies under |
+| 3 | `tpm2_public_key` | `TPM2B_PUBLIC` of the quoting key — the key field 2 verifies under, and the key both RP (Step 2a item 1) and every Verifier (Step 3b item 1) look up in the trust anchor |
 | 4 | `event_log` | `log_a`, **raw**, real paths |
-| 5 | `ak_certificate_attester_by_verifier` | AK cert (DER) from a Verifier's CA — Step 3b item 1's input |
-| 6 | `ak_certificate_attester_by_rp` | AK cert (DER) from RP's CA — Step 2a item 1's input |
 
-Two things are **not** in this message, and both are deliberate:
+**No separate nonce field.** The nonce is not sent alongside the quote — it
+is `TPMS_ATTEST.extraData`, *inside* the TPM-signed blob. That is the whole
+point: a nonce sitting beside the signature could be swapped freely, whereas
+one baked into the signed structure by the TPM cannot. Both RP (Step 2a
+item 3) and every Verifier (Step 3b item 3) recover it by unmarshalling
+field 1 and comparing `extraData` against the nonce they expect.
 
-- **No separate nonce field.** The nonce is not sent alongside the quote — it
-  is `TPMS_ATTEST.extraData`, *inside* the TPM-signed blob. That is the whole
-  point: a nonce sitting beside the signature could be swapped freely, whereas
-  one baked into the signed structure by the TPM cannot. Both RP (Step 2a
-  item 3) and every Verifier (Step 3b item 3) recover it by unmarshalling
-  field 1 and comparing `extraData` against the nonce they expect.
-- **No EK certificate.** Only the two *AK* certificates travel. The Attester's
-  EK certificate is a permanent, unique hardware identifier; it reaches the RP
-  exactly once, on the `/certify_ak_of_attester` FETCH leg (§4), and never
-  goes any further. Forwarding it to a Verifier would leak a stronger
-  identifier than the path redaction protects.
-
-Both AK certificates are re-read **from disk on every `/attest` call** rather
-than cached in memory, because `DELIVER_VERIFIER` can rewrite the
-Verifier-issued one at any time between calls.
+There is no EK, no AK certificate, and no per-Verifier identity to
+substitute here any more: `tpm2_public_key` *is* the whole identity claim,
+checked the same way by everyone who receives it.
 
 ### Phase ③ — Step 2a appraisal (the gate)
 
-`charra_rp_appraise_evidence()` → `rp_evidence.c:32`, called from inside the
+`charra_rp_appraise_evidence()` → `rp_evidence.c:56`, called from inside the
 response handler. Six checks, **all six run** even after one fails, so one
 cycle reports every problem:
 
 | # | Check | Function |
 |---|---|---|
-| 1 | Attester AK cert chains to **RP's own CA** + matches the quoting key, and its serial is live in RP's ledger | `charra_crypto_verify_ekak_certificate()` + `charra_ak_state_check_serial_valid()` |
+| 1 | `tpm2_public_key` is in the trust anchor | `charra_trusted_keys_check()` |
 | 2 | `Quote_a` signature under `tpm2_public_key` | `charra_crypto_rsa_verify_signature()` (mbedTLS, **not** TPM) |
 | 3 | `qualifyingData == last_request.nonce` | `charra_verify_tpm2_quote_qualifying_data()` |
 | 4 | Every entry: `template_digest == SHA256(template_data)` | `charra_verify_log_entries_self_consistent()` |
@@ -181,9 +179,10 @@ never forwarded. Either way `rp_send_attestation_result()` FETCHes
 
 ### Phase ③b — Step 2b privacy cleaning
 
-`charra_rp_prepare_evidence()` → `rp_evidence.c:183`. Runs **once per cycle,
+`charra_rp_prepare_evidence()` → `rp_evidence.c`. Runs **once per cycle,
 before any thread starts** — redaction is randomised, so per-thread redaction
-would hand each Verifier a different `log_r` for the same attestation.
+would hand each Verifier a different `log_r` for the same attestation, and
+the replay below is likewise shared by every Verifier's later `Quote_r`.
 
 ```
 charra_sdk_redact_ima_log(log_a, …, → rp_log_r)
@@ -194,13 +193,22 @@ locate the path inside the `ima-ng` `n-ng` field, replace `template_data`
 with `SHA256(salt‖path)`, recompute `template_digest`. `pcr_index` and
 `template_name` pass through.
 
-Then replay `log_r` → per-PCR accumulators → `hash_sha256_array()` → `PCR_r`.
+Then `rp_replay_log_into_pcr()` (`rp_signing_key.h`) resets
+`RP_REPLAY_PCR_INDEX` (23, not 10 — that PCR must be rewindable before each
+cycle's replay, and only 16/23 are on this TPM profile) and extends
+`log_r`'s entries into it, one `TPM2_PCR_Extend` per entry. A local software
+replay of the same entries (`charra_replay_ima_log()`) is also computed and
+logged, purely as a diagnostic prediction of what the TPM is about to
+arrive at.
 
 > **Consequence, by design:** because `template_digest` is recomputed,
-> `PCR_r` can never equal `Quote_a`'s PCR digest — not by policy but
-> arithmetically. The TPM is therefore *not* in the Verifier's chain of trust
-> for PCR10 content; the guarantee is "the RP vouches for this", anchored by
-> RP's own TPM.
+> the composite digest over `log_r` can never equal `Quote_a`'s PCR digest
+> — not by policy but arithmetically. `PCR_r` living in a genuine TPM
+> PCR (rather than being asserted in software, as it was before this
+> change) closes one gap, but the guarantee remains "the RP vouches for
+> this redaction", anchored by RP's own TPM plus the simulated TEE
+> Attestation Document that names the exact code that produced it (Step
+> 3a item 5, below).
 
 ### Phase ④/⑤ — per-Verifier threads
 
@@ -213,40 +221,34 @@ Each `get_attestation_results_thread()`:
 2. `attestation_results[i] = false` — **fail-closed reset**, so an early
    `goto cleanup` can never leave a stale PASS from a previous cycle in the
    tally.
-3. `ensure_rp_ak_certificate(i)` and
-   `ensure_attester_identity_certified_by_verifier(i)` — both per-Verifier
-   (independent CAs). On failure it **still sends**, letting that Verifier
-   judge and log its own decision.
-4. FETCH `/nonce`, sending `last_request`. Verifier's `coap_nonce_handler()`
+3. FETCH `/nonce`, sending `last_request`. Verifier's `coap_nonce_handler()`
    stores it (for Step 3b item 3) and returns its **own** 32-byte
    `verifier_challenge_nonce`.
-5. `charra_rp_build_evidence_message(i)` — signs `PCR_r ‖ verifier_nonce[i]`
-   under RP's AK via a short-lived TPM session held under `rp_tpm_mutex`.
-6. FETCH `/appraise`.
+4. `charra_rp_build_evidence_message(i)` — `rp_quote_pcr_with_ak()` (see
+   `rp_signing_key.h`) has RP's TPM produce a genuine `TPM2_Quote` over the
+   PCR the earlier replay left `PCR_r` in, with this Verifier's nonce as
+   `qualifyingData` — a short-lived TPM session held under `rp_tpm_mutex`,
+   deriving the signing key fresh and never caching it. Then RP's TEE signs
+   an Attestation Document over `(file_hash, report_data)`, where
+   `report_data = hash(verifier_nonce ‖ pcrdigest_a ‖ log_r)`.
+5. FETCH `/appraise`.
 
 ```
 RP → Verifier  msg_rp_evidence_dto {
-   pcr_r, verifier_nonce, rp_signature, rp_public_key,   ← Quote_r
-   ak_certificate_rp,                                    ← EK_r/AK_r  (Step 3a-1)
+   rp_attestation_data, rp_signature, rp_public_key,     ← Quote_r (real TPM2_Quote)
    attester_nonce,
-   attestation_data, tpm2_signature, tpm2_public_key,    ← Quote_a fwd (Step 3b-2)
-   ak_certificate_attester_by_verifier,                  ← EK_a/AK_a  (Step 3b-1)
-   ak_certificate_attester_by_rp,                        ← forwarded, not checked
-   log_r }                                               ← NO content check
+   attestation_data, tpm2_signature, tpm2_public_key,    ← Quote_a fwd (Step 3b-2/1)
+   log_r,                                                ← NO content check
+   tee_file_hash, tee_report_data,
+   tee_signature, tee_public_key }                       ← simulated TEE Attestation Document
 ```
 
-`ak_certificate_attester_by_verifier` is substituted from RP's **own
-per-Verifier cache**, not from what `last_response` carried — only RP knows
-which Verifier's CA issued which certificate. Not a trust shortcut: validity
-depends on the CA signature, not on who relayed the bytes.
-
-> **Asymmetry worth knowing.** The Attester stores exactly **one**
-> `attester-ak-certificate-verifier.der`, overwritten by whichever
-> DELIVER_VERIFIER ran last, and re-reads it from disk on every `/attest`.
-> The RP stores **N**, one per port. So the copy the Attester ships in its
-> `/attest` response is essentially vestigial for appraisal — RP overrides it
-> per Verifier here. Only `ak_certificate_attester_by_rp` is forwarded as the
-> Attester sent it, since there is just one RP CA.
+Neither `verifier_nonce` nor `PCR_r` travels as its own field any more --
+both live *inside* `rp_attestation_data`, the same way the Attester's own
+nonce and PCR digest live inside `attestation_data`. There is no
+per-Verifier substitution to make here, unlike the old certificate-
+forwarding dance: RP's signing key and the Attester's are each checked the
+same way by every Verifier, against the one shared trust anchor.
 
 ### Phase ⑤b — Verifier Steps 3a/3b
 
@@ -256,37 +258,44 @@ depends on the CA signature, not on who relayed the bytes.
 
 | Item | Check | On failure |
 |---|---|---|
-| 1 | `ak_certificate_rp` chains to **this Verifier's** CA, matches `rp_public_key`, serial live in `rp/` ledger | `ekak_rp_why` |
-| 2 | `rp_signature` over `pcr_r ‖ verifier_nonce` | |
-| 3 | `verifier_nonce == verifier_challenge_nonce` — plain byte compare | |
-| 4 | simulated TEE Attestation Document (see `TEE.h`): `tee_signature` valid under `tee_public_key`, `tee_file_hash` matches this Verifier's own hash of the appraisal/cleaning source, `tee_report_data == hash(verifier_nonce ‖ pcrdigest_a ‖ log_r)` | `tee_why` |
+| 1 | `rp_public_key` is in the trust anchor | `ekak_rp_why` |
+| 2 | `rp_signature` over `rp_attestation_data` -- mbedTLS RSA-PSS, no TPM opened | |
+| 3 | `rp_attestation_data`'s `extraData == verifier_challenge_nonce` -- plain byte compare, after unmarshaling the TPMS_ATTEST | |
+| 4 | replaying `log_r` (software, `charra_replay_ima_log()`) reproduces `rp_attestation_data`'s `pcrDigest` -- this is what ties `Quote_r` to `log_r` at all | |
+| 5 | simulated TEE Attestation Document (see `TEE.h`): `tee_signature` valid under `tee_public_key`, `tee_file_hash` matches this Verifier's own hash of the appraisal/cleaning source, `tee_report_data == hash(verifier_nonce ‖ pcrdigest_a ‖ log_r)` | `tee_why` |
 
 **Step 3b — original evidence (`Evidence_a'`)**
 
 | Item | Check |
 |---|---|
-| 1 | `ak_certificate_attester_by_verifier` chains to this Verifier's CA, matches the key that signed `Quote_a`, serial live in `attester/` ledger |
-| 2 | `Quote_a` signature — verified **twice**, once TPM-backed (`Esys_VerifySignature`) and once mbedTLS |
+| 1 | `tpm2_public_key` is in the trust anchor |
+| 2 | `Quote_a` signature -- mbedTLS RSA-PSS only; no TPM is opened anywhere in `/appraise` any more |
 | 3 | `Quote_a`'s `qualifyingData == last_request.nonce` |
 
 Step 3b runs **even when 3a failed** — its checks read only received fields,
 so nothing depends on RP's identity having verified. Running it always means
 one appraisal reports every problem instead of leaking them one round trip at
-a time. The verdict is still fail-closed: all eight booleans ANDed. (Step 3a
-item 4 is computed inside the Step 3b code block, since it needs `Quote_a`'s
-unmarshaled `pcrDigest` — Step 3b's own item 3 already unmarshals it — but it
-is still ANDed into the final verdict regardless of which step number it is
-filed under.)
+a time. The verdict is still fail-closed: all eight booleans ANDed (4 from
+Step 3a's own gate, `attestation_result_ekak`, `attestation_result_signature`,
+`attestation_result_nonce` from Step 3b, and `attestation_result_tee`).
+Step 3a item 5 is computed inside the Step 3b code block, since it needs
+`Quote_a`'s unmarshaled `pcrDigest` — Step 3b's own item 3 already unmarshals
+it — but it is still ANDed into the final verdict regardless of which step
+number it is filed under.
 
-`log_r` gets **no content inspection at all** — no replay, no hash check, no
-policy. That is Step 2a's job, already done, against the raw log.
+`log_r` gets **no replay/hash/policy inspection** beyond item 4 above (which
+only checks it against `Quote_r`'s own `pcrDigest`, not against a policy).
+The self-consistency, whitelist/blacklist checks are Step 2a's job, already
+done by the RP against the raw log — the TEE Attestation Document (item 5)
+is what lets the Verifier trust that Step 2a actually ran, and ran the real
+code, rather than trusting the RP's word for it.
 
 > **`attester_nonce` is sent but never read.** The evidence message carries
-> `attester_nonce` (field 6), documented in `charra_dto.h` as letting the
-> Verifier "see which challenge the Attester's quote answers". In the current
-> code nothing in `src/verifier/` reads it: Step 3b item 3 compares
-> `Quote_a`'s `extraData` against **`last_request.nonce`** — the nonce that
-> arrived earlier on the *`/nonce`* call and was stashed in the Verifier's
+> `attester_nonce`, documented in `charra_dto.h` as letting the Verifier
+> "see which challenge the Attester's quote answers". In the current code
+> nothing in `src/verifier/` reads it: Step 3b item 3 compares `Quote_a`'s
+> `extraData` against **`last_request.nonce`** — the nonce that arrived
+> earlier on the *`/nonce`* call and was stashed in the Verifier's
 > `last_request` global.
 >
 > That is the safer of the two choices (checking the quote against a value
@@ -302,295 +311,30 @@ policy. That is Step 2a's job, already done, against the raw log.
 if (2 * num_true > num_verifiers) "Attestation successful by majority vote!"
 ```
 
----
-
-# 3. `/certify_ak` — Verifier as Privacy CA
-
-## 3.1 High level
-
-The Verifier merges the Privacy CA role into itself and issues AK
-certificates via standard TPM2 Credential Activation. **Two legs**, and the
-split is the whole security property:
-
-```
-RP ──CHALLENGE (EK cert, AK pub, AK name)──►  Verifier
-                                              verify EK chains to mfr root
-                                              rebuild EK TPM2B_PUBLIC
-                                              random 32-byte secret
-                                              Esys_MakeCredential(secret)
-                                              ── signs NOTHING, records NOTHING
-   ◄──── credential_blob + wrapped_secret ──
-
-RP  Esys_ActivateCredential  → recovers secret     (only its TPM can)
-
-   ──CONFIRM (EK cert, secret)──────────────►  constant-time compare
-                                              single-use: entry consumed
-                                              NOW sign + record + revoke prior
-   ◄──── ak_certificate (plaintext) ────────
-```
-
-**Why two legs.** The one-shot version signed a certificate, wrapped it, *and*
-called `charra_ak_state_renew()` — which **revokes the requester's previous
-certificate** — all before any proof the requester could open the response.
-The request carries only the EK *certificate*, which is public data. So anyone
-holding a copy could knock out a working identity while being cryptographically
-unable to use the replacement. A denial of service, not a theft.
-
-Now every irreversible step sits behind the proof.
-
-**Why the credential is a symmetric key, not the certificate.**
-`MakeCredential`'s payload is capped near a digest size — far too small for
-X.509. So it carries a 32-byte secret instead.
-
-**Why the certificate now travels in the clear.** It used to be AES-GCM
-wrapped, which only ever served as an *implicit* possession proof — which
-CONFIRM now makes explicit. Keeping it would be self-defeating anyway, since
-CONFIRM puts that same secret on the wire. The certificate was never secret;
-identical bytes travel unencrypted in every later `/appraise`.
-
-## 3.2 Low level
-
-### CHALLENGE — `certify_ak_do_challenge()` → `verifier_certify_ak.c:173`
-
-```
-RP → V   msg_certify_ak_request_dto {
-           kind = CHALLENGE, subject = RP | ATTESTER,
-           ek_certificate, ak_public_key, ak_name }
-```
-
-`subject` routes the issuance to a separate ledger per identity kind — an RP
-AK and a relayed Attester AK must never be tracked, or revoked, as the same
-thing. It is bound into the pending challenge, so CONFIRM's routing uses the
-CHALLENGE-time value regardless of what CONFIRM sends.
-
-1. `charra_crypto_verify_x509_cert_chain(ek_certificate, manufacturer-root.crt)`
-   → else `4.01`
-2. `charra_crypto_build_ek_tpm2b_public_from_cert()` — `Esys_MakeCredential`
-   needs the whole TCG "low range" public area, not just the modulus.
-   Template values were confirmed empirically against `tpm2_createek -G rsa`.
-3. `charra_random_bytes(32)` → `secret`;
-   `ek_fingerprint = SHA256(ek_certificate)`
-4. `charra_tpm_make_credential_for_ak()` — wraps `Esys_MakeCredential`,
-   loading the requester's EK via `Esys_LoadExternal`. **No Verifier TPM
-   identity needed.** The caller-supplied `ak_name` is trusted unverified: a
-   wrong name simply fails the requester's own `ActivateCredential`.
-5. `certify_ak_pending_store()` — 8 slots, **60s TTL**, in memory only.
-
-```
-V → RP   msg_certify_ak_response_dto { credential_blob, wrapped_secret }
-```
-
-### RP activates — `ensure_rp_ak_certificate()` → `rp_identity.c:425`
-
-Two **separate, short-lived** TPM sessions, each taking `rp_tpm_mutex` and
-closing before the next network call — never holding the simulator's single
-connection slot across a round trip:
-
-- Session 1: load AK, read `ak_name`, build the CHALLENGE. Closed *before*
-  sending.
-- Session 2: `charra_identity_key_mgr_activate_credential()` →
-  `Esys_ActivateCredential(ak_handle, ek_handle, blob, secret)` → the
-  32-byte secret. Closed before CONFIRM is sent.
-
-### CONFIRM — `certify_ak_do_confirm()` → `verifier_certify_ak.c:330`
-
-```
-RP → V   msg_certify_ak_request_dto { kind = CONFIRM, ek_certificate, secret }
-```
-
-`ak_public_key`/`ak_name` are deliberately **absent**: the Verifier certifies
-the key it already bound into the challenge, so even a leaked secret cannot be
-redirected onto a different key.
-
-1. `certify_ak_pending_take(ek_fingerprint)` — copies out **and clears** the
-   slot. Single-use: neither a replay nor a retry after a wrong guess can
-   reuse it. Missing/expired → `4.01`.
-2. `constant_time_equal(req.secret, challenge.secret, 32)` → else `4.01`,
-   *nothing signed, nothing revoked*.
-3. `charra_crypto_sign_ak_certificate(challenge.ak_public_key, …)` — issuer
-   read from that port's own `verifier-ca-<port>.crt`, validity
-   `now … now + --ak-validity`, random 16-byte serial returned out-param.
-4. `charra_ak_state_renew(subject_ledger, ek_fingerprint, record)` — appends
-   `{ek_fingerprint, ak_name, serial, issued_at, expires_at, revoked}` and
-   **revokes any prior record for the same EK**, under `flock()`.
-
-CONFIRM needs **no TPM at all** — the proof was produced by the requester's —
-which removes it from simulator contention entirely.
-
-```
-V → RP   msg_certify_ak_response_dto { ak_certificate }   ← plaintext DER
-```
-
-RP caches to `state/relying-party/ak-certificates/rp-ak-certificate-<port>.der`.
-
----
-
-# 4. `/certify_ak_of_attester` — Attester AK provisioning, RP-mediated
-
-## 4.1 High level
-
-The Attester needs a certified AK, but it is a **pure passive responder** — it
-cannot call anyone. So the RP drives everything, and the Attester's single
-`/certify_ak_of_attester` resource is discriminated by a `kind` field.
-
-The Attester ends up with **two independently-issued certificates for the same
-AK**, from two CAs that do not trust each other's issuance:
-
-```
-        ┌───── Track A: RP's own CA (RP is the CA) ─────┐
-
-RP ──FETCH─────────────────────────────────────► Attester
-   ◄── EK cert + AK pub + AK name ──────────────
-RP  validates EK chain itself  ── HARD GATE, aborts cycle on failure
-RP  signs cert with keys/rp-ca.key
-RP  MakeCredential(AES key) + AES-GCM(cert)
-   ──DELIVER_RP (wrapped)──────────────────────► ActivateCredential → decrypt
-                                                  persist
-
-        ┌── Track B: a Verifier's CA (RP is only a relay) ──┐
-
-RP ──/certify_ak CHALLENGE (subject=ATTESTER)──► Verifier
-   ◄── credential_blob + wrapped_secret ────────
-   ──ACTIVATE (relayed blob)────────────────────► Attester
-   ◄── recovered secret ────────────────────────  (only its TPM can)
-   ──/certify_ak CONFIRM (that secret)─────────► Verifier signs + records
-   ◄── ak_certificate ─────────────────────────
-   ──DELIVER_VERIFIER (plaintext)──────────────► Attester persists
-```
-
-**Why ACTIVATE exists.** Only the Attester's TPM can activate a challenge
-meant for it. The RP cannot answer on its behalf — which is precisely the
-point: the possession proof reaching the Verifier is one the relay could not
-have forged.
-
-**Why the two tracks are asymmetric.** On Track A the RP *is* the CA, so it
-still uses the one-shot wrapped form — the Attester's unwrap is itself the
-possession proof. On Track B the RP is only a relay, so the Verifier needs
-the explicit CHALLENGE/CONFIRM proof. Making Track A symmetrical is noted as
-follow-up work.
-
-**Track A's EK check is a hard local gate.** If the Attester's EK certificate
-does not chain to the manufacturer root, RP aborts the whole attestation cycle
-rather than proceed with an unverified Attester identity.
-
-**Track B is per-Verifier.** Each Verifier has an independent CA key, so one
-Verifier's certificate does not validate anywhere else. Track B therefore runs
-once per Verifier, cached as
-`attester-ak-certificate-verifier-<port>.der`.
-
-## 4.2 Low level
-
-### FETCH
-
-```
-RP → A   msg_certify_ak_of_attester_request_dto { kind = FETCH }
-A  → RP  msg_ak_identity_response_dto { ek_certificate, ak_public_key, ak_name }
-```
-
-Attester opens a short TPM session **purely** to read `ak_name` — no
-ActivateCredential, no signing on this leg.
-
-> The AK here is a *dedicated identity keypair*, created by
-> `charra_identity_key_mgr_create_restricted_ak()`. **Restricted** is
-> load-bearing: it doubles as the real `Quote_a`-signing key, so the certified
-> key and the quoting key are the same key and Step 3b item 1 can pass.
-> (RP's own AK is deliberately *un*restricted — it must sign
-> `PCR_r ‖ nonce`, caller-supplied data a restricted key cannot sign without
-> a validation ticket.)
->
-> `ak_name` copies only `size + size bytes` and zeroes the tail —
-> `Esys_TR_GetName()` leaves the rest of the allocation uninitialised, and
-> copying the whole struct put stale heap bytes on the wire (caught by
-> valgrind).
-
-### Track A — `ensure_attester_identity_provisioned()` → `rp_attester_identity.c:116`
-
-Once per process, under `attester_identity_provision_mutex`.
-
-1. `charra_crypto_verify_x509_cert_chain(ek, manufacturer-root.crt)` — hard gate
-2. `charra_crypto_sign_ak_certificate(ak_public_key, …, keys/rp-ca.key)`
-3. Random AES-256 key → `charra_crypto_aes256gcm_encrypt(cert)` → nonce + tag
-4. `charra_tpm_make_credential_for_ak()` wraps the **AES key** (under
-   `rp_tpm_mutex`)
-5. `charra_ak_state_renew("state/relying-party/ak-provisioning/attester-ak-state.txt")`
-6. DELIVER_RP
-
-```
-RP → A   { kind = DELIVER_RP, credential_blob, wrapped_secret,
-           aes_gcm_nonce, aes_gcm_tag, ak_certificate }   ← ciphertext
-```
-
-Attester: `ActivateCredential` → AES key → `charra_crypto_aes256gcm_decrypt()`
-(authenticated — wrong key or tampered ciphertext yields
-`CHARRA_RC_VERIFICATION_FAILED`, never plaintext) → persist.
-
-RP caches the plaintext cert and the fetched identity, so Track B never
-re-FETCHes.
-
-### Track B — `ensure_attester_identity_certified_by_verifier(i)` → `rp_attester_identity.c:660`
-
-Per Verifier, under `attester_identity_relay_mutex`. Disk cache checked first,
-and **expiry is acted on, not merely logged**: the Verifier gives RP no
-distinct signal for "the Attester's cert is stale" (Step 3b folds it into an
-ordinary NO), so without this check an expired certificate would be reloaded,
-re-sent, and rejected every cycle forever — a stuck state only a manual delete
-could clear.
-
-```
-RP → V   /certify_ak { kind = CHALLENGE, subject = ATTESTER,
-                       ek_certificate, ak_public_key, ak_name }   ← Attester's
-V  → RP  { credential_blob, wrapped_secret }
-
-RP → A   { kind = ACTIVATE, credential_blob, wrapped_secret }
-A  → RP  msg_activate_credential_response_dto { secret }          ← the proof
-
-RP → V   /certify_ak { kind = CONFIRM, ek_certificate, secret }
-V  → RP  { ak_certificate }                                        ← plaintext
-
-RP → A   { kind = DELIVER_VERIFIER, ak_certificate }               ← plaintext
-```
-
-`subject = ATTESTER` routes the Verifier's ledger write to
-`state/verifier/ak-provisioning/attester/`, keeping it entirely separate from
-its `rp/` ledger. DELIVER_VERIFIER carries no credential wrapping — the
-preceding ACTIVATE already supplied the possession proof.
-
----
-
 # 5. Cross-cutting mechanics
 
 ## 5.1 State on disk
 
+There is essentially none. No role provisions, caches or revokes anything at
+runtime; the `state/` directory this section used to document is gone along
+with the certificate PKI it existed for. The one thing that has to persist
+across process restarts is which signing keys are trusted, and that lives in
+a single file, generated offline rather than written by any of the four
+binaries at runtime:
+
 | Path | Writer | Content |
 |---|---|---|
-| `state/verifier/ak-provisioning/rp/…-<port>.txt` | Verifier | AK issuances for RP identities — **per port** |
-| `state/verifier/ak-provisioning/attester/…-<port>.txt` | Verifier | AK issuances for Attester identities — **per port** |
-| `state/relying-party/identity/` | RP | RP's EK cert + AK keypair blobs |
-| `state/relying-party/ak-certificates/…-<port>.der` | RP | RP's own AK cert, per Verifier |
-| `state/relying-party/attester-ak-certificates/` | RP | Attester certs RP holds (RP-issued + one per Verifier) |
-| `state/relying-party/ak-provisioning/` | RP | RP-as-CA issuance ledger for the Attester |
-| `state/attester/` | Attester | Its EK/AK + both delivered certs |
+| `keys/trusted_keys.txt` | `bin/provision_trusted_keys` (offline, via `keys/gen-trusted-keys.sh`) | PEM public keys for the Attester's and RP's TPM-resident signing keys — see `charra_trusted_keys.h` |
 
-**Why AK ledgers are per-port:** `charra_ak_state_renew()` *revokes* any
-existing record for the same `ek_fingerprint` before appending. Share that
-file across Verifiers and the second Verifier to certify an RP instantly
-revokes the first's freshly-issued certificate.
-
-Each ledger uses `flock()` on a companion `.lock` file, safe across the
-separate `bin/verifier` OS processes. Each scans **backward** on lookup:
-after N renewals for one EK, up to N−1 superseded records exist
-oldest-first, so a forward scan would keep returning the stale one.
+Regenerate it after any TPM reset: both keys are derived from the TPM's
+owner-hierarchy seed, so a reset changes them and every signature check
+starts failing as "key not in the trust anchor".
 
 ## 5.2 Locks
 
 | Mutex | Guards |
 |---|---|
-| `rp_tpm_mutex` | Every RP TPM session. The simulator accepts **one connection at a time**; an RP that held one open for its whole run once starved a Verifier's `/certify_ak` indefinitely. Every use is open → one operation → close |
-| `rp_ak_reprovision_mutex` | `/certify_ak` response globals — N threads can legitimately be mid-exchange |
-| `attester_identity_provision_mutex` | Track A, once per process |
-| `attester_identity_relay_mutex` | Track B relay |
-
-Discipline: **reprovision mutex, then TPM mutex, never nested the other way.**
+| `rp_tpm_mutex` | Every RP TPM session -- both the once-per-cycle `log_r` replay and every per-Verifier `Quote_r`. The simulator accepts **one connection at a time**; an RP that held one open for its whole run once starved a Verifier's own TPM work indefinitely. Every use is open → one operation → close |
 
 ## 5.3 Freshness — two independent nonces
 
@@ -615,9 +359,9 @@ Every unmarshaler bounds-checks each byte-string against its destination
 `sizeof` before copying, and handlers re-check independently before
 `memcpy`ing into fixed-size structs (defence in depth). Large responses go
 through `coap_add_data_large_response()` with a **release callback** —
-freeing the buffer synchronously corrupted the tail of multi-datagram
-responses, which surfaced as "every Verifier's first `/certify_ak` fails,
-every retry succeeds".
+freeing the buffer synchronously once corrupted the tail of multi-datagram
+responses, which surfaced as intermittent block-wise-transfer failures under
+load.
 
 ## 5.5 Failure semantics
 
@@ -625,12 +369,12 @@ every retry succeeds".
 `Attestation failed!`. Any failed check is simply a NO. The Verifier logs
 every reason locally; **the wire carries only the verdict**.
 
-This replaced a scheme where the Verifier answered `4.01`/`4.03`/`4.12` to
+This replaced a scheme where the Verifier answered distinct `4.xx` codes to
 tell the RP which remedy to attempt and the RP re-provisioned and retried on
 each. That made the verdict a *work order* rather than a vote, and put RP's
-retry logic at the mercy of codes another party chose. `4.01` still exists,
-but only on `/certify_ak`, where it is a genuine authentication failure
-rather than an appraisal outcome.
+retry logic at the mercy of codes another party chose. There is nothing left
+to remedy or retry now: every identity is either in the trust anchor or it
+isn't, decided offline, long before any attestation cycle runs.
 
 Even the exits that reject a request *before* appraising it — malformed CBOR,
 an oversized field, a Verifier-side error opening its own duration log —
@@ -654,13 +398,14 @@ identity checks:
   the Attester does not verify who sent it.
 - **`/nonce` is unauthenticated too.** It hands out a freshly generated
   challenge to any caller. It commits the Verifier to nothing — the identity
-  checks happen at `/appraise`, where the RP has to prove possession of a
-  certified key.
+  checks happen at `/appraise`, where the RP has to produce a signature
+  under a key that appears in the trust anchor.
 - **The Trust Manager authenticates nobody**, and carries no endorsement
   content — it is plain ID → endpoint resolution.
-- **The Attester's EK certificate is validated exactly once**, by the RP at
-  `/certify_ak_of_attester` time. It is never re-checked per attestation
-  cycle, and never reaches a Verifier at all.
+- **There is no EK, and no certification step, anywhere in this system.**
+  A signing key is trusted the instant it appears in `keys/trusted_keys.txt`
+  — see "trust anchor" in the vocabulary table up top, and
+  `charra_trusted_keys.h`.
 
 ---
 
@@ -686,7 +431,7 @@ borrowed from the marshaled buffer on unmarshal), fixed = fixed-size array.
 | Dir | DTO | Fields in order |
 |---|---|---|
 | → | `msg_attestation_request_dto` | `hello` (bool), `sig_key_id`, `nonce`, `pcr_selections[]` (each `{tcg_hash_alg_id, pcrs[]}`), `event_log_path` |
-| ← | `msg_attestation_response_dto` | `attestation_data`, `tpm2_signature`, `tpm2_public_key`, `event_log`→, `ak_certificate_attester_by_verifier`→, `ak_certificate_attester_by_rp`→ |
+| ← | `msg_attestation_response_dto` | `attestation_data`, `tpm2_signature`, `tpm2_public_key`, `event_log`→ |
 
 ### `/attest_result` — RP → Attester (advisory)
 
@@ -707,62 +452,21 @@ No response body is consumed. The Attester logs and returns.
 
 | Dir | DTO | Fields in order |
 |---|---|---|
-| → | `msg_rp_evidence_dto` | 1 `pcr_r` (32 B) · 2 `verifier_nonce` · 3 `rp_signature` · 4 `rp_public_key` · 5 `ak_certificate_rp`→ · 6 `attester_nonce` · 7 `attestation_data` · 8 `tpm2_signature` · 9 `tpm2_public_key` · 10 `ak_certificate_attester_by_verifier`→ · 11 `ak_certificate_attester_by_rp`→ · 12 `log_r`→ · 13 `tee_file_hash` (32 B) · 14 `tee_report_data` (32 B) · 15 `tee_signature` · 16 `tee_public_key` |
+| → | `msg_rp_evidence_dto` | 1 `rp_attestation_data` · 2 `rp_signature` · 3 `rp_public_key` (`TPM2B_PUBLIC`) · 4 `attester_nonce` · 5 `attestation_data` · 6 `tpm2_signature` · 7 `tpm2_public_key` · 8 `log_r`→ · 9 `tee_file_hash` (32 B) · 10 `tee_report_data` (32 B) · 11 `tee_signature` · 12 `tee_public_key` |
 | ← | **Plain text** | `"Attestation successful!"` or `"Attestation failed!    "`, always `2.05` |
 
-Fields 1–4 are `Quote_r`; 5 is Step 3a item 1's input; 6 is unused (see §1.2);
-7–9 are `Quote_a` forwarded verbatim; 10 is Step 3b item 1's input; 11 is
-forwarded but not checked by the Verifier; 12 is never inspected here (it is
-Step 2a's job, already done, against the raw log) but IS covered by 13–16;
-13–16 are the simulated TEE Attestation Document (see `TEE.h`) — Step 3a item
-4's input, checked against field 12 (`log_r`) and against `attest_struct`'s
-`pcrDigest` inside field 7 (`attestation_data`).
+Fields 1–3 are `Quote_r` -- a genuine `TPM2_Quote`, so `verifier_nonce` and
+`PCR_r` live *inside* field 1 (`extraData`, `pcrDigest`) rather than
+travelling as fields of their own; 3 is Step 3a item 1's input. 4 is unused
+(see §1.2); 5–7 are `Quote_a` forwarded verbatim, and 7 is Step 3b item 1's
+input; 8 is checked only against field 1's `pcrDigest` (Step 3a item 4), not
+inspected for content -- that is Step 2a's job, already done, against the
+raw log. 9–12 are the simulated TEE Attestation Document (see `TEE.h`) --
+Step 3a item 5's input, checked against field 8 (`log_r`) and against
+`attest_struct`'s `pcrDigest` inside field 5 (`attestation_data`).
 
-### `/certify_ak` — requester ↔ Verifier
-
-One DTO pair for both legs; `kind` selects which fields are meaningful.
-
-| Dir | DTO | Fields in order |
-|---|---|---|
-| → | `msg_certify_ak_request_dto` | `kind`, `subject`, `ek_certificate`→, `ak_public_key`, `ak_name`, `secret` (32 B) |
-| ← | `msg_certify_ak_response_dto` | `credential_blob`, `wrapped_secret`, `ak_certificate`→ |
-
-| `kind` | Request carries | Response carries |
-|---|---|---|
-| `CHALLENGE` (0) | `subject`, `ek_certificate`, `ak_public_key`, `ak_name` | `credential_blob`, `wrapped_secret` |
-| `CONFIRM` (1) | `ek_certificate`, `secret` | `ak_certificate` |
-
-`subject`: `RP` (0) or `ATTESTER` (1) — chooses the ledger. Bound at CHALLENGE
-time, so CONFIRM's routing cannot be redirected. `ak_public_key`/`ak_name` are
-deliberately absent from CONFIRM.
-
-### `/certify_ak_of_attester` — RP ↔ Attester
-
-| Dir | DTO | Fields in order |
-|---|---|---|
-| → | `msg_certify_ak_of_attester_request_dto` | `kind`, `credential_blob`, `wrapped_secret`, `aes_gcm_nonce` (12 B), `aes_gcm_tag` (16 B), `ak_certificate`→ |
-| ← (FETCH) | `msg_ak_identity_response_dto` | `ek_certificate`→, `ak_public_key`, `ak_name` |
-| ← (ACTIVATE) | `msg_activate_credential_response_dto` | `secret` (32 B) |
-
-| `kind` | Request carries | Response |
-|---|---|---|
-| `FETCH` (0) | `kind` only | `msg_ak_identity_response_dto` |
-| `DELIVER_RP` (1) | `credential_blob`, `wrapped_secret`, `aes_gcm_nonce`, `aes_gcm_tag`, `ak_certificate` **(ciphertext)** | status only |
-| `DELIVER_VERIFIER` (2) | `ak_certificate` **(plaintext)** | status only |
-| `ACTIVATE` (3) | `credential_blob`, `wrapped_secret` | `msg_activate_credential_response_dto` |
-
-### Where each certificate and key actually travels
-
-| Artifact | `/attest` | `/appraise` | `/certify_ak` | `/certify_ak_of_attester` |
-|---|---|---|---|---|
-| Attester **EK** cert | — | — | ✔ both legs (relayed by RP) | ✔ FETCH response |
-| Attester **AK** cert, RP-issued | ✔ | ✔ (forwarded, unchecked) | — | ✔ DELIVER_RP (encrypted) |
-| Attester **AK** cert, Verifier-issued | ✔ | ✔ (RP substitutes per port) | ✔ CONFIRM response | ✔ DELIVER_VERIFIER |
-| RP **EK** cert | — | — | ✔ both legs | — |
-| RP **AK** cert | — | ✔ | ✔ CONFIRM response | — |
-| RP AK **public key** (DER) | — | ✔ | — | — |
-| Attester AK public key | ✔ (`tpm2_public_key`) | ✔ (forwarded) | ✔ CHALLENGE | ✔ FETCH response |
-
-The two EK certificates never reach a Verifier's appraisal path and never
-appear in `/appraise` at all — each is validated once, at certification time,
-by whoever acts as CA for that identity.
+There is no `/certify_ak` and no `/certify_ak_of_attester` any more, and no
+certificate of any kind travels on any wire in this system. Every identity
+check anywhere (RP's Step 2a item 1, the Verifier's Step 3a item 1 and Step
+3b item 1) is the same lookup against the same file, `keys/trusted_keys.txt`
+— see `charra_trusted_keys.h`.
