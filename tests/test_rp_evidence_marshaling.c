@@ -2,7 +2,7 @@
  * @file test_rp_evidence_marshaling.c
  * @brief Standalone tests for charra_marshal_rp_evidence()/
  * charra_unmarshal_rp_evidence() -- the RP->Verifier evidence message
- * (Quote_r + log_r + Quote_a + the simulated TEE Attestation Document).
+ * (Quote_r + Quote_a + log_r).
  *
  * This is the message that actually travels on every /appraise. Every
  * fixed-size field here is memcpy'd into a fixed-size array from
@@ -63,13 +63,6 @@ static void test_round_trips(void) {
     ev.log_r = log_r;
     ev.log_r_len = sizeof(log_r);
 
-    memset(ev.tee_file_hash, 0x99, sizeof(ev.tee_file_hash));
-    memset(ev.tee_report_data, 0xAA, sizeof(ev.tee_report_data));
-    ev.tee_signature_len = sizeof(ev.tee_signature);
-    memset(ev.tee_signature, 0xBB, ev.tee_signature_len);
-    ev.tee_public_key_len = sizeof(ev.tee_public_key);
-    memset(ev.tee_public_key, 0xCC, ev.tee_public_key_len);
-
     uint32_t marshaled_len = 0;
     uint8_t* marshaled = NULL;
     CHARRA_RC rc = charra_marshal_rp_evidence(&ev, &marshaled_len, &marshaled);
@@ -113,20 +106,6 @@ static void test_round_trips(void) {
     check("log_r round-trips",
             res.log_r_len == ev.log_r_len &&
                     memcmp(res.log_r, ev.log_r, ev.log_r_len) == 0);
-    check("tee_file_hash round-trips",
-            memcmp(res.tee_file_hash, ev.tee_file_hash,
-                    sizeof(ev.tee_file_hash)) == 0);
-    check("tee_report_data round-trips",
-            memcmp(res.tee_report_data, ev.tee_report_data,
-                    sizeof(ev.tee_report_data)) == 0);
-    check("tee_signature round-trips",
-            res.tee_signature_len == ev.tee_signature_len &&
-                    memcmp(res.tee_signature, ev.tee_signature,
-                            ev.tee_signature_len) == 0);
-    check("tee_public_key round-trips",
-            res.tee_public_key_len == ev.tee_public_key_len &&
-                    memcmp(res.tee_public_key, ev.tee_public_key,
-                            ev.tee_public_key_len) == 0);
 
     free(marshaled);
 }
@@ -145,8 +124,6 @@ static void test_empty_log_r_accepted(void) {
     ev.attestation_data_len = 4;
     ev.tpm2_signature_len = 4;
     ev.tpm2_public_key_len = 4;
-    ev.tee_signature_len = 4;
-    ev.tee_public_key_len = 4;
 
     uint32_t marshaled_len = 0;
     uint8_t* marshaled = NULL;
@@ -168,14 +145,13 @@ static void test_empty_log_r_accepted(void) {
 
 /** One byte string per field, in the exact order
  * charra_marshal_rp_evidence_internal() encodes them, so any single field
- * can be made oversized while the rest stay valid. Indices 8/9
- * (tee_file_hash/tee_report_data) are exact-size fields. */
+ * can be made oversized while the rest stay valid. */
 typedef struct {
     const uint8_t* ptr;
     size_t len;
 } raw_field;
 
-#define RAW_FIELD_COUNT 12
+#define RAW_FIELD_COUNT 8
 
 static void encode_raw_evidence(const raw_field f[RAW_FIELD_COUNT],
         uint8_t** out, size_t* out_len) {
@@ -201,16 +177,12 @@ static void encode_raw_evidence(const raw_field f[RAW_FIELD_COUNT],
 }
 
 /** Fills every field with a small valid value; callers then oversize one. */
-static void fill_valid(raw_field f[RAW_FIELD_COUNT], const uint8_t* small,
-        size_t small_len, const uint8_t* exact32, size_t exact32_len) {
+static void fill_valid(
+        raw_field f[RAW_FIELD_COUNT], const uint8_t* small, size_t small_len) {
     for (int i = 0; i < RAW_FIELD_COUNT; i++) {
         f[i].ptr = small;
         f[i].len = small_len;
     }
-    f[8].ptr = exact32;
-    f[8].len = exact32_len; /* tee_file_hash -- exact size, not a cap */
-    f[9].ptr = exact32;
-    f[9].len = exact32_len; /* tee_report_data -- exact size, not a cap */
 }
 
 static void expect_rejected(const char* name, raw_field f[RAW_FIELD_COUNT]) {
@@ -231,7 +203,7 @@ static void expect_rejected(const char* name, raw_field f[RAW_FIELD_COUNT]) {
         uint8_t big[sizeof(((msg_rp_evidence_dto*)0)->field) + 1];              \
         memset(big, 0x41, sizeof(big));                                        \
         raw_field f[RAW_FIELD_COUNT];                                          \
-        fill_valid(f, small, sizeof(small), exact32, sizeof(exact32));         \
+        fill_valid(f, small, sizeof(small));                                   \
         f[idx].ptr = big;                                                      \
         f[idx].len = sizeof(big);                                              \
         expect_rejected("rejected with CHARRA_RC_MARSHALING_ERROR", f);        \
@@ -239,7 +211,6 @@ static void expect_rejected(const char* name, raw_field f[RAW_FIELD_COUNT]) {
 
 static void test_oversized_fields_rejected(void) {
     uint8_t small[4] = {0};
-    uint8_t exact32[TPM2_SHA256_DIGEST_SIZE] = {0};
 
     OVERSIZED_FIELD_TEST(0, rp_attestation_data, "rp_attestation_data");
     OVERSIZED_FIELD_TEST(1, rp_signature, "rp_signature");
@@ -248,45 +219,6 @@ static void test_oversized_fields_rejected(void) {
     OVERSIZED_FIELD_TEST(4, attestation_data, "attestation_data");
     OVERSIZED_FIELD_TEST(5, tpm2_signature, "tpm2_signature");
     OVERSIZED_FIELD_TEST(6, tpm2_public_key, "tpm2_public_key");
-    OVERSIZED_FIELD_TEST(10, tee_signature, "tee_signature");
-    OVERSIZED_FIELD_TEST(11, tee_public_key, "tee_public_key");
-}
-
-/* tee_file_hash and tee_report_data are checked for an EXACT length rather
- * than a cap -- both are SHA-256 digests, so a short one is as wrong as a
- * long one. */
-static void test_wrong_size_exact_fields_rejected(void) {
-    uint8_t small[4] = {0};
-
-    static const struct {
-        int idx;
-        const char* label;
-    } exact_fields[] = {
-            {8, "tee_file_hash"},
-            {9, "tee_report_data"},
-    };
-
-    for (size_t i = 0; i < sizeof(exact_fields) / sizeof(exact_fields[0]);
-            i++) {
-        printf("\na %s of the wrong size (short or long) is rejected\n",
-                exact_fields[i].label);
-
-        uint8_t too_long[TPM2_SHA256_DIGEST_SIZE + 1];
-        memset(too_long, 0x41, sizeof(too_long));
-        raw_field f[RAW_FIELD_COUNT];
-        uint8_t exact32[TPM2_SHA256_DIGEST_SIZE] = {0};
-        fill_valid(f, small, sizeof(small), exact32, sizeof(exact32));
-        f[exact_fields[i].idx].ptr = too_long;
-        f[exact_fields[i].idx].len = sizeof(too_long);
-        expect_rejected("oversized field rejected", f);
-
-        uint8_t too_short[TPM2_SHA256_DIGEST_SIZE - 1];
-        memset(too_short, 0x41, sizeof(too_short));
-        fill_valid(f, small, sizeof(small), exact32, sizeof(exact32));
-        f[exact_fields[i].idx].ptr = too_short;
-        f[exact_fields[i].idx].len = sizeof(too_short);
-        expect_rejected("undersized field rejected", f);
-    }
 }
 
 /* A truncated array must fail rather than leave later fields uninitialised. */
@@ -321,7 +253,6 @@ int main(void) {
     test_round_trips();
     test_empty_log_r_accepted();
     test_oversized_fields_rejected();
-    test_wrong_size_exact_fields_rejected();
     test_truncated_message_rejected();
 
     printf("\n================================================\n");

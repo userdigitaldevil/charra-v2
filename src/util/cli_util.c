@@ -25,6 +25,7 @@
 #include "io_util.h"
 #include <errno.h>
 #include <getopt.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdlib.h>
 

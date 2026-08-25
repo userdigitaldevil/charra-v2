@@ -585,20 +585,6 @@ static CHARRA_RC charra_marshal_rp_evidence_internal(
             (UsefulBufC){.ptr = rp_evidence->log_r,
                     .len = rp_evidence->log_r_len});
 
-    /* simulated TEE Attestation Document (see TEE.h) */
-    QCBOREncode_AddBytes(&ec,
-            (UsefulBufC){.ptr = rp_evidence->tee_file_hash,
-                    .len = sizeof(rp_evidence->tee_file_hash)});
-    QCBOREncode_AddBytes(&ec,
-            (UsefulBufC){.ptr = rp_evidence->tee_report_data,
-                    .len = sizeof(rp_evidence->tee_report_data)});
-    QCBOREncode_AddBytes(&ec,
-            (UsefulBufC){.ptr = rp_evidence->tee_signature,
-                    .len = rp_evidence->tee_signature_len});
-    QCBOREncode_AddBytes(&ec,
-            (UsefulBufC){.ptr = rp_evidence->tee_public_key,
-                    .len = rp_evidence->tee_public_key_len});
-
     QCBOREncode_CloseArray(&ec);
 
     return (QCBOREncode_Finish(&ec, buf_out) == QCBOR_SUCCESS)
@@ -740,42 +726,6 @@ CHARRA_RC charra_unmarshal_rp_evidence(const uint32_t marshaled_data_len,
         goto cbor_parse_error;
     res.log_r_len = item.val.string.len;
     res.log_r = (uint8_t*)item.val.string.ptr;
-
-    /* simulated TEE Attestation Document (see TEE.h) */
-    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
-        goto cbor_parse_error;
-    if (item.val.string.len != sizeof(res.tee_file_hash)) {
-        charra_log_error("CBOR parser: TEE file hash has the wrong size.");
-        goto cbor_parse_error;
-    }
-    memcpy(res.tee_file_hash, item.val.string.ptr, sizeof(res.tee_file_hash));
-
-    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
-        goto cbor_parse_error;
-    if (item.val.string.len != sizeof(res.tee_report_data)) {
-        charra_log_error("CBOR parser: TEE report data has the wrong size.");
-        goto cbor_parse_error;
-    }
-    memcpy(res.tee_report_data, item.val.string.ptr,
-            sizeof(res.tee_report_data));
-
-    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
-        goto cbor_parse_error;
-    res.tee_signature_len = item.val.string.len;
-    if (res.tee_signature_len > sizeof(res.tee_signature)) {
-        charra_log_error("CBOR parser: TEE signature exceeds maximum size.");
-        goto cbor_parse_error;
-    }
-    memcpy(res.tee_signature, item.val.string.ptr, res.tee_signature_len);
-
-    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
-        goto cbor_parse_error;
-    res.tee_public_key_len = item.val.string.len;
-    if (res.tee_public_key_len > sizeof(res.tee_public_key)) {
-        charra_log_error("CBOR parser: TEE public key exceeds maximum size.");
-        goto cbor_parse_error;
-    }
-    memcpy(res.tee_public_key, item.val.string.ptr, res.tee_public_key_len);
 
     if ((cborerr = QCBORDecode_Finish(&dc))) {
         goto cbor_parse_error;

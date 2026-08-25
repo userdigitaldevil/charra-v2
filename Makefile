@@ -130,7 +130,7 @@ SOURCES = $(shell find $(SRCDIR) -name '*.c')
 INCLUDE = -I$(INCDIR)
 
 OBJECTS =  $(addsuffix .o, $(addprefix $(OBJDIR)/common/, charra_log))
-OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log charra_synthetic_log charra_sdk charra_trusted_keys TEE))
+OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log charra_synthetic_log charra_sdk charra_trusted_keys))
 OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/util/, cbor_util charra_util coap_util crypto_util hex_util io_util tpm2_util cli_util parser_util))
 
 # Relying-Party-only modules (src/rp/). Kept out of $(OBJECTS) on purpose:
@@ -146,10 +146,10 @@ VERIFIER_OBJECTS = $(addsuffix .o, $(addprefix $(OBJDIR)/verifier/, verifier_uti
 # reason as RP_OBJECTS above.
 ATTESTER_OBJECTS = $(addsuffix .o, $(addprefix $(OBJDIR)/attester/, attester_util attester_ima_log attester_result attester_attest))
 
-TARGETS = $(addprefix $(BINDIR)/, attester verifier verifier_old relying_party trust_manager provision_trusted_keys)
+TARGETS = $(addprefix $(BINDIR)/, attester verifier verifier_old relying_party trust_manager provision_trusted_keys dump_witness)
 
 .PHONY: all attester verifier verifier_old relying_party trust_manager \
-        provision_trusted_keys \
+        provision_trusted_keys dump_witness \
         test test_event_log test_synthetic_log test_sdk \
         test_marshaling_bounds \
         test_get_verifiers_marshaling \
@@ -163,6 +163,7 @@ verifier_server: $(BINDIR)/verifier_old
 relying_party: $(BINDIR)/relying_party
 trust_manager: $(BINDIR)/trust_manager
 provision_trusted_keys: $(BINDIR)/provision_trusted_keys
+dump_witness: $(BINDIR)/dump_witness
 test_event_log: $(BINDIR)/test_event_log
 test_synthetic_log: $(BINDIR)/test_synthetic_log
 test_sdk: $(BINDIR)/test_sdk
@@ -223,6 +224,14 @@ $(BINDIR)/provision_trusted_keys: $(SRCDIR)/provision_trusted_keys.c $(OBJECTS)
 ifeq ($(enable_stripping),1)
 	strip --strip-unneeded $@
 endif
+
+# Offline dev tool for ZK_REDACTION.md Phase 0: prints every intermediate
+# the circuit has to reproduce. Opens no TPM and talks to nobody. Links
+# attester_ima_log.o alone rather than $(ATTESTER_OBJECTS) -- it is the only
+# attester module needed here, and it is self-contained.
+$(BINDIR)/dump_witness: $(SRCDIR)/dump_witness.c $(OBJECTS) $(OBJDIR)/attester/attester_ima_log.o
+	@mkdir -p $(@D)
+	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
 ## --- tests -------------------------------------------------------------------
 

@@ -28,6 +28,61 @@
 
 #define LOG_NAME "relying party"
 
+/* /attest_result carries no payload to parse -- this handler only needs to
+ * know the round trip completed. A file-local flag, not a shared global:
+ * this exchange is the only user of it. */
+static bool processing_attestation_result_response = false;
+
+static coap_response_t coap_attestation_result_response_handler(
+        coap_session_t* session CHARRA_UNUSED,
+        const coap_pdu_t* sent CHARRA_UNUSED,
+        const coap_pdu_t* received CHARRA_UNUSED,
+        const coap_mid_t mid CHARRA_UNUSED) {
+    processing_attestation_result_response = false;
+    return COAP_RESPONSE_OK;
+}
+
+void rp_send_attestation_result(bool accepted, const char* reason) {
+    msg_attestation_result_dto res = {0};
+    res.accepted = accepted ? 1 : 0;
+    if (reason != NULL) {
+        size_t len = strlen(reason);
+        if (len > sizeof(res.reason)) {
+            len = sizeof(res.reason);
+        }
+        res.reason_len = (uint32_t)len;
+        memcpy(res.reason, reason, len);
+    }
+
+    uint8_t* buf = NULL;
+    uint32_t buf_len = 0;
+    if (charra_marshal_attestation_result(&res, &buf_len, &buf) !=
+            CHARRA_RC_SUCCESS) {
+        charra_log_error(
+                "[" LOG_NAME "] Could not marshal /attest_result verdict.");
+        return;
+    }
+
+    if (rp_coap_exchange(&(rp_coap_request){
+                .host = attester_host, .port = attester_port,
+                .uri_path = "attest_result",
+                .body = buf, .body_len = buf_len,
+                .on_response = coap_attestation_result_response_handler,
+                .response_pending = &processing_attestation_result_response,
+                .timeout_seconds = attester_response_timeout,
+                .dtls_rpk_peer_public_key_path =
+                        dtls_rpk_attester_public_key_path,
+        }) != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not deliver /attest_result "
+                         "verdict to the Attester (non-fatal).");
+    } else {
+        charra_log_info("[" LOG_NAME "] Sent Step 2a verdict (%s) to the "
+                        "Attester.",
+                accepted ? "accepted" : "REJECTED");
+    }
+    free(buf);
+}
+
 static CHARRA_RC create_attestation_request(msg_attestation_request_dto* attestation_request) {
     CHARRA_RC err = CHARRA_RC_ERROR;
     
@@ -533,10 +588,9 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
      * counts as a pass only if it appraised the evidence and accepted it.
      * Everything else is a NO: any failed check (Step 3a's RP signing key,
      * Quote_r, RP nonce, log_r-vs-PCR; Step 3b's Attester signing key,
-     * Quote_a, Attester nonce; the TEE Attestation Document), a rejection
-     * we could not recover from, an unreachable Verifier, or evidence we
-     * never managed to send. Not completing the exchange is never a reason
-     * to accept. */
+     * Quote_a, Attester nonce), a rejection we could not recover from, an
+     * unreachable Verifier, or evidence we never managed to send. Not
+     * completing the exchange is never a reason to accept. */
     int num_true = 0;
     for (int i = 0; i < num_verifiers; ++i) {
         if (attestation_results[i]) {

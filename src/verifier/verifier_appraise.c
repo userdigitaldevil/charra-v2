@@ -29,67 +29,6 @@
 
 #define LOG_NAME "verifier"
 
-/** Source files this Verifier expects the RP's appraisal-and-redaction to
- * run -- its own reference measurement, known independently rather than
- * asked of the RP or of any TEE code: exactly as a real relying party holds
- * its own copy of an expected enclave measurement, not one fetched from the
- * device it is checking. Must name the same files RP's rp_evidence.c passes
- * to its TEE (see rp_appraisal_code_files there); keep the two in sync by
- * hand if either ever changes -- there is deliberately no shared symbol
- * between them, since the Verifier does not call into RP's TEE code at
- * all. */
-static const char* const expected_appraisal_code_files[] = {
-        "src/rp/rp_evidence.c",
-        "src/core/charra_sdk.c",
-        "src/core/charra_event_log.c",
-};
-
-/**
- * @brief Independently hashes expected_appraisal_code_files together, in
- * list order -- the same construction TEE.c's tee_hash_files() uses, but
- * run here, by the Verifier itself against its own copy of the source, and
- * never by calling into RP's TEE code.
- */
-static CHARRA_RC verifier_hash_expected_appraisal_code(
-        uint8_t hash_out[TPM2_SHA256_DIGEST_SIZE]) {
-    uint8_t* combined = NULL;
-    size_t combined_len = 0;
-    CHARRA_RC result = CHARRA_RC_SUCCESS;
-
-    for (size_t i = 0; i < sizeof(expected_appraisal_code_files) /
-                                sizeof(expected_appraisal_code_files[0]);
-            i++) {
-        char* content = NULL;
-        size_t content_len = 0;
-        if (charra_io_read_file(expected_appraisal_code_files[i], &content,
-                    &content_len) != CHARRA_RC_SUCCESS) {
-            charra_log_error(
-                    "[" LOG_NAME "] Could not read expected appraisal file "
-                    "'%s'.",
-                    expected_appraisal_code_files[i]);
-            result = CHARRA_RC_ERROR;
-            break;
-        }
-
-        uint8_t* grown = realloc(combined, combined_len + content_len);
-        if (grown == NULL) {
-            charra_io_free_file_buffer(&content);
-            result = CHARRA_RC_ERROR;
-            break;
-        }
-        combined = grown;
-        memcpy(combined + combined_len, content, content_len);
-        combined_len += content_len;
-        charra_io_free_file_buffer(&content);
-    }
-
-    if (result == CHARRA_RC_SUCCESS) {
-        result = hash_sha256(combined_len, combined, hash_out);
-    }
-    free(combined);
-    return result;
-}
-
 void coap_appraise_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
                                 const struct coap_pdu_t* request,
@@ -209,24 +148,6 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         early_fail_reason = "malformed request: RP public key length unusable";
         goto cleanup;
     }
-    /* TEE Attestation Document's fields (see TEE.h) -- same style as
-     * Quote_r's above. */
-    if (res.tee_signature_len != CHARRA_RSA_SIGNATURE_LEN) {
-        charra_log_error(
-                "[" LOG_NAME "] TEE signature is not exactly the expected "
-                "RSA-2048 signature size.");
-        early_fail_reason = "malformed request: TEE signature is not the "
-                            "expected RSA-2048 size";
-        goto cleanup;
-    }
-    if (res.tee_public_key_len == 0 ||
-            res.tee_public_key_len > sizeof(res.tee_public_key)) {
-        charra_log_error("[" LOG_NAME "] TEE public key has an unusable "
-                         "length.");
-        early_fail_reason = "malformed request: TEE public key length unusable";
-        goto cleanup;
-    }
-
     /* --- verify TPM Quote --- */
     charra_log_info("[" LOG_NAME "] Starting verification.");
 
@@ -457,11 +378,6 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     const char* ekak_att_why = "not verified";
     bool attestation_result_signature = false;
     bool attestation_result_nonce = false;
-    bool attestation_result_tee = false;
-    /* Why the TEE Attestation Document check failed, for the reason list at
-     * the verdict. */
-    const char* tee_why = "not verified";
-
     /* Step 3b runs whatever Step 3a decided. Its checks read only fields of
      * the received evidence (the Attester's public key, Quote_a, and the
      * nonce), so nothing here depends on RP's identity having verified --
@@ -589,142 +505,13 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                     expected_attester_nonce_len, expected_nonce_hex,
                     attest_struct.extraData.size, received_nonce_hex);
         }
-
-        /* Step 3a item 5: simulated TEE Attestation Document (see TEE.h).
-         *
-         * Proves the RP's appraisal-and-redaction actually ran the code
-         * this Verifier itself expects, against exactly this evidence: the
-         * signed file_hash must match this Verifier's own hash of the
-         * appraisal/cleaning source, and the signed report_data must match
-         * hash(verifier_nonce || pcrdigest_a || log_r) recomputed here --
-         * not a log_r built from a different log_a, forwarded alongside a
-         * different Quote_r, or answering a different nonce. Placed here,
-         * after Quote_a's own nonce check above, because it needs
-         * attest_struct's pcrdigest_a, which that check already
-         * unmarshaled. verifier_nonce itself comes from rp_attest.extraData
-         * -- the actual nonce value Quote_r's own signature covers, not a
-         * separately-carried field (see msg_rp_evidence_dto). */
-        charra_log_info(
-                "[" LOG_NAME "] Verifying TEE Attestation Document ...");
-        mbedtls_pk_context tee_pub_key_ctx;
-        mbedtls_pk_init(&tee_pub_key_ctx);
-        bool tee_signature_ok = false;
-        if (mbedtls_pk_parse_public_key(&tee_pub_key_ctx, res.tee_public_key,
-                    res.tee_public_key_len) != 0) {
-            tee_why = "MALFORMED -- could not parse the TEE's public key";
-            charra_log_error(
-                    "[" LOG_NAME "]     => could not parse the TEE's public "
-                    "key!");
-        } else if (mbedtls_pk_get_type(&tee_pub_key_ctx) != MBEDTLS_PK_RSA) {
-            tee_why = "MALFORMED -- the TEE's public key is not RSA";
-            charra_log_error(
-                    "[" LOG_NAME "]     => the TEE's public key is not "
-                    "RSA!");
-        } else if (mbedtls_rsa_set_padding(mbedtls_pk_rsa(tee_pub_key_ctx),
-                           MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA256) != 0) {
-            tee_why =
-                    "Verifier-side error: could not select RSA-PSS padding";
-            charra_log_error(
-                    "[" LOG_NAME "]     => could not select RSA-PSS "
-                    "padding!");
-        } else {
-            uint8_t tee_signed_data[sizeof(res.tee_file_hash) +
-                    sizeof(res.tee_report_data)] = {0};
-            memcpy(tee_signed_data, res.tee_file_hash,
-                    sizeof(res.tee_file_hash));
-            memcpy(tee_signed_data + sizeof(res.tee_file_hash),
-                    res.tee_report_data, sizeof(res.tee_report_data));
-            tee_signature_ok =
-                    charra_crypto_rsa_verify_signature(
-                            mbedtls_pk_rsa(tee_pub_key_ctx), MBEDTLS_MD_SHA256,
-                            tee_signed_data, sizeof(tee_signed_data),
-                            res.tee_signature) == CHARRA_RC_SUCCESS;
-            if (!tee_signature_ok) {
-                tee_why = "MISMATCH -- not a valid signature by the "
-                          "claimed TEE key over (file_hash || report_data)";
-                charra_log_error("[" LOG_NAME "]     => TEE Attestation "
-                                 "Document signature is NOT valid!");
-            }
-        }
-        mbedtls_pk_free(&tee_pub_key_ctx);
-
-        bool tee_file_hash_ok = false;
-        if (tee_signature_ok) {
-            uint8_t expected_file_hash[TPM2_SHA256_DIGEST_SIZE] = {0};
-            tee_file_hash_ok =
-                    verifier_hash_expected_appraisal_code(
-                            expected_file_hash) == CHARRA_RC_SUCCESS &&
-                    memcmp(expected_file_hash, res.tee_file_hash,
-                            sizeof(expected_file_hash)) == 0;
-            if (!tee_file_hash_ok) {
-                tee_why = "WRONG CODE -- the attested file_hash does not "
-                          "match this Verifier's own copy of the "
-                          "appraisal/cleaning code";
-                charra_log_error(
-                        "[" LOG_NAME "]     => file_hash does NOT match "
-                        "this Verifier's own hash of the appraisal/"
-                        "cleaning code!");
-            }
-        }
-
-        bool tee_report_data_ok = false;
-        if (tee_file_hash_ok) {
-            size_t expected_input_len = (size_t)rp_attest.extraData.size +
-                    attest_struct.attested.quote.pcrDigest.size +
-                    res.log_r_len;
-            uint8_t* expected_input = malloc(expected_input_len);
-            if (expected_input == NULL) {
-                tee_why = "Verifier-side error: out of memory recomputing "
-                          "REPORT_DATA";
-                charra_log_error(
-                        "[" LOG_NAME "]     => out of memory recomputing "
-                        "REPORT_DATA!");
-            } else {
-                size_t off = 0;
-                memcpy(expected_input + off, rp_attest.extraData.buffer,
-                        rp_attest.extraData.size);
-                off += rp_attest.extraData.size;
-                memcpy(expected_input + off,
-                        attest_struct.attested.quote.pcrDigest.buffer,
-                        attest_struct.attested.quote.pcrDigest.size);
-                off += attest_struct.attested.quote.pcrDigest.size;
-                memcpy(expected_input + off, res.log_r, res.log_r_len);
-
-                uint8_t expected_report_data[TPM2_SHA256_DIGEST_SIZE] = {0};
-                tee_report_data_ok =
-                        hash_sha256(expected_input_len, expected_input,
-                                expected_report_data) == CHARRA_RC_SUCCESS &&
-                        memcmp(expected_report_data, res.tee_report_data,
-                                sizeof(expected_report_data)) == 0;
-                free(expected_input);
-                if (!tee_report_data_ok) {
-                    tee_why = "WRONG BINDING -- the attested report_data "
-                              "does not match hash(verifier_nonce || "
-                              "pcrdigest_a || log_r) for this evidence";
-                    charra_log_error(
-                            "[" LOG_NAME "]     => report_data does NOT "
-                            "match hash(verifier_nonce || pcrdigest_a || "
-                            "log_r)!");
-                }
-            }
-        }
-
-        attestation_result_tee =
-                tee_signature_ok && tee_file_hash_ok && tee_report_data_ok;
-        if (attestation_result_tee) {
-            charra_log_info(
-                    "[" LOG_NAME "]     => TEE Attestation Document is "
-                    "valid: correct code, correctly bound to this "
-                    "evidence!");
-        }
     }
 
     /* --- output result --- */
     /* Order matches Step 3a then Step 3b, RP's evidence before Attester's. */
     bool attestation_result = step_3a_passed && attestation_result_ekak &&
                               attestation_result_signature &&
-                              attestation_result_nonce &&
-                              attestation_result_tee;
+                              attestation_result_nonce;
 
     /* Every reason this vote is a NO, in one place. Logged HERE ONLY -- the
      * RP is told the verdict, not the analysis. It cannot act on most of
@@ -766,10 +553,6 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         if (!attestation_result_nonce) {
             LOG_REASON("Attester nonce (Step 3b item 3): WRONG -- Quote_a is "
                        "not bound to the expected nonce");
-        }
-        if (!attestation_result_tee) {
-            LOG_REASON("TEE Attestation Document (Step 3a item 5): %s",
-                    tee_why);
         }
 #undef LOG_REASON
     }

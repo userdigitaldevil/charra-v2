@@ -15,7 +15,7 @@ design is shaped this way).
 | Party | Binary | Role in data flow |
 |---|---|---|
 | **Attester** | `bin/attester` | Produces `Quote_a` + raw IMA log (`log_a`). Pure responder |
-| **RP** | `bin/relying_party` | The only party that initiates anything. Appraises `log_a`, redacts it to `log_r`, produces `Quote_r`, and vouches for its own appraisal/cleaning code via a simulated TEE |
+| **RP** | `bin/relying_party` | The only party that initiates anything. Appraises `log_a`, redacts it to `log_r`, produces `Quote_r` |
 | **Verifier** ×N | `bin/verifier` | Appraises what RP forwards. Pure responder |
 | **Trust Manager** | `bin/trust_manager` | ID → `ip:port` lookup. Pure responder |
 
@@ -74,9 +74,8 @@ ever examined. RP also sends its verdict back to the Attester
 Freshness has to be proven to the Verifier with a value the Verifier picked.
 
 ⑤ **Submit.** Each thread has its TPM produce a genuine `Quote_r` over the
-already-replayed PCR, under that Verifier's own nonce as `extraData`, signs
-a simulated-TEE Attestation Document vouching for the code that did the
-appraisal and cleaning, and FETCHes `/appraise`. The Verifier runs Steps
+already-replayed PCR, under that Verifier's own nonce as `extraData`, and
+FETCHes `/appraise`. The Verifier runs Steps
 3a/3b and answers `2.05` with `Attestation successful!` or
 `Attestation failed!` — a **vote, not a work order**. No reason codes travel;
 the reasons stay in the Verifier's own log.
@@ -206,9 +205,10 @@ arrive at.
 > — not by policy but arithmetically. `PCR_r` living in a genuine TPM
 > PCR (rather than being asserted in software, as it was before this
 > change) closes one gap, but the guarantee remains "the RP vouches for
-> this redaction", anchored by RP's own TPM plus the simulated TEE
-> Attestation Document that names the exact code that produced it (Step
-> 3a item 5, below).
+> this redaction", anchored by RP's own TPM. **Nothing currently proves to
+> the Verifier that `log_r`'s cleaned paths correspond to the paths the
+> Attester actually measured** — closing that is what ZK_REDACTION.md is
+> for.
 
 ### Phase ④/⑤ — per-Verifier threads
 
@@ -228,9 +228,7 @@ Each `get_attestation_results_thread()`:
    `rp_signing_key.h`) has RP's TPM produce a genuine `TPM2_Quote` over the
    PCR the earlier replay left `PCR_r` in, with this Verifier's nonce as
    `qualifyingData` — a short-lived TPM session held under `rp_tpm_mutex`,
-   deriving the signing key fresh and never caching it. Then RP's TEE signs
-   an Attestation Document over `(file_hash, report_data)`, where
-   `report_data = hash(verifier_nonce ‖ pcrdigest_a ‖ log_r)`.
+   deriving the signing key fresh and never caching it.
 5. FETCH `/appraise`.
 
 ```
@@ -238,9 +236,7 @@ RP → Verifier  msg_rp_evidence_dto {
    rp_attestation_data, rp_signature, rp_public_key,     ← Quote_r (real TPM2_Quote)
    attester_nonce,
    attestation_data, tpm2_signature, tpm2_public_key,    ← Quote_a fwd (Step 3b-2/1)
-   log_r,                                                ← NO content check
-   tee_file_hash, tee_report_data,
-   tee_signature, tee_public_key }                       ← simulated TEE Attestation Document
+   log_r }                                               ← replay-checked only
 ```
 
 Neither `verifier_nonce` nor `PCR_r` travels as its own field any more --
@@ -262,7 +258,6 @@ same way by every Verifier, against the one shared trust anchor.
 | 2 | `rp_signature` over `rp_attestation_data` -- mbedTLS RSA-PSS, no TPM opened | |
 | 3 | `rp_attestation_data`'s `extraData == verifier_challenge_nonce` -- plain byte compare, after unmarshaling the TPMS_ATTEST | |
 | 4 | replaying `log_r` (software, `charra_replay_ima_log()`) reproduces `rp_attestation_data`'s `pcrDigest` -- this is what ties `Quote_r` to `log_r` at all | |
-| 5 | simulated TEE Attestation Document (see `TEE.h`): `tee_signature` valid under `tee_public_key`, `tee_file_hash` matches this Verifier's own hash of the appraisal/cleaning source, `tee_report_data == hash(verifier_nonce ‖ pcrdigest_a ‖ log_r)` | `tee_why` |
 
 **Step 3b — original evidence (`Evidence_a'`)**
 
@@ -275,20 +270,16 @@ same way by every Verifier, against the one shared trust anchor.
 Step 3b runs **even when 3a failed** — its checks read only received fields,
 so nothing depends on RP's identity having verified. Running it always means
 one appraisal reports every problem instead of leaking them one round trip at
-a time. The verdict is still fail-closed: all eight booleans ANDed (4 from
-Step 3a's own gate, `attestation_result_ekak`, `attestation_result_signature`,
-`attestation_result_nonce` from Step 3b, and `attestation_result_tee`).
-Step 3a item 5 is computed inside the Step 3b code block, since it needs
-`Quote_a`'s unmarshaled `pcrDigest` — Step 3b's own item 3 already unmarshals
-it — but it is still ANDed into the final verdict regardless of which step
-number it is filed under.
+a time. The verdict is still fail-closed: all seven booleans ANDed (4 from
+Step 3a's own gate, plus `attestation_result_ekak`,
+`attestation_result_signature` and `attestation_result_nonce` from Step 3b).
 
-`log_r` gets **no replay/hash/policy inspection** beyond item 4 above (which
-only checks it against `Quote_r`'s own `pcrDigest`, not against a policy).
-The self-consistency, whitelist/blacklist checks are Step 2a's job, already
-done by the RP against the raw log — the TEE Attestation Document (item 5)
-is what lets the Verifier trust that Step 2a actually ran, and ran the real
-code, rather than trusting the RP's word for it.
+`log_r` gets **no policy inspection** beyond Step 3a item 4 (which only
+checks it against `Quote_r`'s own `pcrDigest`). The self-consistency and
+whitelist/blacklist checks are Step 2a's job, already done by the RP against
+the raw log — and the Verifier currently has to take the RP's word that they
+ran. See `ZK_REDACTION.md` for the work that replaces that trust with a
+proof.
 
 > **`attester_nonce` is sent but never read.** The evidence message carries
 > `attester_nonce`, documented in `charra_dto.h` as letting the Verifier
@@ -452,7 +443,7 @@ No response body is consumed. The Attester logs and returns.
 
 | Dir | DTO | Fields in order |
 |---|---|---|
-| → | `msg_rp_evidence_dto` | 1 `rp_attestation_data` · 2 `rp_signature` · 3 `rp_public_key` (`TPM2B_PUBLIC`) · 4 `attester_nonce` · 5 `attestation_data` · 6 `tpm2_signature` · 7 `tpm2_public_key` · 8 `log_r`→ · 9 `tee_file_hash` (32 B) · 10 `tee_report_data` (32 B) · 11 `tee_signature` · 12 `tee_public_key` |
+| → | `msg_rp_evidence_dto` | 1 `rp_attestation_data` · 2 `rp_signature` · 3 `rp_public_key` (`TPM2B_PUBLIC`) · 4 `attester_nonce` · 5 `attestation_data` · 6 `tpm2_signature` · 7 `tpm2_public_key` · 8 `log_r`→ |
 | ← | **Plain text** | `"Attestation successful!"` or `"Attestation failed!    "`, always `2.05` |
 
 Fields 1–3 are `Quote_r` -- a genuine `TPM2_Quote`, so `verifier_nonce` and
@@ -461,9 +452,9 @@ travelling as fields of their own; 3 is Step 3a item 1's input. 4 is unused
 (see §1.2); 5–7 are `Quote_a` forwarded verbatim, and 7 is Step 3b item 1's
 input; 8 is checked only against field 1's `pcrDigest` (Step 3a item 4), not
 inspected for content -- that is Step 2a's job, already done, against the
-raw log. 9–12 are the simulated TEE Attestation Document (see `TEE.h`) --
-Step 3a item 5's input, checked against field 8 (`log_r`) and against
-`attest_struct`'s `pcrDigest` inside field 5 (`attestation_data`).
+raw log. A ninth field carrying a zero-knowledge proof that field 8's
+cleaned paths commit to the paths behind field 5's `pcrDigest` is the work
+described in `ZK_REDACTION.md`.
 
 There is no `/certify_ak` and no `/certify_ak_of_attester` any more, and no
 certificate of any kind travels on any wire in this system. Every identity

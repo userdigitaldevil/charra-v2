@@ -2605,3 +2605,26 @@ comment updated to say so instead of the RP identity it used to serve).
 `verifier_old.c` -- the legacy upstream single-binary demo -- was never
 touched and still builds against everything this removed, since it never
 depended on any of it in the first place.
+
+### Simulated TEE removed; zero-knowledge redaction proof to replace it
+
+Reversed on the `zk-redaction` branch. The TEE mechanism described in the
+previous entry proved nothing an RP could not forge: it hashed its own
+source files and signed the result with a key it generated itself, with no
+isolation between the two. It documented an intent rather than enforcing
+one.
+
+Replacing it: an actual zero-knowledge proof that every cleaned path in
+`log_r` is `Poseidon(real_path, salt)` for a real path whose `ima-ng`
+template digest replays to the Attester's TPM-signed `pcrdigest_a` -- no
+trust in the RP's code or hardware. Design, the frozen byte-level
+specification the circuit must reproduce, cost analysis, and the phase plan
+live in **`ZK_REDACTION.md`**; that document is authoritative for this work
+and this entry will not be kept in step with it.
+
+Note for anyone bisecting: this commit changes the `/appraise` wire format
+(`msg_rp_evidence_dto` drops its four `tee_*` fields, 12 positional CBOR
+fields to 8) and takes the Verifier's fail-closed verdict from eight ANDed
+booleans to seven. Between this commit and the one that lands the proof,
+nothing checks that `log_r`'s cleaned paths relate to what the Attester
+measured -- deliberately, and temporarily.

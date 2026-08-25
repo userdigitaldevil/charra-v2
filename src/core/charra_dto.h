@@ -166,22 +166,11 @@ typedef struct {
     uint32_t log_r_len;
     uint8_t* log_r;
 
-    /* --- simulated TEE Attestation Document (see TEE.h) ---
-     * Proves the RP's appraisal-and-redaction ran the expected code
-     * (tee_file_hash) against this exact (verifier_nonce, pcrdigest_a,
-     * log_r) triple (tee_report_data = hash of those three, in that order),
-     * signed under the TEE's own key -- forwarded below, same convention as
-     * rp_public_key above, since the Verifier has no other way to learn
-     * it. Neither verifier_nonce nor pcrdigest_a is repeated here as its
-     * own field: the former is rp_attestation_data's extraData, the
-     * latter is attestation_data's attested.quote.pcrDigest -- both
-     * already present above. */
-    uint8_t tee_file_hash[TPM2_SHA256_DIGEST_SIZE];
-    uint8_t tee_report_data[TPM2_SHA256_DIGEST_SIZE];
-    uint32_t tee_signature_len;
-    uint8_t tee_signature[CHARRA_RSA_SIGNATURE_LEN];
-    uint32_t tee_public_key_len;
-    uint8_t tee_public_key[CHARRA_RSA_PUB_KEY_DER_MAX];
+    /* A zero-knowledge proof that log_r's cleaned paths are commitments to
+     * the very paths whose measurements produced the Attester's TPM-signed
+     * pcrDigest goes here -- see ZK_REDACTION.md. Not implemented yet; the
+     * simulated-TEE fields this replaces were removed in the same commit
+     * that added that document. */
 } msg_rp_evidence_dto;
 
 /**

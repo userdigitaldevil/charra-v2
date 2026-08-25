@@ -98,53 +98,21 @@ bool charra_crypto_verify_quote_signature_mbedtls(
         uint32_t attestation_data_len, TPMT_SIGNATURE* signature,
         bool* out_valid);
 
-/* --- software RSA keypair (no TPM involved) ------------------------------
+/* --- AK RSA parameters ---------------------------------------------------
  *
- * Used by the simulated TEE (src/core/TEE.h) to sign its Attestation
- * Document. This is an ordinary software key, generated once per process
- * and held only in TEE.c's own memory -- not a TPM-resident AK, and
- * deliberately so: the point of this key is to prove the same TEE produced
- * a given (file_hash, report_data) pair, not to carry a hardware-rooted
- * identity of its own (that identity role belongs to AK_r, RP's real
- * TPM-resident signing key -- see rp_signing_key.h).
+ * Both signing keys in this system (the Attester's restricted quoting key
+ * and AK_r) are TPM-resident RSA-2048 primaries derived on demand -- see
+ * rp_signing_key.h. These constants only fix their size, which the wire
+ * DTOs need in order to declare fixed-width signature fields.
+ *
+ * The software keypair helpers that used to live here were deleted with
+ * the simulated TEE, their only caller -- see ZK_REDACTION.md.
  */
 
-/** Size of the TEE's RSA key. */
+/** Size of the TPM-resident AKs' RSA keys. */
 #define CHARRA_RSA_KEY_BITS 2048
 /** Bytes an RSA-2048 signature occupies. */
 #define CHARRA_RSA_SIGNATURE_LEN (CHARRA_RSA_KEY_BITS / 8)
-/** Generous upper bound on the DER encoding of an RSA-2048 public key. */
-#define CHARRA_RSA_PUB_KEY_DER_MAX 512
-
-/**
- * @brief Generate a fresh RSA keypair configured for RSA-PSS/SHA-256.
- *
- * @param[out] key an uninitialized context; on success it is initialized and
- * holds the new keypair. Caller must mbedtls_pk_free() it.
- */
-CHARRA_RC charra_crypto_rsa_generate_keypair(mbedtls_pk_context* key);
-
-/**
- * @brief DER-encode a keypair's public half.
- *
- * @param[out] der_out buffer of at least CHARRA_RSA_PUB_KEY_DER_MAX bytes
- * @param[out] der_len_out bytes written into der_out
- */
-CHARRA_RC charra_crypto_rsa_public_key_to_der(mbedtls_pk_context* key,
-        uint8_t* der_out, size_t der_out_size, uint32_t* der_len_out);
-
-/**
- * @brief Sign data with RSA-PSS over SHA-256.
- *
- * Matches what charra_crypto_rsa_verify_signature() expects, so a verifier
- * can check it with the existing helper once it has parsed the public key.
- *
- * @param[out] signature_out buffer of at least CHARRA_RSA_SIGNATURE_LEN
- * bytes
- */
-CHARRA_RC charra_crypto_rsa_sign(mbedtls_pk_context* key,
-        const unsigned char* data, size_t data_len,
-        unsigned char* signature_out);
 
 /**
  * @brief Compute PCR composite digest from PCR values and check if it matches
