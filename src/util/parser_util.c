@@ -18,6 +18,7 @@
  * BSD-3-Clause).
  */
 
+#include <ctype.h>
 #include <errno.h>
 
 #include "../common/charra_error.h"
@@ -73,11 +74,31 @@ char* find_end_of_line(char* start, char* end) {
 }
 
 int parse_pcr_index(char* index_start) {
+    if (index_start == NULL) {
+        return -1;
+    }
+
+    /* strtoul() accepts a leading '-' and returns the negated value
+     * wrapped into unsigned, which can land back INSIDE the valid range:
+     * "-4294967286" came out as PCR 10. Rejected here rather than after
+     * the fact, because once wrapped it is indistinguishable from a
+     * genuine index. */
+    const char* scan = index_start;
+    while (isspace((unsigned char)*scan)) {
+        scan++;
+    }
+    if (*scan == '-') {
+        return -1;
+    }
+
     errno = 0;
     char* end = NULL;
-    int pcr_index = strtoul(index_start, &end, 10);  // parse digits as index
+    /* Parsed as unsigned long and range-checked before narrowing: storing
+     * strtoul()'s result straight into an int is implementation-defined
+     * once it exceeds INT_MAX. */
+    unsigned long pcr_index = strtoul(index_start, &end, 10);
     if (end == index_start || errno != 0 || pcr_index >= TPM2_MAX_PCRS) {
         return -1;
     }
-    return pcr_index;
+    return (int)pcr_index;
 }

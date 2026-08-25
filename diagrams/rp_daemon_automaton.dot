@@ -34,7 +34,7 @@ Read the vocabulary table first — several words below are narrower than they l
       <TD ALIGN="LEFT">TPM2_Quote taken by the <B>Attester</B> over PCRs {0..7, 10} with its RESTRICTED key /<BR ALIGN="LEFT"/>by the <B>RP</B> over PCR 23 with its unrestricted key. Both are built AND signed inside a TPM.</TD></TR>
 
   <TR><TD ALIGN="LEFT" BGCOLOR="#fff7ed"><B>verdict</B></TD>
-      <TD ALIGN="LEFT">A Verifier's vote, <B>ECDSA-signed</B> with <FONT FACE="Courier">keys/verifier.der</FONT> and bound to the round: it carries<BR ALIGN="LEFT"/>the Verifier's own nonce and a SHA-256 of the evidence appraised. The RP counts it only if<BR ALIGN="LEFT"/>all three check out. <B>Fail-closed</B> — an unverifiable YES is a NO. All Verifiers share one<BR ALIGN="LEFT"/>keypair today, so a signature says &quot;some Verifier&quot;; the <B>nonce</B> keeps votes in their own slots.</TD></TR>
+      <TD ALIGN="LEFT">A Verifier's vote, <B>ECDSA-signed</B> with <FONT FACE="Courier">keys/verifier.der</FONT> and bound to the round: it carries<BR ALIGN="LEFT"/>the Verifier's own nonce, a SHA-256 of the evidence appraised, and a timestamp. The RP<BR ALIGN="LEFT"/>counts it only if <B>all four</B> check out — signature, nonce, digest, clock skew.<BR ALIGN="LEFT"/><B>Fail-closed</B> — an unverifiable YES is a NO. All Verifiers share one keypair today, so a<BR ALIGN="LEFT"/>signature says &quot;some Verifier&quot;; the <B>nonce</B> keeps votes in their own slots.</TD></TR>
 
   <TR><TD ALIGN="LEFT" BGCOLOR="#f0fdfa"><B>replay</B></TD>
       <TD ALIGN="LEFT">Re-applying a log's digests from zero to rebuild a PCR value. <B>Where it runs is the whole<BR ALIGN="LEFT"/>design:</B> in a <B>TPM</B> when you are <B>proving</B> a value, in <B>software</B> when you are <B>checking</B> one.<BR ALIGN="LEFT"/>So the RP replays log_a in software (step 3) but log_r in its TPM (step 5); the Verifier<BR ALIGN="LEFT"/>replays log_r in software. Identical arithmetic — only the proof differs.</TD></TR>
@@ -65,7 +65,7 @@ Read the vocabulary table first — several words below are narrower than they l
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">RP_DURATION</FONT></TD><TD ALIGN="LEFT"><B>--duration</B></TD><TD ALIGN="RIGHT"><B>0</B></TD>
       <TD ALIGN="LEFT">Stop after roughly N seconds. 0 = run until SIGINT.</TD></TR>
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">RP_VERIFIER_TIMEOUT</FONT></TD><TD ALIGN="LEFT"><B>--verifier-timeout</B></TD><TD ALIGN="RIGHT"><B>6s</B></TD>
-      <TD ALIGN="LEFT">Wait per Verifier round trip. A timeout counts as a <B>NO</B> vote, exactly like a rejection.</TD></TR>
+      <TD ALIGN="LEFT">Wait per round trip to a <B>Verifier</B> — /nonce, /qualify, /qualify_submit, /appraise. A timeout<BR ALIGN="LEFT"/>counts as a <B>NO</B> vote, exactly like a rejection. Does <B>not</B> cover step 1: the Trust Manager<BR ALIGN="LEFT"/>exchange has its own fixed 30s and no flag.</TD></TR>
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">RP_ATTESTER_TIMEOUT</FONT></TD><TD ALIGN="LEFT"><B>--attester-timeout</B></TD><TD ALIGN="RIGHT"><B>6s</B></TD>
       <TD ALIGN="LEFT">Wait for the Attester's evidence (step 2). Exceeding it abandons the attestation cycle.</TD></TR>
   <TR><TD ALIGN="LEFT" BGCOLOR="#fff7ed"><FONT FACE="Courier">VERIFIER_QUALIFICATION_VALIDITY</FONT></TD><TD ALIGN="LEFT" BGCOLOR="#fff7ed"><B>--qualification-validity</B></TD><TD ALIGN="RIGHT" BGCOLOR="#fff7ed"><B>180s</B></TD>
@@ -74,6 +74,8 @@ Read the vocabulary table first — several words below are narrower than they l
       <TD ALIGN="LEFT" BGCOLOR="#f0fdfa">One simulator per role (Phase 0). <B>0</B> falls back to a single shared TPM, where both AKs<BR ALIGN="LEFT"/>come from one seed.</TD></TR>
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">ATTESTER_TPM_PORT</FONT> / <FONT FACE="Courier">RP_TPM_PORT</FONT></TD><TD ALIGN="LEFT">—</TD><TD ALIGN="RIGHT"><B>2321 / 2325</B></TD>
       <TD ALIGN="LEFT">Each simulator binds PORT and PORT+1, so these must differ by at least 2.</TD></TR>
+  <TR><TD ALIGN="LEFT"><FONT FACE="Courier">TPM_STATE_DIR</FONT></TD><TD ALIGN="LEFT">—</TD><TD ALIGN="RIGHT"><B>.tpm-state</B></TD>
+      <TD ALIGN="LEFT">Where each simulator keeps its NVChip, one directory per TPM. Under the bind-mounted<BR ALIGN="LEFT"/>checkout, not the container: the container is <FONT FACE="Courier">--rm</FONT>, so state in its /tmp could not outlive<BR ALIGN="LEFT"/>a run — which is what made <FONT FACE="Courier">--keep-state</FONT> meaningless before.</TD></TR>
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">RESET_TPM</FONT></TD><TD ALIGN="LEFT"><FONT FACE="Courier">--keep-state</FONT> = 0</TD><TD ALIGN="RIGHT"><B>1</B></TD>
       <TD ALIGN="LEFT">Wipe each NVChip and re-run TPM2_Startup. This changes every AK, which is why the<BR ALIGN="LEFT"/>trust anchor is regenerated straight afterwards.</TD></TR>
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">VERIFIER_START_PORT</FONT> / <FONT FACE="Courier">VERIFIER_HOST</FONT></TD><TD ALIGN="LEFT">—</TD><TD ALIGN="RIGHT"><B>5684 / 127.0.0.1</B></TD>
@@ -150,7 +152,7 @@ that lapses mid-round costs that attestation cycle — every Verifier votes NO a
 no → qualify first (step 6) · yes → straight to step 7</font>>, shape=diamond,
      fillcolor="#fef3c7", color="#b45309", margin=0.04];
 
-  S6 [label=<<b>6 · qualify (one Verifier only)</b><br align="left"/>
+  S6 [label=<<b>6 · qualify (ONE Verifier — the first reachable)</b><br align="left"/>
 <font point-size="10">Redact the Verifier's synthetic challenge log with the SDK and<br align="left"/>
 sign (log ‖ salt) with AK_r. <b>No PCR, no replay</b> — the Verifier<br align="left"/>
 compares log bytes, and identical logs replay identically.<br align="left"/>
@@ -193,9 +195,13 @@ after the nap as well as before it). Either way → SHUTDOWN.</font><br align="l
 
   STOP [label=<<b>SHUTDOWN</b><br align="left"/>
 <font point-size="10">One line reports which of the three fired. An attestation cycle already in flight is not torn<br align="left"/>
-down mid-way: since the quit flag is tested at every phase boundary, a stop<br align="left"/>
-during an attestation cycle abandons it at the next boundary — measured at <b>2.3s</b> when<br align="left"/>
-signalled during the Attester round trip, rather than waiting out the attestation cycle.</font><br align="left"/>>,
+down mid-way. The quit flag is tested at every phase boundary <b>and inside the two<br align="left"/>
+longest loops</b> — the CoAP wait and the PCR extend — so a stop lands within one I/O<br align="left"/>
+slice, not one whole round trip: measured <b>~1.0s</b> signalled mid-fan-out, <b>~0.1s</b><br align="left"/>
+during the nap.<br align="left"/>
+Both loops return an ERROR when quit is what ended them, never success: a wait that<br align="left"/>
+exits early saw no response, and a partial replay leaves PCR 23 holding a value no<br align="left"/>
+log explains — which must never be quoted.</font><br align="left"/>>,
         fillcolor="#dcfce7", color="#15803d", penwidth=1.8];
 
   ABORT [label=<<b>attestation cycle abandoned</b>&nbsp;&nbsp;<font point-size="10">◂ every ▸ abort lands here</font><br align="left"/>

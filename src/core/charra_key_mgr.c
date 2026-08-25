@@ -32,15 +32,18 @@
 CHARRA_RC charra_load_tpm2_key(ESYS_CONTEXT* ctx, const uint32_t key_len,
         const uint8_t* key, ESYS_TR* key_handle, TPM2B_PUBLIC** out_public) {
     TSS2_RC r = TSS2_RC_SUCCESS;
-    if (memcmp(key, "PK.RSA.default", key_len) == 0) {
-        charra_log_info("Loading key \"PK.RSA.default\".");
+    if (key_len == CHARRA_AK_A_KEY_ID_LEN &&
+            memcmp(key, CHARRA_AK_A_KEY_ID, key_len) == 0) {
+        charra_log_info("Loading key \"" CHARRA_AK_A_KEY_ID "\".");
         r = tpm2_create_primary_key_rsa2048(ctx, key_handle, out_public);
         if (r != TSS2_RC_SUCCESS) {
-            charra_log_error("Loading of key \"PK.RSA.default\" failed.");
+            charra_log_error(
+                    "Loading of key \"" CHARRA_AK_A_KEY_ID "\" failed.");
             return CHARRA_RC_ERROR;
         }
     } else {
-        charra_log_error("TPM key not found.");
+        charra_log_error("Requested signing key is not \"" CHARRA_AK_A_KEY_ID
+                         "\"; refusing to quote.");
         return CHARRA_RC_ERROR;
     }
 

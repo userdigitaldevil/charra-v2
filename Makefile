@@ -9,7 +9,6 @@
 # Date Created:  2019-06-26T09:23:15+02:00                                     #
 ################################################################################
 
-
 # ------------------------------------------------------------------------------
 # --- arguments + variables ----------------------------------------------------
 # ------------------------------------------------------------------------------
@@ -75,7 +74,6 @@ endif
 LINK_MODE ?= dynamic
 link_mode := $(if $(filter static,$(LINK_MODE)), -static)
 
-
 # ------------------------------------------------------------------------------
 # --- directories --------------------------------------------------------------
 # ------------------------------------------------------------------------------
@@ -84,7 +82,6 @@ SRCDIR = src
 INCDIR = include
 OBJDIR = obj
 BINDIR = bin
-
 
 # ------------------------------------------------------------------------------
 # --- arguments + flags --------------------------------------------------------
@@ -120,7 +117,6 @@ LIBS =       coap-3-tinydtls \
 
 LDFLAGS =    $(addprefix -l, $(LIBS))
 
-
 # ------------------------------------------------------------------------------
 # --- sources + targets --------------------------------------------------------
 # ------------------------------------------------------------------------------
@@ -148,13 +144,29 @@ ATTESTER_OBJECTS = $(addsuffix .o, $(addprefix $(OBJDIR)/attester/, attester_uti
 
 TARGETS = $(addprefix $(BINDIR)/, attester verifier verifier_old relying_party trust_manager provision_trusted_keys)
 
+# Every test suite, named once. The .PHONY list, the per-suite shortcuts,
+# and the `test` target below are all derived from this, because keeping
+# three hand-written lists in step is exactly the drift that let three
+# suites build individually while `make test` silently skipped them.
+TEST_SUITES = test_event_log \
+              test_synthetic_log \
+              test_sdk \
+              test_rp_qualification \
+              test_marshaling_bounds \
+              test_trusted_keys \
+              test_qualified_rps \
+              test_get_verifiers_marshaling \
+              test_rp_evidence_marshaling \
+              test_verdict \
+              test_hex_util \
+              test_pcr_selection \
+              test_message_marshaling \
+              test_key_mgr \
+              test_crypto_util \
+              test_parser_util
+
 .PHONY: all attester verifier verifier_old relying_party trust_manager \
-        provision_trusted_keys \
-        test test_event_log test_synthetic_log test_sdk test_rp_qualification \
-        test_marshaling_bounds test_trusted_keys test_qualified_rps \
-        test_get_verifiers_marshaling \
-        test_rp_evidence_marshaling test_verdict \
-        clean
+        provision_trusted_keys test $(TEST_SUITES) clean
 
 all: $(TARGETS)
 attester: $(BINDIR)/attester
@@ -163,30 +175,12 @@ verifier_server: $(BINDIR)/verifier_old
 relying_party: $(BINDIR)/relying_party
 trust_manager: $(BINDIR)/trust_manager
 provision_trusted_keys: $(BINDIR)/provision_trusted_keys
-test_event_log: $(BINDIR)/test_event_log
-test_synthetic_log: $(BINDIR)/test_synthetic_log
-test_sdk: $(BINDIR)/test_sdk
-test_rp_qualification: $(BINDIR)/test_rp_qualification
-test_marshaling_bounds: $(BINDIR)/test_marshaling_bounds
-test_trusted_keys: $(BINDIR)/test_trusted_keys
-test_qualified_rps: $(BINDIR)/test_qualified_rps
-test_rp_evidence_marshaling: $(BINDIR)/test_rp_evidence_marshaling
-test_get_verifiers_marshaling: $(BINDIR)/test_get_verifiers_marshaling
-test_verdict: $(BINDIR)/test_verdict
+# `make test_sdk` builds bin/test_sdk, and so on for each suite.
+$(TEST_SUITES): %: $(BINDIR)/%
 
-## run the test suite
-test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log $(BINDIR)/test_sdk $(BINDIR)/test_rp_qualification $(BINDIR)/test_marshaling_bounds $(BINDIR)/test_trusted_keys $(BINDIR)/test_qualified_rps $(BINDIR)/test_get_verifiers_marshaling $(BINDIR)/test_rp_evidence_marshaling $(BINDIR)/test_verdict
-	./$(BINDIR)/test_event_log
-	./$(BINDIR)/test_synthetic_log
-	./$(BINDIR)/test_sdk
-	./$(BINDIR)/test_rp_qualification
-	./$(BINDIR)/test_marshaling_bounds
-	./$(BINDIR)/test_trusted_keys
-	./$(BINDIR)/test_qualified_rps
-	./$(BINDIR)/test_get_verifiers_marshaling
-	./$(BINDIR)/test_rp_evidence_marshaling
-	./$(BINDIR)/test_verdict
-
+## run the test suite -- every suite, stopping at the first failure
+test: $(addprefix $(BINDIR)/, $(TEST_SUITES))
+	@for t in $(TEST_SUITES); do ./$(BINDIR)/$$t || exit 1; done
 
 # ------------------------------------------------------------------------------
 # --- productions --------------------------------------------------------------
@@ -234,43 +228,13 @@ endif
 
 ## --- tests -------------------------------------------------------------------
 
-$(BINDIR)/test_event_log: tests/test_event_log.c $(OBJECTS)
-	@mkdir -p $(@D)
-	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
-
-$(BINDIR)/test_synthetic_log: tests/test_synthetic_log.c $(OBJECTS)
-	@mkdir -p $(@D)
-	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
-
-$(BINDIR)/test_sdk: tests/test_sdk.c $(OBJECTS)
-	@mkdir -p $(@D)
-	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
-
-$(BINDIR)/test_rp_qualification: tests/test_rp_qualification.c $(OBJECTS)
-	@mkdir -p $(@D)
-	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
-
-$(BINDIR)/test_marshaling_bounds: tests/test_marshaling_bounds.c $(OBJECTS)
-	@mkdir -p $(@D)
-	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
-
-$(BINDIR)/test_trusted_keys: tests/test_trusted_keys.c $(OBJECTS)
-	@mkdir -p $(@D)
-	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
-
 $(BINDIR)/test_qualified_rps: tests/test_qualified_rps.c $(VERIFIER_OBJECTS) $(OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
-$(BINDIR)/test_rp_evidence_marshaling: tests/test_rp_evidence_marshaling.c $(OBJECTS)
-	@mkdir -p $(@D)
-	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
-
-$(BINDIR)/test_get_verifiers_marshaling: tests/test_get_verifiers_marshaling.c $(OBJECTS)
-	@mkdir -p $(@D)
-	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
-
-$(BINDIR)/test_verdict: tests/test_verdict.c $(OBJECTS)
+# One rule for every suite in TEST_SUITES. test_qualified_rps additionally
+# links the Verifier-only objects, which its own rule above supplies.
+$(BINDIR)/test_%: tests/test_%.c $(OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
@@ -299,7 +263,6 @@ $(OBJDIR)/rp/%.o: $(SRCDIR)/rp/%.c
 $(OBJDIR)/util/%.o: $(SRCDIR)/util/%.c
 	@mkdir -p $(@D)
 	$(CC) $< $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) $(CFLAGS) -g -o $@ -c $(link_mode)
-
 
 # ------------------------------------------------------------------------------
 # --- clean --------------------------------------------------------------------

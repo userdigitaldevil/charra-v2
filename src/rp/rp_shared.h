@@ -166,8 +166,6 @@ extern char* blacklist_hashes_path;
 extern char attester_host[16];
 extern unsigned int attester_port;
 
-#define TPM_SIG_KEY_ID_LEN 14
-#define TPM_SIG_KEY_ID "PK.RSA.default"
 
 /** Whether nonces come from the TPM's RNG rather than the software one. */
 extern const bool USE_TPM_FOR_RANDOM_NONCE_GENERATION;

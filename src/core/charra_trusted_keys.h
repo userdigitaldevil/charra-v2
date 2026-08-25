@@ -48,6 +48,15 @@
  * started from. */
 #define CHARRA_TRUSTED_KEYS_DEFAULT_PATH "keys/trusted_keys.txt"
 
+/* The two identity labels, defined once because three separate things have
+ * to spell them identically or the system breaks in ways that are hard to
+ * see: bin/provision_trusted_keys --role, the `# name` comment it writes
+ * above each key, and the name_out this file's lookup reports. The
+ * Attester's label doubles as the signing-key name on the /attest wire --
+ * see CHARRA_AK_A_KEY_ID in charra_key_mgr.h. */
+#define CHARRA_ROLE_ATTESTER "attester"
+#define CHARRA_ROLE_RELYING_PARTY "relying-party"
+
 /**
  * @brief Is this AK's public key one we trust?
  *

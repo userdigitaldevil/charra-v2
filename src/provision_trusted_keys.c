@@ -55,8 +55,8 @@ typedef struct {
 } identity;
 
 static const identity IDENTITIES[] = {
-        {"attester", true},
-        {"relying-party", false},
+        {CHARRA_ROLE_ATTESTER, true},
+        {CHARRA_ROLE_RELYING_PARTY, false},
 };
 #define NUM_IDENTITIES (sizeof(IDENTITIES) / sizeof(IDENTITIES[0]))
 

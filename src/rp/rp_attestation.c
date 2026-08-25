@@ -18,6 +18,7 @@
 #include "../common/charra_log.h"
 #include "../common/charra_macro.h"
 #include "../core/charra_dto.h"
+#include "../core/charra_key_mgr.h"
 #include "../core/charra_marshaling.h"
 #include "../core/charra_verdict.h"
 #include "../util/charra_util.h"
@@ -117,7 +118,7 @@ static CHARRA_RC create_attestation_request(msg_attestation_request_dto* attesta
     /* build attestation request */
     msg_attestation_request_dto req = {
             .hello = false,
-            .sig_key_id_len = TPM_SIG_KEY_ID_LEN,
+            .sig_key_id_len = CHARRA_AK_A_KEY_ID_LEN,
             .sig_key_id = {0},  // must be memcpy'd, see below
             .nonce_len = nonce_len,
             .nonce = {0},  // must be memcpy'd, see below
@@ -132,7 +133,7 @@ static CHARRA_RC create_attestation_request(msg_attestation_request_dto* attesta
             .event_log_path =
                     (use_ima_event_log || use_ima_test_log) ? ((use_ima_event_log) ? (uint8_t*)ima_event_log_path : (uint8_t*)ima_test_log_path) : NULL,
     };
-    memcpy(req.sig_key_id, TPM_SIG_KEY_ID, TPM_SIG_KEY_ID_LEN);
+    memcpy(req.sig_key_id, CHARRA_AK_A_KEY_ID, CHARRA_AK_A_KEY_ID_LEN);
     memcpy(req.nonce, nonce, nonce_len);
     memcpy(req.pcr_selections->pcrs, tpm_pcr_selection, tpm_pcr_selection_len);
 

@@ -18,6 +18,13 @@
  * BSD-3-Clause).
  */
 
+#ifndef CHARRA_PARSER_UTIL_H
+#define CHARRA_PARSER_UTIL_H
+
+#include <stdint.h>
+
+#include "../common/charra_error.h"
+
 /**
  * @brief Parses PCR value from a string. Expects the PCR value to
  * start with the characters '0x'.
@@ -42,3 +49,5 @@ char* find_end_of_line(char* start, char* end);
  * big for a PCR index.
  */
 int parse_pcr_index(char* index_start);
+
+#endif /* CHARRA_PARSER_UTIL_H */

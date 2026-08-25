@@ -110,10 +110,11 @@ int parse_rp_command_line(int argc, char** argv) {
                    "after COUNT attestation cycles. Default 0 "
                    "(unbounded).\n");
             printf("     --verifier-timeout=SECONDS: How long to wait for a "
-                   "Verifier's reply before giving up. Also bounds every "
-                   "other RP round trip (Trust Manager, /qualify, "
-                   "/qualify_submit, /appraise). A Verifier that times out "
-                   "counts against the "
+                   "Verifier's reply before giving up. Bounds every "
+                   "Verifier-bound round trip (/nonce, /qualify, "
+                   "/qualify_submit, /appraise), but NOT the Trust Manager "
+                   "one, which has its own fixed timeout. A Verifier that "
+                   "times out counts against the "
                    "majority exactly like a NO vote. Default %d.\n",
                     RP_DEFAULT_VERIFIER_TIMEOUT_S);
             printf("     --attester-timeout=SECONDS: How long to wait for the "

@@ -64,8 +64,6 @@ unsigned int dst_port = 5683;         // default port
     2  // Wait time between attestations in seconds
 static const bool USE_TPM_FOR_RANDOM_NONCE_GENERATION = false;
 
-#define TPM_SIG_KEY_ID_LEN 14
-#define TPM_SIG_KEY_ID "PK.RSA.default"
 // TODO: Make PCR selection configurable via CLI
 static uint8_t tpm_pcr_selection[TPM2_MAX_PCRS] = {0, 1, 2, 3, 4, 5, 6, 7, 10};
 static uint32_t tpm_pcr_selection_len = 9;
@@ -474,7 +472,7 @@ static CHARRA_RC create_attestation_request(
     /* build attestation request */
     msg_attestation_request_dto req = {
             .hello = false,
-            .sig_key_id_len = TPM_SIG_KEY_ID_LEN,
+            .sig_key_id_len = CHARRA_AK_A_KEY_ID_LEN,
             .sig_key_id = {0},  // must be memcpy'd, see below
             .nonce_len = nonce_len,
             .nonce = {0},  // must be memcpy'd, see below
@@ -489,7 +487,7 @@ static CHARRA_RC create_attestation_request(
             .event_log_path =
                     (use_ima_event_log) ? (uint8_t*)ima_event_log_path : NULL,
     };
-    memcpy(req.sig_key_id, TPM_SIG_KEY_ID, TPM_SIG_KEY_ID_LEN);
+    memcpy(req.sig_key_id, CHARRA_AK_A_KEY_ID, CHARRA_AK_A_KEY_ID_LEN);
     memcpy(req.nonce, nonce, nonce_len);
     memcpy(req.pcr_selections->pcrs, tpm_pcr_selection, tpm_pcr_selection_len);
 

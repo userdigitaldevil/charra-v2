@@ -459,6 +459,21 @@ and answers present/absent. Anything added to this file is accepted as AK_a
 *and* AK_r. That is why the Verifier's verdict key lives in its own file
 and not here.
 
+**One name covers the key's whole life.** `CHARRA_ROLE_ATTESTER` /
+`CHARRA_ROLE_RELYING_PARTY` are defined once in `charra_trusted_keys.h`,
+and everything that has to spell an identity uses them: `--role`, the
+`# name` comment written above each key, the `name_out` a successful lookup
+reports, and — for the Attester — `sig_key_id` on the `/attest` wire
+(`CHARRA_AK_A_KEY_ID` in `charra_key_mgr.h` is that same symbol). Upstream
+sent an unrelated `"PK.RSA.default"` there, which made the wire a third
+vocabulary for one key.
+
+That field is a label, not a lookup: no TPM object carries the name, and
+matching it selects the primary the Attester would have derived anyway. All
+it buys is the ability to refuse a request that names something else — so
+the comparison checks length before bytes, since `memcmp` over a
+caller-supplied length is a prefix match.
+
 Regenerate after any TPM reset — `run_live_test.sh` and `run_daemon.sh` do
 this automatically, because wiping an NVChip changes the hierarchy seed and
 therefore every derived key.
@@ -540,7 +555,7 @@ What each bound field stops:
 | field | stops |
 |---|---|
 | `challenge_nonce` | replay across rounds — and, since every Verifier draws its own, a vote being counted in another Verifier's slot |
-| `evidence_digest` | a YES cast over one submission being pasted onto another |
+| `evidence_digest` | a vote about evidence the RP did not send. Hashed by the RP before sending and by the Verifier on arrival, so an on-path swap of the plaintext `/appraise` request is caught — which the nonce alone does not do, since it travelled in the clear on `/nonce` |
 | `signed_at` | nothing cryptographically — no role has a trusted clock, so it is an assertion useful for the log and a staleness bound. Freshness comes from the nonce. |
 
 **All Verifiers share one keypair** (`keys/verifier.der`;
@@ -583,7 +598,7 @@ The RP loops by default. Tunables, all settable as environment overrides to
 | `RP_INTERVAL` | `--interval` | 15s | Sleep between cycles. |
 | `RP_CYCLES` | `--cycles` | 0 | Stop after N cycles; 0 = unbounded. |
 | `RP_DURATION` | `--duration` | 0 | Stop after roughly N seconds; 0 = until SIGINT. |
-| `RP_VERIFIER_TIMEOUT` | `--verifier-timeout` | 6s | Per Verifier round trip. A timeout is a NO. |
+| `RP_VERIFIER_TIMEOUT` | `--verifier-timeout` | 6s | Every Verifier-bound round trip (`/nonce`, `/qualify`, `/qualify_submit`, `/appraise`). A timeout is a NO. Does **not** cover the Trust Manager exchange, which has its own fixed 30s and no flag. |
 | `RP_ATTESTER_TIMEOUT` | `--attester-timeout` | 6s | Attester round trip; exceeding it abandons the cycle. |
 | `VERIFIER_QUALIFICATION_VALIDITY` | `--qualification-validity` | 180s | Verifier-side. Set below 120s to watch re-qualification mid-run. |
 | `TWO_TPMS` | — | 1 | One simulator per role. |
@@ -614,7 +629,12 @@ under threads still building messages from it.
 
 ### Tests
 
-`make test`, 10 suites, **211 assertions**, no TPM or network required.
+`make test`, 16 suites, **358 assertions**, no TPM or network required.
+The suite list lives once, in the Makefile's `TEST_SUITES`; the .PHONY
+list, the per-suite shortcuts and the `test` target all derive from it,
+and the run stops at the first failure. Three suites once built
+individually while `make test` skipped them, because that target's
+prerequisite list and its recipe were maintained by hand.
 
 | suite | assertions |
 |---|---|
@@ -628,6 +648,12 @@ under threads still building messages from it.
 | `test_get_verifiers_marshaling` | 17 |
 | `test_rp_evidence_marshaling` | 22 |
 | `test_verdict` | 27 |
+| `test_hex_util` | 25 |
+| `test_pcr_selection` | 16 |
+| `test_message_marshaling` | 47 |
+| `test_key_mgr` | 13 |
+| `test_crypto_util` | 22 |
+| `test_parser_util` | 24 |
 
 The pattern worth keeping: expected values are computed independently
 (hand-written reference extends, hand-encoded QCBOR) rather than by calling
@@ -700,6 +726,13 @@ byte-for-byte needs a shared salt — the failure mode is a check that can
 `memcmp(_, _, 0)` returns 0, so an absent nonce or an empty expected value
 would otherwise match anything. Every nonce comparison in the tree carries
 an explicit non-empty test for this reason.
+
+**`memcmp` under a caller-supplied length is a prefix match, not an
+equality test.** The same bug wearing different clothes: `/attest` used to
+compare its signing-key name with `memcmp(key, LITERAL, key_len)`, so a
+one-byte name matched, and an empty one matched too. Harmless while the
+table had a single entry — it would have been key confusion the moment a
+second was added. Compare the length first, always.
 
 **A negative test that passes on the first try is suspect.** Flipping a
 byte at `len/2` in `log_r` landed in `template_data`, which replay never
