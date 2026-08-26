@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Full live end-to-end run: fresh TPM simulator state, clean rebuild,
-# trust_manager + attester + 5 verifiers (ports 5684-5688) + relying_party,
-# with DEBUG logging. Run this from the repo root, in a real terminal (it
-# uses `docker run -it`, so it needs one).
+# BENCHMARK mode: the bounded 1..5-Verifier timing sweep, then exit. Fresh
+# TPM simulator state, clean rebuild, trust_manager + attester + 5 verifiers
+# (ports 5684-5688) + relying_party --benchmark, with DEBUG logging. Writes
+# timings_RP_multi_verifiers.txt.
+#
+# The counterpart to run_daemon.sh, which loops instead of sweeping. Run this
+# from the repository root.
 #
 # What it does, step by step:
 #   1. Removes any leftover container named "charra" from a previous run
@@ -87,9 +90,61 @@ fi
 tty_flags=""
 [ -t 0 ] && tty_flags="-it"
 
+# The run scripts do not build the image, they only run in it -- RECOMPILE
+# above is `make` inside the container, not `docker build`. On a fresh clone,
+# or after the Dockerfile changes, the image has to be built once first.
+# Without this check docker would try to PULL a name that exists only
+# locally, and fail with "pull access denied", which reads as an
+# authentication problem rather than a missing build.
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    echo "ERROR: image '$IMAGE' does not exist locally." >&2
+    echo "       These scripts run in it, they do not build it. Build once:" >&2
+    echo >&2
+    echo "           ./docker/build.sh" >&2
+    echo >&2
+    echo "       That takes a while -- it compiles tpm2-tss, libcoap and the" >&2
+    echo "       rest from source. Afterwards this script reuses it, and" >&2
+    echo "       RECOMPILE=1 only re-runs make inside it." >&2
+    exit 1
+fi
+
+# Same three values as run_daemon.sh, and the same rule: one setting for all
+# four roles, because they must agree. Default off keeps every benchmark
+# figure comparable with the ones already recorded.
+# Which image to run in. Same default as run_daemon.sh, so the two always
+# measure the same stack unless you deliberately point them apart.
+IMAGE="${IMAGE:-fraunhofer-sit/charra-dev-env:1.9.0}"
+
+DTLS_MODE="${DTLS_MODE:-off}"
+case "$DTLS_MODE" in
+    off) DTLS_TM= ; DTLS_ATT= ; DTLS_VER= ; DTLS_RP= ;;
+    psk) DTLS_TM="--psk" ; DTLS_ATT="--psk" ; DTLS_VER="--psk" ; DTLS_RP="--psk" ;;
+    rpk)
+        DTLS_TM="--rpk --private-key=keys/trust_manager.der \
+                 --public-key=keys/trust_manager.pub.der \
+                 --peer-public-key=keys/relying_party.pub.der"
+        DTLS_ATT="--rpk --private-key=keys/attester.der \
+                  --public-key=keys/attester.pub.der \
+                  --peer-public-key=keys/relying_party.pub.der"
+        DTLS_VER="--rpk --private-key=keys/verifier.der \
+                  --public-key=keys/verifier.pub.der \
+                  --peer-public-key=keys/relying_party.pub.der"
+        DTLS_RP="--rpk --private-key=keys/relying_party.der \
+                 --public-key=keys/relying_party.pub.der \
+                 --attester-public-key=keys/attester.pub.der \
+                 --verifier-public-key=keys/verifier.pub.der \
+                 --trust-manager-public-key=keys/trust_manager.pub.der"
+        ;;
+    *)  echo "ERROR: DTLS_MODE must be off, psk or rpk (got '$DTLS_MODE')." >&2
+        exit 1 ;;
+esac
+
 docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
+  -e DTLS_MODE="$DTLS_MODE" \
+  -e DTLS_TM="$DTLS_TM" -e DTLS_ATT="$DTLS_ATT" \
+  -e DTLS_VER="$DTLS_VER" -e DTLS_RP="$DTLS_RP" \
   --name charra --group-add tss \
-  fraunhofer-sit/charra-dev-env:1.9.0 \
+  "$IMAGE" \
   bash -lc '
     set -e
     pkill -9 -f "^bin/" || true
@@ -99,12 +154,24 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
     # the TPM of the role that owns it, from that TPM hierarchy seed.
     # Separate working directories, because tpm_server writes NVChip into
     # whatever directory it was started in.
-    ATTESTER_TCTI="mssim:host=127.0.0.1,port=2321"
-    RP_TCTI="mssim:host=127.0.0.1,port=2325"
+    # Held in variables so the port number never appears next to the
+    # simulator name anywhere in this script -- not even in a comment, which
+    # is why this one does not spell it out. The image entrypoint backgrounds
+    # tpm-reset, which pkills that exact pattern with -f, and -f matches the
+    # whole command line -- which for bash -lc includes the script text
+    # itself. A script that spells the pattern out therefore kills the shell
+    # running it: SIGTERM, exit 143, right after the banner. run_daemon.sh
+    # passes the port as a variable and survives; this script did not.
+    ATT_PORT=2321
+    RP_PORT=2325
+    ATTESTER_TCTI="mssim:host=127.0.0.1,port=$ATT_PORT"
+    RP_TCTI="mssim:host=127.0.0.1,port=$RP_PORT"
     rm -rf /tmp/tpm_attester /tmp/tpm_rp
     mkdir -p /tmp/tpm_attester /tmp/tpm_rp
-    (cd /tmp/tpm_attester && tpm_server -port 2321 > /tmp/tpm_server_2321.log 2>&1 &)
-    (cd /tmp/tpm_rp       && tpm_server -port 2325 > /tmp/tpm_server_2325.log 2>&1 &)
+    (cd /tmp/tpm_attester && tpm_server -port "$ATT_PORT" \
+        > "/tmp/tpm_server_$ATT_PORT.log" 2>&1 &)
+    (cd /tmp/tpm_rp && tpm_server -port "$RP_PORT" \
+        > "/tmp/tpm_server_$RP_PORT.log" 2>&1 &)
     sleep 3
     TPM2TOOLS_TCTI="$ATTESTER_TCTI" tpm2_startup --clear
     TPM2TOOLS_TCTI="$RP_TCTI"       tpm2_startup --clear
@@ -149,17 +216,32 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
       echo "$i 127.0.0.1 $((5683 + i))"
     done > verifiers_config.txt
 
-    LOG_LEVEL_CHARRA=DEBUG bin/trust_manager > logs/trust_manager.log 2>&1 &
+    # Same refusal as run_daemon.sh: DTLS-RPK needs a libcoap built
+    # --enable-thread-safe, and without it the run hangs at the first
+    # /nonce rather than failing.
+    if [ "$DTLS_MODE" = "rpk" ] &&
+       ! grep -q "COAP_THREAD_SAFE" /usr/local/include/coap3/coap_defines.h \
+             2>/dev/null; then
+        echo "ERROR: DTLS_MODE=rpk needs libcoap built --enable-thread-safe," >&2
+        echo "       which the libcoap in this image lacks. Rebuild with" >&2
+        echo "       ./docker/build.sh, or use DTLS_MODE=psk." >&2
+        exit 1
+    fi
+
+    LOG_LEVEL_CHARRA=DEBUG bin/trust_manager $DTLS_TM \
+        > logs/trust_manager.log 2>&1 &
     LOG_LEVEL_CHARRA=DEBUG CHARRA_TCTI="$ATTESTER_TCTI" \
-        bin/attester > logs/attester.log 2>&1 &
+        bin/attester $DTLS_ATT > logs/attester.log 2>&1 &
     for i in $(seq 1 "$SWEEP"); do
       p=$((5683 + i))
-      LOG_LEVEL_CHARRA=DEBUG bin/verifier --port $p > logs/verifier_$p.log 2>&1 &
+      LOG_LEVEL_CHARRA=DEBUG bin/verifier --port $p $DTLS_VER \
+          > logs/verifier_$p.log 2>&1 &
     done
     sleep 2
 
     LOG_LEVEL_CHARRA=DEBUG CHARRA_TCTI="$RP_TCTI" \
-        bin/relying_party --benchmark 2>&1 | tee logs/relying_party.log
+        bin/relying_party --benchmark $DTLS_RP 2>&1 \
+        | tee logs/relying_party.log
 
     # A log that is mostly NUL bytes means two processes shared the file:
     # one truncated it while the other held a descriptor at a large offset.

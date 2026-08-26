@@ -545,7 +545,7 @@ Grouped as: **cadence** (`RP_INTERVAL`, `RP_VERIFIERS`, `RP_CYCLES`,
 `RESET_TPM`) · **topology** (`VERIFIER_START_PORT`, `VERIFIER_HOST`) ·
 **DTLS** (`DTLS_MODE`) ·
 **logging** (`LOG_LEVEL`, `LOG_LEVEL_COAP`) · **environment** (`IMAGE`,
-`CONTAINER_NAME`, `REBUILD`). Plus `RP_EXTRA_ARGS` / `VERIFIER_EXTRA_ARGS` /
+`CONTAINER_NAME`, `RECOMPILE`). Plus `RP_EXTRA_ARGS` / `VERIFIER_EXTRA_ARGS` /
 `ATTESTER_EXTRA_ARGS` as free-form pass-through for any flag the script does
 not name.
 
@@ -571,7 +571,7 @@ container, because the container is `--rm` and its `/tmp` dies with it.
 | Script | Purpose |
 |---|---|
 | `start_verifiers.sh` | Spawns N Verifiers and writes `verifiers_config.txt`. Called by `run_daemon.sh`; standalone if you want Verifiers without the rest. |
-| `run_live_test.sh` | The counterpart to `run_daemon.sh`: runs the bounded `--benchmark` sweep instead of the daemon loop. |
+| `run_benchmark_mode.sh` | The counterpart to `run_daemon.sh`: runs the bounded `--benchmark` sweep instead of the daemon loop. |
 | `keys/gen-trusted-keys.sh` | Reads each role's AK from its own TPM and builds `keys/trusted_keys.txt`. |
 | `docker/run.sh` | Interactive shell in the dev container, checkout bind-mounted. |
 

@@ -3,7 +3,7 @@
 # Full daemon-mode run: fresh TPMs, clean state, trust_manager + attester +
 # N verifiers + relying_party looping until you stop it (Ctrl-C).
 #
-# The counterpart to run_live_test.sh, which runs the bounded --benchmark
+# The counterpart to run_benchmark_mode.sh, which runs the bounded --benchmark
 # sweep instead. Everything the two processes can disagree about is a
 # variable below, set to the binary's own built-in default, so this file
 # doubles as the list of what is actually tunable.
@@ -119,7 +119,10 @@ ATTESTER_EXTRA_ARGS="${ATTESTER_EXTRA_ARGS:-}"
 # --- Environment ------------------------------------------------------------
 IMAGE="${IMAGE:-fraunhofer-sit/charra-dev-env:1.9.0}"
 CONTAINER_NAME="${CONTAINER_NAME:-charra-daemon}"
-REBUILD="${REBUILD:-1}"          # 1 = make clean && make -j inside the container
+# `make clean && make -j` on CHARRA's C code INSIDE the container. Named
+# RECOMPILE, not REBUILD, because "rebuild" reads as the Docker image -- which
+# nothing here touches. Only ./docker/build.sh does that.
+RECOMPILE="${RECOMPILE:-1}"
 # 1 = wipe each TPM's NVChip, which re-randomizes the hierarchy seeds and so
 # changes every AK -- which is why the trust anchor is regenerated afterwards.
 # 0 (--keep-state) keeps NVChip, so the AKs come back identical.
@@ -140,6 +143,30 @@ while [ $# -gt 0 ]; do
         *)            echo "Unknown option '$1'." >&2; usage 1 ;;
     esac
 done
+
+# The run scripts do not build the image, they only run in it -- RECOMPILE
+# above is `make` inside the container, not `docker build`. On a fresh clone,
+# or after the Dockerfile changes, the image has to be built once first.
+# Without this check docker would try to PULL a name that exists only
+# locally, and fail with "pull access denied", which reads as an
+# authentication problem rather than a missing build.
+if [ -n "${REBUILD-}" ]; then
+    echo "NOTE: REBUILD has been renamed RECOMPILE -- it was read as meaning" >&2
+    echo "      the Docker image, which it never was. Using RECOMPILE=$REBUILD." >&2
+    RECOMPILE="$REBUILD"
+fi
+
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    echo "ERROR: image '$IMAGE' does not exist locally." >&2
+    echo "       These scripts run in it, they do not build it. Build once:" >&2
+    echo >&2
+    echo "           ./docker/build.sh" >&2
+    echo >&2
+    echo "       That takes a while -- it compiles tpm2-tss, libcoap and the" >&2
+    echo "       rest from source. Afterwards this script reuses it, and" >&2
+    echo "       RECOMPILE=1 only re-runs make inside it." >&2
+    exit 1
+fi
 
 # --- DTLS mode -> the flags each role gets ----------------------------------
 # Built once, here, so no role can be launched with a different mode from
@@ -279,7 +306,7 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
   -e RP_EXTRA_ARGS="$RP_EXTRA_ARGS" \
   -e VERIFIER_EXTRA_ARGS="$VERIFIER_EXTRA_ARGS" \
   -e ATTESTER_EXTRA_ARGS="$ATTESTER_EXTRA_ARGS" \
-  -e REBUILD="$REBUILD" \
+  -e RECOMPILE="$RECOMPILE" \
   -e RESET_TPM="$RESET_TPM" \
   -e DTLS_MODE="$DTLS_MODE" \
   -e DTLS_TM="$DTLS_TM" \
@@ -367,7 +394,7 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
 
     cd ~/charra
 
-    if [ "$REBUILD" = "1" ]; then
+    if [ "$RECOMPILE" = "1" ]; then
         make clean && make -j
     else
         # The trust anchor is written by bin/provision_trusted_keys, so it

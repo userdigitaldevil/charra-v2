@@ -64,8 +64,19 @@ of work in v2; and *discoverVerifiers* has no v1 counterpart at all.
 | IMA log under test | **33 entries**, 4728 bytes raw → `log_r` 4257 bytes after redaction |
 | Qualification challenge log | **40 entries**, 5210 bytes (synthetic, generated fresh per handshake) |
 | Evidence size | 6582 bytes on the wire |
+| Transport | Plain UDP — `DTLS_MODE=off`, the default. DTLS is now available (`psk`, `rpk`) but every figure below was taken without it; see the note under the caveats. |
 | Instrumentation | 42 timing points. Steady-state figures all come from one single sweep run; the cold-start and `/qualify` figures come from one separate 10-iteration cold run, since neither is reachable more than once per process. No figure is pooled across runs. |
 | Averaging | Every figure is a mean ± standard deviation over the stated `n`, with one clearly marked exception: the 1-Verifier first-cycle column below, which is a single measurement (`n = 1`). |
+
+**A note on transport.** These were all measured over plain UDP. DTLS can now
+be switched on for every role at once with `DTLS_MODE`, which was not possible
+when this set was taken — the Relying Party had no flag for it. Measured
+separately on one image over two cycles at five Verifiers, the cost is small
+next to the figures below: the per-cycle fan-out went 3.916s (`off`) → 3.935s
+(`psk`) → 4.067s (`rpk`). So encryption adds roughly 0.02s and mutual
+authentication roughly 0.15s, against a fan-out of about four seconds. Those
+three numbers are a single two-cycle comparison, not a full sweep, and should
+not be read with the same confidence as the tables below.
 
 **Two caveats, both material.**
 
@@ -147,11 +158,11 @@ Verifiers:
 | appraiseEvidence_a | 10.92 ms ± 1.63 | 11× |
 | prepareEvidence_r | 2844.12 ms ± 20.47 | 1.008× |
 | submitAndCollect | 1038.54 ms ± 35.84 | 1.000× (at 5 V) |
-| **Total first cycle** | **6986.68 ms ± 58.36** | 1.7× |
+| **Total first cycle** | **6986.68 ms ± 58.36** | 1.7× (vs 4097.2 ms, 5 V) |
 
 The pattern is informative. **`prepareEvidence_r` and `submitAndCollect` are
-already at steady-state cost on the very first cycle** — 2844 against 2833 ms,
-and 1038.54 against 1038.72 ms at 5 Verifiers. Neither has a warm-up: the TPM
+already at steady-state cost on the very first cycle** — 2844.12 against
+2820.84 ms, and 1038.54 against 1038.72 ms at 5 Verifiers. Neither has a warm-up: the TPM
 replay costs the same every time, and so does the per-Verifier fan-out.
 
 Everything expensive about a cold start is in `getEvidence`, which carries the
@@ -265,6 +276,13 @@ phase, in execution order:
 |---|:--:|
 | Redact the IMA log, **33 entries**, 4728 → 4257 bytes | 0.800 ms ± 0.404 |
 | **Replay `log_r` into the RP's own TPM, 33 `TPM2_PCR_Extend` calls** | **2833.0 ms ± 24.9** |
+
+These two are the whole of `prepareEvidence_r`, and sum to 2833.8 ms against the
+2820.84 ms measured for the operation itself — 13 ms *more* than the operation
+containing them. They are not from the same samples: this table is `n = 55` and
+the cycle table is `n = 10`, and the standard deviations (± 24.9 and ± 14.85)
+overlap comfortably. Treat agreement between the two tables as ± 15 ms, not as
+the two decimals each prints.
 
 **Once per Verifier** (`n = 165`) — `charra_rp_build_evidence_message()` and the
 submission that follows:
@@ -526,10 +544,14 @@ Appraisal phase and total cycle, averaged over 10 runs at each step:
 
 Least-squares fit over the five steps:
 
-- **fixed cost: 2833.2 ms** — matching the 2833.0 ms TPM replay of `log_r`
-  almost exactly, which is `prepareEvidence_r`: it happens once per cycle
-  regardless of Verifier count
-- **marginal cost: 210.5 ms per additional Verifier**
+- **fixed cost: 3048.9 ms** — matching the 3034.6 ms sum of the four
+  Verifier-independent operations (0.40 + 212.29 + 1.02 + 2820.84) to within
+  0.5 %. The dominant term is `prepareEvidence_r`, and within it the 2833.0 ms
+  TPM replay of `log_r`: it happens once per cycle regardless of Verifier count
+- **marginal cost: 210.2 ms per additional Verifier**
+
+Both are the intercept and slope of the totals column above, so they can be
+recomputed from the five printed rows.
 
 The five-operation split localises that marginal cost precisely: it is entirely
 `submitAndCollect`, the only per-Verifier operation, which grows 216.6 → 420.7 →
@@ -566,25 +588,3 @@ passes the full unit-test suite, all of it running without a TPM or network:
 End-to-end behaviour was checked in the same run: all 55 cycles reached a
 unanimous verdict (11 each at 1/1, 2/2, 3/3, 4/4 and 5/5 Verifiers passing),
 with no rejected verdicts and no `/appraise` failures.
-
----
-
-## Note on a failure mode observed while measuring
-
-An earlier run of this code, executed with the repository on a Docker bind
-mount, produced **33 rejected verdicts out of 90 submissions** — and every
-single-Verifier cycle failed 0/1. The cause was not the protocol.
-
-`verifier_appraise.c` opens its timing log with `fopen(durations_file_path, "a")`
-*before* it hashes the request payload, and treats failure as fatal. When the
-bind mount intermittently refused the open, the Verifier abandoned the appraisal
-and returned a verdict carrying an all-zero `evidence_digest`. The Relying Party
-correctly rejected each one as "cast over different evidence than we sent" and
-counted it as a NO.
-
-Re-running with the working tree on container-local storage eliminated it
-completely: 0 failures across 165 appraisals. The measurements in this document
-come from that clean run.
-
-The underlying fragility is worth recording independently of the environment: a
-purely diagnostic timing log should not be able to fail an attestation.

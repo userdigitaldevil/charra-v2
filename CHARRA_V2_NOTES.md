@@ -489,7 +489,7 @@ it buys is the ability to refuse a request that names something else — so
 the comparison checks length before bytes, since `memcmp` over a
 caller-supplied length is a prefix match.
 
-Regenerate after any TPM reset — `run_live_test.sh` and `run_daemon.sh` do
+Regenerate after any TPM reset — `run_benchmark_mode.sh` and `run_daemon.sh` do
 this automatically, because wiping an NVChip changes the hierarchy seed and
 therefore every derived key.
 
@@ -685,7 +685,7 @@ asserting against itself.
   role, runs the RP loop. Wipes `logs/` per run.
 - `start_verifiers.sh` — spawns N Verifiers and writes
   `verifiers_config.txt` (untracked).
-- `run_live_test.sh` — full live run, including regenerating the anchor
+- `run_benchmark_mode.sh` — full live run, including regenerating the anchor
   after the TPM reset.
 - `docker/run.sh` — interactive shell in the dev container.
 - `diagrams/rp_daemon_automaton.dot` — the daemon automaton; render with

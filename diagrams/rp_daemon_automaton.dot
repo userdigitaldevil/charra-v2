@@ -84,7 +84,7 @@ Read the vocabulary table first — several words below are narrower than they l
       <TD ALIGN="LEFT" BGCOLOR="#fff7ed"><FONT FACE="Courier">off</FONT> | <FONT FACE="Courier">psk</FONT> | <FONT FACE="Courier">rpk</FONT>. One variable for <B>all four roles</B>, because they must agree and a<BR ALIGN="LEFT"/>mismatch does not error: the request times out, and a timeout is a <B>NO</B> vote — so it reads as<BR ALIGN="LEFT"/>a failed attestation. <FONT FACE="Courier">rpk</FONT> is mutual, using the keypairs in <FONT FACE="Courier">keys/</FONT>. Hop-by-hop, so it does<BR ALIGN="LEFT"/><B>not</B> replace the signed verdict, which is end-to-end.</TD></TR>
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">LOG_LEVEL</FONT> / <FONT FACE="Courier">LOG_LEVEL_COAP</FONT></TD><TD ALIGN="LEFT"><B>--log-level</B></TD><TD ALIGN="RIGHT"><B>INFO</B> / unset</TD>
       <TD ALIGN="LEFT">TRACE DEBUG INFO WARN ERROR FATAL. CoAP unset leaves libcoap at its own default.</TD></TR>
-  <TR><TD ALIGN="LEFT"><FONT FACE="Courier">REBUILD</FONT></TD><TD ALIGN="LEFT">—</TD><TD ALIGN="RIGHT"><B>1</B></TD>
+  <TR><TD ALIGN="LEFT"><FONT FACE="Courier">RECOMPILE</FONT></TD><TD ALIGN="LEFT">—</TD><TD ALIGN="RIGHT"><B>1</B></TD>
       <TD ALIGN="LEFT">make clean &amp;&amp; make -j inside the container before starting anything.</TD></TR>
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">RP_EXTRA_ARGS</FONT> / <FONT FACE="Courier">VERIFIER_</FONT> / <FONT FACE="Courier">ATTESTER_</FONT></TD><TD ALIGN="LEFT">pass-through</TD><TD ALIGN="RIGHT">empty</TD>
       <TD ALIGN="LEFT">Free-form flags for any option this table does not name.</TD></TR>

@@ -19,6 +19,37 @@ This supersedes `charra2-manual.md`, which describes an earlier layout.
 
 ---
 
+# First: build the container image, once
+
+Everything runs inside a Docker image that carries the toolchain, the TPM
+simulator and the libraries CHARRA links against — tpm2-tss, tpm2-tools,
+libcoap, mbedTLS, QCBOR. **The run scripts do not build it; they only run in
+it.** On a fresh clone you have to build it once:
+
+    ./docker/build.sh
+
+That takes a while — roughly 25–45 minutes on an Apple-silicon Mac, where the
+`linux/amd64` image runs under emulation, and closer to 10 minutes natively.
+It compiles six projects from source. You do this **once**; every later run
+reuses the image.
+
+Build it again only when the `Dockerfile` changes. It last changed to pin
+libcoap `v4.3.5b` with `--enable-thread-safe`, which DTLS-RPK needs.
+
+If you skip this step the scripts stop with a clear message rather than a
+confusing Docker error:
+
+    ERROR: image 'fraunhofer-sit/charra-dev-env:1.9.0' does not exist locally.
+           These scripts run in it, they do not build it. Build once:
+               ./docker/build.sh
+
+To run a different image — say while comparing two — both scripts take
+`IMAGE`:
+
+    IMAGE=charra-dev:experimental ./run_daemon.sh
+
+---
+
 # Normal use: one script, one command
 
 **You do not need the multi-terminal procedure below.** For everyday runs there
@@ -27,12 +58,12 @@ is one command, from the repository root:
     ./run_daemon.sh
 
 That single script does all of it: starts a TPM simulator per role and wipes
-each `NVChip`, rebuilds, regenerates the trust anchor from the fresh TPMs, drops
+each `NVChip`, recompiles CHARRA, regenerates the trust anchor from the fresh TPMs, drops
 the stale `qualified_rps.txt`, writes `verifiers_config.txt`, launches the Trust
 Manager, the Attester and every Verifier, and then runs the Relying Party
 looping until you press Ctrl-C. Logs land in `logs/`.
 
-Its counterpart is `./run_live_test.sh`, which performs the same cold setup but
+Its counterpart is `./run_benchmark_mode.sh`, which performs the same cold setup but
 runs the bounded `--benchmark` sweep and exits, writing
 `timings_RP_multi_verifiers.txt`. Use that one when you want measurements.
 
@@ -63,9 +94,12 @@ environment **without editing the file at all**:
 | `TPM_STATE_DIR`                     | `.tpm-state` | Where each `NVChip` lives, under the checkout so it survives the `--rm` container |
 | `VERIFIER_START_PORT`               |     5684     | First Verifier port; the rest follow consecutively                                |
 | `VERIFIER_HOST`                     |  127.0.0.1   | Address written into `verifiers_config.txt`                                       |
+| `IMAGE`                             | `…charra-dev-env:1.9.0` | Which image to run in; build it with `./docker/build.sh`                |
+| `DTLS_MODE`                         |     `off`    | `off` \| `psk` \| `rpk`. Sets all four roles at once — they must agree             |
 | `LOG_LEVEL`                         |     INFO     | `TRACE` `DEBUG` `INFO` `WARN` `ERROR` `FATAL`                                     |
 | `LOG_LEVEL_COAP`                    |  _(empty)_   | Empty leaves libcoap at its own default                                           |
-| `REBUILD`                           |      1       | `make clean && make -j` inside the container                                      |
+| `RECOMPILE`                         |      1       | `make clean && make -j` on the C code **inside** the container — not the image     |
+| `CONTAINER_NAME`                    | `charra-daemon` | Name of the container the run uses                                             |
 | `RESET_TPM`                         |      1       | Wipe each `NVChip`; `0` keeps the AKs identical across runs                       |
 | `RP_EXTRA_ARGS` etc.                |  _(empty)_   | Free-form pass-through for a flag the script does not name                        |
 
@@ -143,7 +177,14 @@ To complete a full round of remote attestation:
 
 2.  **Start the Trust Manager:**
 
-    bin/trust_manager # port 6000, not configurable
+        bin/trust_manager                  # default port 6000
+        bin/trust_manager --port=<port_number>
+
+    Note the `=`: the Trust Manager parses `--opt=VALUE` only, not
+    `--opt VALUE`. It also takes the DTLS options — `--psk`, `--key=`,
+    `--hint=`, `--rpk`, `--private-key=`, `--public-key=`,
+    `--peer-public-key=`, `--verify-peer=` — which `run_daemon.sh` sets for
+    you from `DTLS_MODE`. `bin/trust_manager --help` lists them all.
 
 3.  **Start the Verifier(s):**
 
@@ -217,16 +258,15 @@ passive Verifier never writes, so it could not measure the v2 design at all.
 | -------------------------------- | ------------------------------- | --------------------------------------------------------------------- |
 | `timings_RP_multi_verifiers.txt` | `bin/relying_party --benchmark` | Per-step averages and standard deviations for the 1..5-Verifier sweep |
 | `timings_attester.txt`           | `bin/attester`                  | One line per `/attest`: total handling time                           |
-| `durations_verifier-<port>.txt`  | `bin/verifier --port`           | Per-`/appraise` phase breakdown                                       |
-| `durations_verifier.txt`         | `bin/verifier` with no `--port` | The same, for a portless Verifier                                     |
+| `durations_verifier-<port>.txt`  | `bin/verifier`                  | Per-`/appraise` phase breakdown, one file per Verifier                |
 
-All four are **append-only**. A file left over from an earlier run will silently
+All three are **append-only**. A file left over from an earlier run will silently
 pool old samples with new ones, so delete them before a measurement run. All
-four are covered by `.gitignore`.
+three are covered by `.gitignore`.
 
 **To measure the overall process, use the script:**
 
-    ./run_live_test.sh
+    ./run_benchmark_mode.sh
 
 It performs the whole cold setup and then runs the bounded sweep, so there is
 nothing to start by hand and no flag to remember. It takes the same environment
@@ -263,12 +303,30 @@ For a per-operation breakdown rather than per-phase totals, the roles log
 # Other notes
 
 - To change the IP addresses and port numbers of the Verifiers, modify
-  `verifiers_config.txt`. Note that `start_verifiers.sh` and `run_live_test.sh`
+  `verifiers_config.txt`. Note that `start_verifiers.sh` and `run_benchmark_mode.sh`
   both rewrite this file for the Verifiers they start, so hand edits are lost
   on the next scripted run.
 - `verifier.der` has two unrelated jobs: it is a DTLS raw-public-key identity,
-  and it is also the key every Verifier signs its `/appraise` verdict with.
-- DTLS is currently **off** — the roles log `DTLS-PSK enabled: false` and
-  `DTLS-RPK enabled: false`.
+  and it is also the key every Verifier signs its `/appraise` verdict with. The
+  second is independent of whether DTLS is on.
+- **DTLS** is off by default and turned on with one setting:
+
+  ```sh
+  DTLS_MODE=psk ./run_daemon.sh     # encrypted, one shared secret
+  DTLS_MODE=rpk ./run_daemon.sh     # encrypted and mutually authenticated
+  ```
+
+  One setting for all four roles, because they must agree. A mismatch does not
+  raise an error — the request times out, and a timeout counts as a NO vote, so
+  it presents as a failed attestation rather than a misconfiguration.
+
+  Under `rpk` each role proves possession of its keypair in `keys/` and checks
+  its peer against the reference copy. It costs roughly 0.15s per cycle; `psk`
+  costs about 0.02s.
+
+  `rpk` needs a libcoap built `--enable-thread-safe`, which the image provides
+  from `v4.3.5b`. On an older image the script refuses it rather than hanging.
+  If you see that error, rebuild with `./docker/build.sh`, or use `psk`, which
+  works on either.
 
 ---

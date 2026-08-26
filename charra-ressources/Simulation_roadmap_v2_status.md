@@ -6,12 +6,12 @@
 
 **1) Introduction:**
 
-The original `Simulation_roadmap` document described the plan for building a
-remote attestation simulation system on top of the IETF proof-of-concept
+The original `Simulation_roadmap` document — **roadmap v1** — described the
+plan for building a remote attestation simulation system on top of the IETF proof-of-concept
 implementation. This document reports what has actually been built since.
 
-Throughout, **"the starting point"** means the codebase as it stood when that
-roadmap was written, and **"now"** means the system as it stands today. The two
+Throughout, **"the starting point"** means the codebase as it stood when
+roadmap v1 was written, and **"now"** means the system as it stands today. The two
 are compared directly, file by file and symbol by symbol.
 
 Measured across the two:
@@ -19,7 +19,7 @@ Measured across the two:
 | | starting point | now |
 |---|:--:|:--:|
 | Source files in `src/` (`.c` + `.h`) | 35 | 85 |
-| Lines of C in `src/` | 8 057 | 17 733 |
+| Lines of C in `src/` | 8 057 | 17 954 |
 | Binaries built | 5 | 6 |
 | CoAP resources served | 4 | 7 |
 | Marshalled message types (`msg_*_dto`) | 2 | 10 |
@@ -29,16 +29,14 @@ Measured across the two:
 
 **2) Protocols and encoding:**
 
-Unchanged from the roadmap. The system still uses:
+Unchanged from roadmap v1. The system still uses:
 
 - **CoAP** for all communication between roles, over UDP.
 - **CBOR** (QCBOR) to marshal every payload.
-- **DTLS** support remains present in the code but is **not enabled** — the
-  running system logs `DTLS-PSK enabled: false` and `DTLS-RPK enabled: false`.
-  The `*.der` raw-public-key material in `keys/` is therefore unused for
-  transport today. One of those files has acquired a second, unrelated job:
-  `verifier.der` is also the key every Verifier signs its `/appraise` verdict
-  with (see 4.5), and that use is independent of whether DTLS is on.
+- **DTLS** now works on every leg, and is off by default. Previously it did
+  not work at all — see 4.9. `verifier.der` also has a second, unrelated
+  job: it is the key every Verifier signs its `/appraise` verdict with (see
+  4.5), and that use is independent of whether DTLS is on.
 
 What changed is not the protocols but how much travels over them: 2 marshalled
 message types have become 10, and 4 CoAP resources have become 7.
@@ -47,13 +45,13 @@ message types have become 10, and 4 CoAP resources have become 7.
 
 **3) What was already implemented at the starting point:**
 
-This is the part of the roadmap that was already complete before any of the work
-below, and it is more than the roadmap anticipated. The starting point was
+This is the part of roadmap v1 that was already complete before any of the work
+below, and it is more than roadmap v1 anticipated. The starting point was
 **not** the bare IETF two-party proof of concept. It already contained:
 
 - `relying_party` and `trust_manager` binaries, alongside `attester`,
   `verifier` and `verifier_old`.
-- The inverted verifier role the roadmap called for: the Verifier receives
+- The inverted verifier role roadmap v1 called for: the Verifier receives
   evidence rather than requesting it, appraises it, and returns a result.
 - Three of the four CoAP resources it served: `/nonce`, `/appraise` and
   `/get_verifiers`. The fourth, `/attest`, came from the IETF PoC itself.
@@ -61,7 +59,7 @@ below, and it is more than the roadmap anticipated. The starting point was
   over the returned results.
 - The benchmark sweep and statistics code (`calculate_stats`).
 
-In roadmap terms, both staged milestones — "Figure 3" (RP plus multiple
+In roadmap v1 terms, both staged milestones — "Figure 3" (RP plus multiple
 Verifiers) and the trust manager integration — were already reached. The work
 since has been of a different kind.
 
@@ -89,6 +87,22 @@ anchor, `keys/trusted_keys.txt`, holding the public halves of the two
 TPM-resident signing keys, plus `charra_trusted_keys_check()` and a new binary,
 `provision_trusted_keys`, to populate it. **Appendix B** explains what this
 does and does not establish.
+
+Each key is read from **its own** TPM — the Attester's from `:2321`, the RP's
+from `:2325` — which is why `provision_trusted_keys` takes `--role`. That flag
+is a security boundary rather than a convenience: a run without it emits *both*
+identities from whichever TPM it is pointed at, which would place a key the RP
+can itself derive into the entry labelled `attester`. Since `TPM2_Quote` accepts
+restricted and unrestricted keys alike, the RP could then produce genuine quotes
+that pass the Verifier's check.
+
+The name of that identity also travels on the wire. `/attest` carries a
+`sig_key_id` naming which signing key the Attester should quote with; upstream
+sent `"PK.RSA.default"`. It now sends `"attester"` — the same string `--role`
+provisions under, the same label the anchor uses, and the same name a successful
+lookup reports back. No TPM object carries that name: matching it selects the
+restricted primary the Attester would have derived anyway, so the field's only
+real effect is to let it refuse a request naming anything else.
 
 **4.3 A TPM identity for the Relying Party.** Previously the RP used **no TPM at
 all**: `src/relying_party.c` contained no `CHARRA_TCTI` reference and no quote
@@ -133,8 +147,35 @@ each binding stops is set out in **Appendix B**.
 checking measured file hashes against whitelist and blacklist files. This runs
 on the RP only — the Verifiers do not repeat it.
 
-**4.7 A verdict path back to the Attester.** New CoAP resource
-`/attest_result`, letting the RP report the outcome to the Attester.
+**4.7 A Step 2a result path back to the Attester.** New CoAP resource
+`/attest_result`. It carries **one specific thing: the RP's own local Step 2a
+appraisal of the evidence it just received** — not the Verifiers' verdict, and
+not the majority vote.
+
+The distinction matters because the two decisions are made in different places.
+`rp_send_attestation_result()` is called from exactly two lines
+(`rp_attestation.c:504` and `:507`), both immediately after the `/attest`
+exchange, and both reporting the boolean returned by
+`charra_rp_appraise_evidence()` — the RP's six local checks: the Attester's AK
+is in the trust anchor, the quote signature verifies, the nonce answers the
+challenge just sent, each log entry's `template_digest` matches
+`hash(template_data)`, replaying the log rebuilds the PCR composite digest, and
+no measured file is blacklisted.
+
+The majority vote is tallied much later and elsewhere
+(`get_attestation_results()`, `rp_attestation.c:774`). It logs its outcome and
+**the cycle ends there** — nothing is sent to the Attester. The Attester is
+never told how the Verifiers voted, or even that a vote took place.
+
+Nor does the message itemise *which* check failed: the payload is
+`{accepted, reason}`, and the reason is one of two fixed strings, `"Step 2a
+local verification failed"` or `"...passed"`. The failing check is named in the
+RP's log, not on the wire.
+
+Step 2a is a hard stop, so the two cases never overlap: if the local appraisal
+fails, the cycle aborts before any Verifier is contacted, and there is no vote
+to report. Delivery is advisory — a failure to reach the Attester is logged and
+ignored.
 
 **4.8 Restructuring and tests.** `src/` gained `attester/`, `rp/` and
 `verifier/` subdirectories; `verifier.c` shrank from 678 lines to 245 plus 11
@@ -146,20 +187,86 @@ neither a TPM nor the network is not an assumption — the suite was re-run insi
 a container started with `--network none` and with `tpm_server` killed, and all
 16 suites still reported 358 assertions and 0 failures.
 
+**4.9 DTLS, which previously could not be switched on at all.** Roadmap v1
+recorded DTLS as "present in the code but not enabled". That was accurate but
+understated: it was not *disabled*, it was **unreachable**. The transport was
+complete from the very first commit — the Relying Party had the full PSK and
+raw-public-key session code — but `relying_party.c`'s entry point was declared
+
+```c
+int main(int argc CHARRA_UNUSED, char** argv CHARRA_UNUSED)
+```
+
+with both parameters marked unused. It included `<getopt.h>` and never called
+it, so `use_psk` / `use_rpk` could only be changed by editing the source and
+recompiling. The Attester and Verifier parsed their command lines from the
+start, which is what produced the asymmetry. No commit in the project's history
+ever set either flag true.
+
+Two things were needed to make it work.
+
+*First, the missing command line.* All four roles now accept `--psk` / `--rpk`.
+The Relying Party needed ten flags rather than the shared set, because it is a
+client to three different servers and therefore needs one peer-key path per kind
+of peer, where the Attester and Verifier each face one. The Trust Manager had
+neither a DTLS configuration nor a real command line — its `main()` rejected
+every argument except `--help` — so both were added, along with a new
+`keys/trust_manager` keypair; `/get_verifiers` is no longer the one leg that
+stays in plaintext. `run_daemon.sh` gained a single `DTLS_MODE` setting
+(`off` | `psk` | `rpk`) that configures all four roles at once, because they
+must agree: a mismatch does not raise an error, the request simply times out,
+and a timeout counts as a NO vote — so it presents as a failed attestation
+rather than as a misconfiguration.
+
+*Second, a library defect.* With the flags in place, PSK worked immediately but
+RPK hung. It hung at the same point every time — `/qualify` and
+`/qualify_submit` completed, then `/nonce` never returned — and it hung with a
+single Verifier just as with five, which ruled out contention. The dividing line
+was which thread the request came from: `/qualify` runs on the main thread,
+`/nonce` inside one of the per-Verifier worker threads. **libcoap 4.3.4, the
+version the container image pinned, offers no `--enable-thread-safe` option at
+all**; it first appears in 4.3.5. Without it, a DTLS session opened from a
+worker thread never completes its handshake, while the same session from the
+main thread does. PSK was unaffected, because only the raw-public-key path
+carries the state that requires the locking.
+
+The image now builds libcoap `v4.3.5b` with `--enable-thread-safe`. Two
+side-effects came with it: the bundled example programs fail to link without
+`-lpthread`, so they are disabled and the flag added. `run_daemon.sh` also
+refuses `DTLS_MODE=rpk` outright when the image lacks the option, rather than
+hanging — the original failure looked like a stuck attestation rather than a
+missing library feature.
+
+Measured on one image, so the figures are comparable, over two cycles at five
+Verifiers:
+
+| mode | result | fan-out |
+|---|:--:|:--:|
+| `off` (plain UDP) | 5/5, both cycles | 3.916s |
+| `psk` | 5/5, both cycles | 3.935s |
+| `rpk` (mutual auth) | 5/5, both cycles | 4.067s |
+
+Encryption costs about 0.02s per cycle; mutual authentication about 0.15s.
+Under `rpk` each role proves possession of its own keypair and checks its peer
+against the reference copy — 28 authenticated handshakes per two-cycle run.
+
+This is hop-by-hop, so it does not replace the signed verdict of 4.5, which is
+end-to-end and survives a compromised endpoint. The two are complementary.
+
 ---
 
-**5) Status against the roadmap's questions:**
+**5) Status against roadmap v1's questions:**
 
-The roadmap closed by asking for validation on two points. Both are now settled
+Roadmap v1 closed by asking for validation on two points. Both are now settled
 by what was built:
 
 - *"Our PoC will use the protocols of Section 2"* — held: CoAP and CBOR
-  throughout, and the code reuse the roadmap counted on did happen, though not
+  throughout, and the code reuse roadmap v1 counted on did happen, though not
   untouched. Figures below.
 - *"The implementation will proceed in two steps, first the subsystem with a
   relying party and multiple verifiers, then the trust manager"* — both steps
   were already complete at the starting point. The work since has gone into the
-  privacy properties and the trust model, which the roadmap did not scope.
+  privacy properties and the trust model, which roadmap v1 did not scope.
 
 **How much of the original code survived.** Comparing the two versions file by
 file:
@@ -180,7 +287,7 @@ such as `charra_rim_mgr.c` (28 changed lines of 241) and `charra_log.c` (34 of
 171) are close to their originals. `verifier_old.c` is still in the tree as the v1
 baseline.
 
-The roadmap's Figure 2 target has been reached and exceeded. What it did not
+Roadmap v1's Figure 2 target has been reached and exceeded. What it did not
 anticipate is the cost: rebuilding `PCR_r` in the RP's TPM accounts for roughly
 87 % of an attestation cycle.
 
@@ -287,7 +394,7 @@ seeing a path. The cost of that guarantee is step 3 — 33 TPM extends, about
 **Appendix B (Optional reading): the trust model — anchor, qualification,
 verdicts**
 
-The roadmap did not scope a trust model, so this is the part of the system with
+Roadmap v1 did not scope a trust model, so this is the part of the system with
 no counterpart in the original document. Three mechanisms, each answering a
 different question.
 
@@ -369,21 +476,3 @@ In summary: the anchor establishes *who*, qualification establishes *behaves
 correctly*, and the signed verdict establishes *this answer, about this
 evidence, from that Verifier*. All three are needed, because each is silent
 about what the other two assert.
-
----
-
-**Appendix C: how the figures in this document were verified**
-
-Every count above comes from the two versions of the codebase themselves, not
-from notes:
-
-| Claim | How it was checked |
-|---|---|
-| 35 → 85 source files | listing `src/` in each version, filtered to `.c`/`.h` |
-| 8 057 → 17 733 lines | summing the line count of those files in each version |
-| 5 → 6 binaries | the `TARGETS` line of each version's `Makefile` |
-| 4 → 7 CoAP resources | `charra_coap_add_resource` call sites in each version |
-| 2 → 10 message types | `} msg_*_dto;` typedefs in `src/core/charra_dto.h`. Note one of the ten, `msg_verifier_endpoint_dto`, is an array element inside the `/get_verifiers` response rather than a message that travels on its own. `CHARRA_V2_CHANGES.md` reaches the same total by excluding it and counting the signed verdict record instead |
-| 0 → 16 suites, 358 assertions | listing `tests/`; totals from running `make test`, repeated in a container with no network and no TPM simulator to confirm the suite is self-contained |
-| Every feature in section 4 | the symbol is present now and absent at the starting point |
-| File-survival counts | comparing every source file present in both versions byte for byte |
