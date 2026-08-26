@@ -293,6 +293,25 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
 
     pkill -9 -f "^bin/" || true
 
+    # DTLS-RPK needs a libcoap built --enable-thread-safe. Without it a
+    # session opened from one of the RP per-Verifier threads never finishes
+    # its handshake -- and the failure is a HANG, not an error, so it looks
+    # like a stuck attestation rather than a missing library feature. Refuse
+    # up front instead. PSK is unaffected: it opens fine from a thread.
+    if [ "$DTLS_MODE" = "rpk" ] &&
+       ! grep -q "COAP_THREAD_SAFE" /usr/local/include/coap3/coap_defines.h \
+             2>/dev/null; then
+        echo
+        echo "ERROR: DTLS_MODE=rpk needs libcoap built --enable-thread-safe," >&2
+        echo "       and the libcoap in this image was not. It would hang" >&2
+        echo "       at the first /nonce rather than fail." >&2
+        echo >&2
+        echo "       Rebuild the image (./docker/build.sh) -- the Dockerfile" >&2
+        echo "       now pins libcoap v4.3.5b with that option -- or use" >&2
+        echo "       DTLS_MODE=psk, which works on either." >&2
+        exit 1
+    fi
+
     ATTESTER_TCTI="mssim:host=127.0.0.1,port=$ATTESTER_TPM_PORT"
     if [ "$TWO_TPMS" = "1" ]; then
         RP_TCTI="mssim:host=127.0.0.1,port=$RP_TPM_PORT"

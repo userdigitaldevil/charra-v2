@@ -37,7 +37,9 @@ ARG gid=1000
 ## software versions (typically Git branches or tags)
 ARG tpm2tss_version='4.0.1'
 ARG tpm2tools_version='5.6'
-ARG libcoap_version='release-4.3.4'
+# 4.3.5b, not 4.3.4, for --enable-thread-safe below: 4.3.4 ships no such
+# option at all.
+ARG libcoap_version='v4.3.5b'
 ARG mbedtls_version='v3.5.1'
 ARG qcbor_version='v1.2'
 ARG tcose_version='v1.1.1'
@@ -112,10 +114,21 @@ RUN rm -rfv /tmp/tpm2-tools
 RUN git clone --recursive -b "${libcoap_version}" \
     'https://github.com/obgm/libcoap.git' /tmp/libcoap
 WORKDIR /tmp/libcoap
+# --enable-thread-safe is the reason for the version bump. The Relying Party
+# fans out to its Verifiers in parallel pthreads, and without it a DTLS
+# session opened from one of those threads never completes its handshake --
+# while the same session from the main thread does. That showed up as
+# /qualify succeeding and /nonce hanging, with one Verifier as much as five.
+#
+# --disable-examples and LIBS=-lpthread are what that option costs: the
+# bundled coap-client/coap-server demos otherwise fail to link with
+# "undefined reference to pthread_mutex_trylock". Nothing here uses them.
 RUN ./autogen.sh \
     && ./configure --disable-tests --disable-documentation --disable-manpages --enable-dtls --with-tinydtls --enable-fast-install \
+                   --enable-thread-safe --disable-examples LIBS=-lpthread \
     && make -j4 \
-    && make install
+    && make install \
+    && ldconfig
 RUN rm -rfv /tmp/libcoap
 
 ## mbed TLS
