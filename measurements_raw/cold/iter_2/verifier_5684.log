@@ -1,0 +1,178 @@
+[32mINFO [0m[verifier] ============================================================
+[32mINFO [0m[verifier] Verifier starting -- passive CoAP server on 0.0.0.0:5684.
+[32mINFO [0m[verifier] ============================================================
+[32mINFO [0m[verifier] Settings for this run -- "(default)" means the flag was not given; pass it to change the value.
+[32mINFO [0m[verifier]   --port                     5684
+[32mINFO [0m[verifier]   --qualification-validity   180s (default)
+[32mINFO [0m[verifier]   --log-level                DEBUG (default)
+[32mINFO [0m[verifier]   DTLS                       off (plain UDP) (default)
+[32mINFO [0m[verifier]   trust anchor               'keys/trusted_keys.txt'
+[32mINFO [0m[verifier]   qualified RPs              'qualified_rps.txt' (shared)
+[32mINFO [0m[verifier]   timings                    'durations_verifier-5684.txt'
+[32mINFO [0m[verifier] Run with --help for every flag and its accepted range.
+[32mINFO [0m[verifier] ============================================================
+[36mDEBUG[0m[verifier] Verifier Configuration:
+[36mDEBUG[0m[verifier]     Used local port: 5684
+[36mDEBUG[0m[verifier]     DTLS-PSK enabled: false
+[36mDEBUG[0m[verifier]     DTLS-RPK enabled: false
+[32mINFO [0m[verifier] Initializing CoAP in block-wise mode.
+[32mINFO [0m[verifier] Creating CoAP server endpoint using UDP.
+[32mINFO [0m[verifier] Registering CoAP resources.
+[36mDEBUG[0m[verifier] Entering main loop.
+[32mINFO [0m[verifier] /qualify: request from 127.0.0.1:60746.
+[36mDEBUG[0m[event_log] Detected template digest size: 32 bytes.
+[32mINFO [0m[sdk] Redacted 40 entries (5210 bytes in, 5160 out).
+[32mINFO [0m[verifier] Timing: /qualify generate synthetic log + golden answer took 0.002019 second(s).
+[32mINFO [0m[verifier] Timing: /qualify seed + salt + synthetic generation took 0.005897 second(s).
+[32mINFO [0m[verifier] /qualify: issued a 40-entry challenge (5210 bytes).
+[32mINFO [0m[verifier] /qualify/submit: request from 127.0.0.1:58526.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[verifier] /qualify/submit: submitter's signing key is trusted: 'relying-party'
+[32mINFO [0m[verifier] Timing: /qualify_submit verify RP signature took 0.001087 second(s).
+[32mINFO [0m[verifier] Timing: /qualify_submit compare golden vs submitted redaction took 0.000053 second(s).
+[32mINFO [0m[verifier] Recorded RP 3efbea8798ca0c45... as qualified until 1787735036 (180 second(s) from now) in the shared file ('qualified_rps.txt'); every Verifier honours it.
+[32mINFO [0m[verifier] /qualify/submit: RP 3efbea8798ca0c45... qualified until 1787735036 (180 second(s) from now).
+[32mINFO [0m[verifier] /qualify/submit: Qualification successful!
+[32mINFO [0m[verifier] ============================================================
+[32mINFO [0m[verifier] Starting attestation round #1.
+[32mINFO [0m[verifier] ============================================================
+[32mINFO [0m[verifier] /nonce: request from 127.0.0.1:48264.
+[32mINFO [0m[verifier] Received /nonce request body of 63 bytes (63 total).
+[32mINFO [0m[verifier] Parsing received CBOR data.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborFalseType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[verifier] /appraise: request from 127.0.0.1:37634.
+[32mINFO [0m[verifier] Received evidence of length 6582 (6582 total).
+[32mINFO [0m[verifier] Parsing received CBOR data.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[verifier] Parsed evidence: log_r is 4257 byte(s).
+[32mINFO [0m[verifier] Timing: unmarshal evidence took 0.000183 second(s).
+[32mINFO [0m[verifier] Starting verification.
+[32mINFO [0m[verifier]     => RP's signing key is trusted: 'relying-party' (identity 3efbea8798ca0c45...).
+[32mINFO [0m[verifier] Timing: verify AK_r (trust anchor + fingerprint) took 0.000074 second(s).
+[32mINFO [0m[verifier]     => RP 3efbea8798ca0c45... is qualified.
+[32mINFO [0m[verifier] Timing: RP qualification lookup took 0.001428 second(s).
+[32mINFO [0m[verifier]     => Quote_r signature is valid!
+[32mINFO [0m[verifier] Timing: verify Quote_r signature took 0.000179 second(s).
+[32mINFO [0m[verifier] Verifying RP nonce ...
+[32mINFO [0m[verifier]     => Nonce in Quote_r is valid! (matches the one sent)
+[32mINFO [0m[verifier] Timing: verify RP nonce took 0.000038 second(s).
+[32mINFO [0m[verifier] Replaying log_r against Quote_r's PCR digest ...
+[36mDEBUG[0m[event_log] Detected template digest size: 32 bytes.
+[36mDEBUG[0m[event_log] Replayed 33 of 33 event log entries into PCR 10.
+[32mINFO [0m[verifier]     => log_r replays to the PCR digest Quote_r attests!
+[32mINFO [0m[verifier] Timing: replay log_r took 0.000173 second(s).
+[32mINFO [0m[verifier] Step 3a passed, proceeding to Step 3b ...
+[32mINFO [0m[verifier]     => Attester's signing key is trusted: 'attester'
+[32mINFO [0m[verifier] Timing: verify AK_a (trust anchor) took 0.000045 second(s).
+[32mINFO [0m[verifier] Verifying Quote_a signature ...
+[32mINFO [0m[crypto_util] Converting TPM public key to mbedTLS public key ...
+[32mINFO [0m[crypto_util] Verifying TPM Quote signature with mbedTLS ...
+[32mINFO [0m[crypto_util]     => TPM Quote signature is valid!
+[32mINFO [0m[verifier] Timing: verify Quote_a signature took 0.000201 second(s).
+[32mINFO [0m[verifier] Verifying nonce ...
+[32mINFO [0m[verifier] Timing: verify Quote_a nonce took 0.000000 second(s).
+[32mINFO [0m[verifier]     => Nonce in TPM Quote is valid! (matches the one sent)
+[32mINFO [0m[verifier] +----------------------------+
+[32mINFO [0m[verifier]   RP identity: 3efbea8798ca0c45...
+[32mINFO [0m[verifier] |   ATTESTATION SUCCESSFUL   |
+[32mINFO [0m[verifier] +----------------------------+
+[32mINFO [0m[verifier] Timing: total /appraise handling took 0.005873 second(s) (0.000400 second(s) measured across sub-phases).
+[32mINFO [0m[verifier] Timing: sign the verdict took 0.004339 second(s).
+[32mINFO [0m[verifier] ============================================================
+[32mINFO [0m[verifier] Starting attestation round #2.
+[32mINFO [0m[verifier] ============================================================
+[32mINFO [0m[verifier] /nonce: request from 127.0.0.1:45639.
+[32mINFO [0m[verifier] Received /nonce request body of 63 bytes (63 total).
+[32mINFO [0m[verifier] Parsing received CBOR data.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborFalseType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[verifier] /appraise: request from 127.0.0.1:49822.
+[32mINFO [0m[verifier] Received evidence of length 6582 (6582 total).
+[32mINFO [0m[verifier] Parsing received CBOR data.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[verifier] Parsed evidence: log_r is 4257 byte(s).
+[32mINFO [0m[verifier] Timing: unmarshal evidence took 0.000035 second(s).
+[32mINFO [0m[verifier] Starting verification.
+[32mINFO [0m[verifier]     => RP's signing key is trusted: 'relying-party' (identity 3efbea8798ca0c45...).
+[32mINFO [0m[verifier] Timing: verify AK_r (trust anchor + fingerprint) took 0.000050 second(s).
+[32mINFO [0m[verifier]     => RP 3efbea8798ca0c45... is qualified.
+[32mINFO [0m[verifier] Timing: RP qualification lookup took 0.000018 second(s).
+[32mINFO [0m[verifier]     => Quote_r signature is valid!
+[32mINFO [0m[verifier] Timing: verify Quote_r signature took 0.000128 second(s).
+[32mINFO [0m[verifier] Verifying RP nonce ...
+[32mINFO [0m[verifier]     => Nonce in Quote_r is valid! (matches the one sent)
+[32mINFO [0m[verifier] Timing: verify RP nonce took 0.000006 second(s).
+[32mINFO [0m[verifier] Replaying log_r against Quote_r's PCR digest ...
+[36mDEBUG[0m[event_log] Detected template digest size: 32 bytes.
+[36mDEBUG[0m[event_log] Replayed 33 of 33 event log entries into PCR 10.
+[32mINFO [0m[verifier]     => log_r replays to the PCR digest Quote_r attests!
+[32mINFO [0m[verifier] Timing: replay log_r took 0.000031 second(s).
+[32mINFO [0m[verifier] Step 3a passed, proceeding to Step 3b ...
+[32mINFO [0m[verifier]     => Attester's signing key is trusted: 'attester'
+[32mINFO [0m[verifier] Timing: verify AK_a (trust anchor) took 0.000019 second(s).
+[32mINFO [0m[verifier] Verifying Quote_a signature ...
+[32mINFO [0m[crypto_util] Converting TPM public key to mbedTLS public key ...
+[32mINFO [0m[crypto_util] Verifying TPM Quote signature with mbedTLS ...
+[32mINFO [0m[crypto_util]     => TPM Quote signature is valid!
+[32mINFO [0m[verifier] Timing: verify Quote_a signature took 0.000123 second(s).
+[32mINFO [0m[verifier] Verifying nonce ...
+[32mINFO [0m[verifier] Timing: verify Quote_a nonce took 0.000000 second(s).
+[32mINFO [0m[verifier]     => Nonce in TPM Quote is valid! (matches the one sent)
+[32mINFO [0m[verifier] +----------------------------+
+[32mINFO [0m[verifier]   RP identity: 3efbea8798ca0c45...
+[32mINFO [0m[verifier] |   ATTESTATION SUCCESSFUL   |
+[32mINFO [0m[verifier] +----------------------------+
+[32mINFO [0m[verifier] Timing: total /appraise handling took 0.000482 second(s) (0.000169 second(s) measured across sub-phases).
+[32mINFO [0m[verifier] Timing: sign the verdict took 0.000479 second(s).

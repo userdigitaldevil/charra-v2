@@ -27,9 +27,31 @@
 
 
 #define LOG_NAME "trust manager"
+
+/* Monotonic seconds since an arbitrary epoch. Lets /get_verifiers report its
+ * own server-side cost, which the RP's round-trip figure cannot separate from
+ * the network. */
+static double charra_now_s(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
 static volatile sig_atomic_t quit = 0;
 static const char LISTEN_ADDRESS[] = "0.0.0.0";
 int port = 6000;
+
+/* DTLS. Off unless a flag turns it on, matching the other three roles.
+ * Only the RPK peer path differs in kind: the Trust Manager faces exactly
+ * one client -- the RP -- so the single rpk_peer_public_key_path fits,
+ * unlike the RP which needs one path per peer kind. */
+static charra_dtls_config dtls_config = {
+        .psk_key = "Charra DTLS Key",
+        .psk_hint = "Charra Trust Manager",
+        .rpk_private_key_path = "keys/trust_manager.der",
+        .rpk_public_key_path = "keys/trust_manager.pub.der",
+        .rpk_peer_public_key_path = "keys/relying_party.pub.der",
+        .rpk_verify_peer_public_key = true,
+};
 
 /* Counts /get_verifiers calls this process has served, purely for the log
  * delimiter coap_handler() prints -- one call happens per RP benchmark
@@ -47,41 +69,127 @@ static void coap_handler(struct coap_resource_t* resource,
 int main(int argc, char** argv) {
     int result = EXIT_SUCCESS;
 
-    /* No options to parse, but --help must still answer. Without this it
-     * fell through and started the server, so `trust_manager --help` hung
-     * at a prompt that never returns -- the one thing --help must not do.
-     * Any unrecognised argument is rejected rather than ignored, so a typo
-     * is not silently swallowed by a daemon that then runs anyway. */
+    /* Hand-rolled rather than routed through cli_util.c, for the same
+     * reason rp_config.c is: that parser is built around a binary
+     * verifier-or-attester split and this role shares almost none of its
+     * options. Any unrecognised argument is rejected rather than ignored,
+     * so a typo is not silently swallowed by a daemon that runs anyway. */
     for (int i = 1; i < argc; i++) {
-        bool asked_for_help = strcmp(argv[i], "--help") == 0 ||
-                              strcmp(argv[i], "-h") == 0;
-        printf("\nUsage: trust_manager\n"
-               "\n"
-               "Resolves Verifier IDs to host:port from ./verifiers_config.txt\n"
-               "and serves them on /get_verifiers. Takes no options: the port\n"
-               "is compiled in (%d) and the file path is fixed.\n"
-               "\n"
-               "     --help, -h    Print this message.\n"
-               "\n"
-               "Opens no TPM.\n",
-                port);
-        if (!asked_for_help) {
-            fprintf(stderr, "\ntrust_manager: unrecognised option '%s'.\n",
-                    argv[i]);
+        const char* arg = argv[i];
+        const char* eq = strchr(arg, '=');
+        const char* val = eq ? eq + 1 : NULL;
+        size_t name_len = eq ? (size_t)(eq - arg) : strlen(arg);
+#define TM_OPT(name) (strncmp(arg, (name), name_len) == 0 &&                   \
+                      strlen(name) == name_len)
+
+        if (TM_OPT("--help") || TM_OPT("-h")) {
+            printf("\nUsage: trust_manager [OPTIONS]\n"
+                   "\n"
+                   "Resolves Verifier IDs to host:port from "
+                   "./verifiers_config.txt\n"
+                   "and serves them on /get_verifiers. Opens no TPM.\n"
+                   "\n"
+                   "     --port=PORT               Listen on PORT instead of "
+                   "%d.\n"
+                   "\n"
+                   "DTLS Options (PSK and RPK are mutually exclusive; every "
+                   "role must use the SAME mode):\n"
+                   "     --psk                     Enable DTLS-PSK.\n"
+                   "     --key=KEY                 Pre-shared key. Implies "
+                   "--psk.\n"
+                   "     --hint=HINT               PSK hint. Implies --psk.\n"
+                   "     --rpk                     Enable DTLS-RPK.\n"
+                   "     --private-key=PATH        Default '%s'.\n"
+                   "     --public-key=PATH         Default '%s'.\n"
+                   "     --peer-public-key=PATH    The RP's key. Default "
+                   "'%s'.\n"
+                   "     --verify-peer=[0,1]       Default %d.\n"
+                   "\n"
+                   "     --help, -h                Print this message.\n",
+                    port, dtls_config.rpk_private_key_path,
+                    dtls_config.rpk_public_key_path,
+                    dtls_config.rpk_peer_public_key_path,
+                    dtls_config.rpk_verify_peer_public_key ? 1 : 0);
+            return EXIT_SUCCESS;
         }
-        return asked_for_help ? EXIT_SUCCESS : EXIT_FAILURE;
+        if (TM_OPT("--psk")) {
+            dtls_config.use_psk = true;
+        } else if (TM_OPT("--rpk")) {
+            dtls_config.use_rpk = true;
+        } else if (val == NULL) {
+            fprintf(stderr, "\ntrust_manager: '%s' needs a =VALUE, or is "
+                            "unrecognised. Try --help.\n",
+                    arg);
+            return EXIT_FAILURE;
+        } else if (TM_OPT("--port")) {
+            char* end = NULL;
+            long p = strtol(val, &end, 10);
+            if (end == val || *end != '\0' || p < 1 || p > 65535) {
+                fprintf(stderr, "\ntrust_manager: --port must be 1..65535.\n");
+                return EXIT_FAILURE;
+            }
+            port = (int)p;
+        } else if (TM_OPT("--key")) {
+            dtls_config.psk_key = (char*)val;
+            dtls_config.use_psk = true;
+        } else if (TM_OPT("--hint")) {
+            dtls_config.psk_hint = (char*)val;
+            dtls_config.use_psk = true;
+        } else if (TM_OPT("--private-key")) {
+            dtls_config.rpk_private_key_path = (char*)val;
+            dtls_config.use_rpk = true;
+        } else if (TM_OPT("--public-key")) {
+            dtls_config.rpk_public_key_path = (char*)val;
+            dtls_config.use_rpk = true;
+        } else if (TM_OPT("--peer-public-key")) {
+            dtls_config.rpk_peer_public_key_path = (char*)val;
+            dtls_config.use_rpk = true;
+        } else if (TM_OPT("--verify-peer")) {
+            if (strcmp(val, "0") != 0 && strcmp(val, "1") != 0) {
+                fprintf(stderr,
+                        "\ntrust_manager: --verify-peer must be 0 or 1.\n");
+                return EXIT_FAILURE;
+            }
+            dtls_config.rpk_verify_peer_public_key = (strcmp(val, "1") == 0);
+        } else {
+            fprintf(stderr,
+                    "\ntrust_manager: unrecognised option '%s'.\n", arg);
+            return EXIT_FAILURE;
+        }
+#undef TM_OPT
+    }
+
+    /* Refused at startup rather than left to charra_coap_server_start(),
+     * which would also reject it -- but after the log line below has
+     * already claimed a configuration that will not come up. */
+    if (dtls_config.use_psk && dtls_config.use_rpk) {
+        fprintf(stderr, "\ntrust_manager: --psk and --rpk are mutually "
+                        "exclusive; pick one.\n");
+        return EXIT_FAILURE;
     }
 
     coap_context_t* coap_context = NULL;
     coap_endpoint_t* coap_endpoint = NULL;
 
-    charra_log_info(
-            "[" LOG_NAME "] Effective configuration: port=%d", port);
+    charra_log_info("[" LOG_NAME "] Effective configuration: port=%d, "
+                    "DTLS=%s",
+            port,
+            dtls_config.use_psk ? "PSK"
+                                : (dtls_config.use_rpk ? "RPK" : "off"));
 
     charra_coap_server_config server_config = {
         .log_name = LOG_NAME,
         .listen_address = LISTEN_ADDRESS,
         .port = port,
+        .use_dtls_psk = dtls_config.use_psk,
+        .dtls_psk_key = dtls_config.psk_key,
+        .dtls_psk_hint = dtls_config.psk_hint,
+        .use_dtls_rpk = dtls_config.use_rpk,
+        .dtls_rpk_private_key_path = dtls_config.rpk_private_key_path,
+        .dtls_rpk_public_key_path = dtls_config.rpk_public_key_path,
+        .dtls_rpk_peer_public_key_path = dtls_config.rpk_peer_public_key_path,
+        .dtls_rpk_verify_peer_public_key =
+                dtls_config.rpk_verify_peer_public_key,
     };
     if (charra_coap_server_start(&server_config, &coap_context,
                 &coap_endpoint) != CHARRA_RC_SUCCESS) {
@@ -156,6 +264,7 @@ static void coap_handler(struct coap_resource_t* resource,
                                 struct coap_pdu_t* response) {
 
     int coap_r = 0;
+    const double handler_start = charra_now_s();
 
     /* Clear delimiter between benchmark cycles -- see
      * get_verifiers_request_counter's own comment. */
@@ -284,6 +393,10 @@ static void coap_handler(struct coap_resource_t* resource,
         send_ok = false;
     }
     free(marshaled);
+
+    charra_log_info("[" LOG_NAME "] Timing: /get_verifiers server-side "
+                    "handling took %f second(s).",
+            charra_now_s() - handler_start);
 
     charra_log_info("[" LOG_NAME "] +----------------------------+");
     if (send_ok && resp.verifiers_len == req.verifier_ids_len) {

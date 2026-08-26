@@ -1,0 +1,2 @@
+#define RP_MAX_SWEEP_VERIFIERS 5
+#define NUM_RUNS 10

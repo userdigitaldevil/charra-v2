@@ -146,9 +146,10 @@ bool processing_nonce_response[MAX_VERIFIERS] = {false};
 char attester_host[16] = "127.0.0.1";      // 15 characters for IPv4 plus \0
 unsigned int attester_port = 5683;         // default port
 
-/* No CLI reaches these yet -- relying_party has no --psk/--rpk options, so
- * use_psk/use_rpk stay false and rp_coap.c always opens plain UDP. The
- * plumbing below and in rp_coap.c is complete; only the options are missing. */
+/* Defaults; --psk/--rpk and their key-path flags override them in
+ * rp_config.c. Both stay false unless asked for, so the RP opens plain UDP
+ * by default -- and every peer must be in the same mode, since a mismatch
+ * surfaces as a timeout, which counts as a NO vote rather than an error. */
 charra_dtls_config dtls_config = {
         .psk_key = "Charra DTLS Key",
         .psk_identity = "Charra Relying Party",
@@ -157,10 +158,12 @@ charra_dtls_config dtls_config = {
         .rpk_verify_peer_public_key = true,
 };
 
-/* Per-peer, not per-role: the RP is a client to two different servers, so
- * it names both rather than filling in rpk_peer_public_key_path. */
+/* Per-peer, not per-role: the RP is a client to three different servers,
+ * so it names each rather than filling in rpk_peer_public_key_path, which
+ * holds only one. */
 char* dtls_rpk_attester_public_key_path = "keys/attester.pub.der";
 char* dtls_rpk_verifier_public_key_path = "keys/verifier.pub.der";
+char* dtls_rpk_trust_manager_public_key_path = "keys/trust_manager.pub.der";
 
 /* Checks the signature on every /appraise verdict. The same file as the
  * DTLS path above only because all Verifiers currently share one keypair;
@@ -257,6 +260,14 @@ static CHARRA_RC run_one_attestation_cycle(
     charra_log_info("[" LOG_NAME "] Phase timing: get_evidence (Attester "
                     "round trip + local appraisal) took %.3fs.",
             duration);
+    /* Top-level operation 2 vs 3: the phase above interleaves the Attester
+     * round trip with the RP's own appraisal of evidence_a, which runs inside
+     * the /attest response handler. Reporting the difference per cycle gives
+     * the round trip its own distribution rather than a subtraction of two
+     * means after the fact. */
+    charra_log_info("[" LOG_NAME "] Timing: getEvidence round trip (excluding "
+                    "local appraisal) took %f second(s).",
+            duration - rp_last_appraise_a_seconds);
     if (quit) {
         return CHARRA_RC_ERROR;
     }

@@ -26,8 +26,21 @@
 
 #define LOG_NAME "relying party"
 
+/* Monotonic seconds since an arbitrary epoch. The per-step timings below are
+ * all differences of this, which keeps one clock_gettime pair per step from
+ * crowding out the logic being measured. */
+static double charra_now_s(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+double rp_last_appraise_a_seconds = 0.0;
+
 bool charra_rp_appraise_evidence(
         const msg_attestation_response_dto* res) {
+    const double appraise_a_start = charra_now_s();
+    double step_start = 0.0;
     charra_log_info("[" LOG_NAME
             "]  +------------ RP Appraisal of the Evidence --------------+");
 
@@ -60,6 +73,7 @@ bool charra_rp_appraise_evidence(
      * trust anchor" -- see charra_trusted_keys.h for what that does and
      * does not establish. */
     charra_log_info("[" LOG_NAME "] Verifying the Attester's signing key ...");
+    step_start = charra_now_s();
     {
         char name[128] = {0};
         ekak_ok = charra_trusted_keys_check(
@@ -73,12 +87,16 @@ bool charra_rp_appraise_evidence(
         }
     }
 
+    charra_log_info("[" LOG_NAME "] Timing: RP verify AK_a (trust anchor) "
+                    "took %f second(s).", charra_now_s() - step_start);
+
     /* --- 2. quote signature, under the Attester's own public key --------- */
     /* mbedTLS rather than the TPM-backed path verifier.c also has: verifying
      * an RSA-PSS signature needs no TPM, and the software TPM serves one
      * client at a time -- the RP opening its own session while fanning out
      * to N verifiers is how the whole testbed deadlocks. */
     charra_log_info("[" LOG_NAME "] Verifying quote signature ...");
+    step_start = charra_now_s();
     mbedtls_rsa_context mbedtls_rsa_pub_key = {0};
     if (charra_crypto_tpm_pub_key_to_mbedtls_pub_key(tpm2_public_key,
                 &mbedtls_rsa_pub_key) != CHARRA_RC_SUCCESS) {
@@ -96,7 +114,11 @@ bool charra_rp_appraise_evidence(
                 signature_ok ? "valid!" : "NOT valid!");
     }
 
+    charra_log_info("[" LOG_NAME "] Timing: RP verify Quote_a signature "
+                    "took %f second(s).", charra_now_s() - step_start);
+
     /* --- unmarshal the quote; every remaining check reads it ------------- */
+    step_start = charra_now_s();
     TPMS_ATTEST attest_struct = {0};
     if (charra_unmarshal_tpm2_quote(res->attestation_data_len,
                 res->attestation_data, &attest_struct) != CHARRA_RC_SUCCESS) {
@@ -104,8 +126,12 @@ bool charra_rp_appraise_evidence(
         goto done;
     }
 
+    charra_log_info("[" LOG_NAME "] Timing: RP unmarshal Quote_a took %f "
+                    "second(s).", charra_now_s() - step_start);
+
     /* --- 3. nonce: the quote must answer the challenge we just sent ------ */
     charra_log_info("[" LOG_NAME "] Verifying nonce ...");
+    step_start = charra_now_s();
     nonce_ok = charra_verify_tpm2_quote_qualifying_data(
             (uint16_t)last_request.nonce_len, last_request.nonce,
             &attest_struct);
@@ -113,31 +139,49 @@ bool charra_rp_appraise_evidence(
             nonce_ok ? "matches the one sent!"
                      : "does NOT match the one sent!");
 
+    charra_log_info("[" LOG_NAME "] Timing: RP verify Quote_a nonce took %f "
+                    "second(s).", charra_now_s() - step_start);
+
     /* --- 4. every entry's template_digest == hash(template_data) -------- */
     charra_log_info("[" LOG_NAME "] Verifying log entry self-consistency ...");
+    step_start = charra_now_s();
     entries_ok = charra_verify_log_entries_self_consistent(
             res->event_log, res->event_log_len);
     charra_log_info("[" LOG_NAME "]     => log entries are %s",
             entries_ok ? "self-consistent!" : "NOT self-consistent!");
 
+    charra_log_info("[" LOG_NAME "] Timing: RP verify log_a self-consistency "
+                    "took %f second(s).", charra_now_s() - step_start);
+
     /* --- 5. replay the log and rebuild the PCR composite digest ---------- */
     charra_log_info("[" LOG_NAME "] Replaying the log into the PCRs ...");
+    step_start = charra_now_s();
     pcr_ok = charra_verify_log_matches_quote_pcr_digest(res->event_log,
             res->event_log_len, tpm_pcr_selection, tpm_pcr_selection_len,
             &attest_struct);
     charra_log_info("[" LOG_NAME "]     => PCR composite digest %s",
             pcr_ok ? "matches the quote!" : "does NOT match the quote!");
 
+    charra_log_info("[" LOG_NAME "] Timing: RP replay log_a + PCR composite "
+                    "took %f second(s).", charra_now_s() - step_start);
+
     /* --- 6. no measured file may appear on the blacklist ----------------- */
     charra_log_info("[" LOG_NAME "] Checking file hashes against the "
                     "whitelist/blacklist policy ...");
+    step_start = charra_now_s();
     blacklist_ok = charra_verify_log_file_hashes_against_policy(
             res->event_log, res->event_log_len, whitelist_hashes_path,
             blacklist_hashes_path);
     charra_log_info("[" LOG_NAME "]     => file hashes are %s",
             blacklist_ok ? "not blacklisted!" : "BLACKLISTED!");
 
+    charra_log_info("[" LOG_NAME "] Timing: RP whitelist/blacklist policy "
+                    "took %f second(s).", charra_now_s() - step_start);
+
 done:;
+    rp_last_appraise_a_seconds = charra_now_s() - appraise_a_start;
+    charra_log_info("[" LOG_NAME "] Timing: RP total appraisal of evidence_a "
+                    "took %f second(s).", rp_last_appraise_a_seconds);
     const bool appraisal_ok = ekak_ok && signature_ok && nonce_ok &&
                               entries_ok && pcr_ok && blacklist_ok;
     charra_log_info("[" LOG_NAME "] +----------------------------+");
@@ -259,6 +303,7 @@ CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
      * into, under this Verifier's nonce. The key is derived, used and
      * discarded inside this call -- see rp_signing_key.h. */
     TPM2B_PUBLIC ak_public_key = {0};
+    const double quote_r_start = charra_now_s();
     CHARRA_RC charra_r = rp_quote_pcr_with_ak(
             verifier_nonces[verifier_index], nonce_len,
             ev.rp_attestation_data, sizeof(ev.rp_attestation_data),
@@ -267,6 +312,9 @@ CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
         charra_log_error("[" LOG_NAME "] Could not produce Quote_r.");
         return charra_r;
     }
+    charra_log_info("[" LOG_NAME "] Timing: RP produce Quote_r (derive key "
+                    "+ tpm2_quote) took %f second(s).",
+            charra_now_s() - quote_r_start);
     ev.rp_signature_len = CHARRA_RSA_SIGNATURE_LEN;
 
     /* Straight from the derivation that produced rp_signature above, so

@@ -58,10 +58,25 @@ encode/decode in `src/core/charra_marshaling.c`, plain positional arrays
 (no maps or labels) — field order is load-bearing, defined only by struct
 order, with no schema self-description on the wire.
 
-DTLS-PSK/RPK is plumbed end to end but **off**: `relying_party` exposes no
-`--psk`/`--rpk` flags, so `use_psk`/`use_rpk` stay false and every exchange
-is plain UDP. The Attester and Verifier do have the flags; the RP being the
-client on every leg means enabling it on one side alone changes nothing.
+DTLS-PSK/RPK works on every leg, and is **off by default**. All four roles
+take `--psk`/`--rpk`; `run_daemon.sh`'s `DTLS_MODE` sets one mode for all of
+them at once, because they must agree and a mismatch does not error — the
+request times out, a timeout counts as a NO vote, and the run reports 0/N as
+though attestation failed.
+
+Under `rpk` this is **mutual**: each role proves possession of its keypair in
+`keys/` and checks its peer against the reference public key. It is
+hop-by-hop, so it does not replace the signed verdict, which is end-to-end
+and survives a compromised endpoint. The two are complementary — the
+`evidence_digest` check stays load-bearing either way.
+
+*Historical note, since it explains the shape of the code:* the transport was
+complete from the first commit but **unreachable**. `relying_party.c`'s
+`main()` was declared `int main(int argc CHARRA_UNUSED, char** argv
+CHARRA_UNUSED)` — it included `<getopt.h>` and never called it, so
+`use_psk`/`use_rpk` could only be changed by editing the source. The Attester
+and Verifier parsed CLI from the start, which is what produced the
+asymmetry. No commit on `main` ever set either flag true.
 
 ### Component reference table
 

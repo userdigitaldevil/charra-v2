@@ -29,6 +29,13 @@
 #
 #   VERIFIER_QUALIFICATION_VALIDITY=20 RP_CYCLES=8 ./run_daemon.sh
 #
+# DTLS is off by default. ONE variable turns it on for every role at once,
+# because they must agree -- a mismatch does not error, it times out, and a
+# timeout counts as a NO vote, so the run reports 0/N as a failed attestation:
+#
+#   DTLS_MODE=rpk ./run_daemon.sh     # mutual auth, keypairs from keys/
+#   DTLS_MODE=psk ./run_daemon.sh     # one shared secret, no peer identity
+#
 # Options:
 #   --keep-state   keep each TPM NVChip instead of wiping it, so both AKs --
 #                  and therefore keys/trusted_keys.txt -- survive the run.
@@ -86,6 +93,19 @@ TPM_STATE_DIR="${TPM_STATE_DIR:-.tpm-state}"
 VERIFIER_START_PORT="${VERIFIER_START_PORT:-5684}"   # first Verifier port; rest follow
 VERIFIER_HOST="${VERIFIER_HOST:-127.0.0.1}"          # address written into verifiers_config.txt
 
+# --- DTLS -------------------------------------------------------------------
+# off | psk | rpk.  ONE variable for all four roles on purpose: they must
+# agree, and a mismatch does NOT error -- the request times out, a timeout
+# counts as a NO vote, and the run reports 0/N as though attestation failed.
+#
+#   psk  one shared secret. Every role holds the same key, so it encrypts
+#        but authenticates nobody in particular.
+#   rpk  raw public keys, mutual: each role proves possession of its own
+#        keypair in keys/ and checks its peer against the reference copy.
+#
+# Default off, so every timing figure in the docs stays comparable.
+DTLS_MODE="${DTLS_MODE:-off}"
+
 # --- Logging ----------------------------------------------------------------
 LOG_LEVEL="${LOG_LEVEL:-INFO}"                   # TRACE DEBUG INFO WARN ERROR FATAL
 LOG_LEVEL_COAP="${LOG_LEVEL_COAP:-}"             # empty = leave libcoap at its default
@@ -120,6 +140,40 @@ while [ $# -gt 0 ]; do
         *)            echo "Unknown option '$1'." >&2; usage 1 ;;
     esac
 done
+
+# --- DTLS mode -> the flags each role gets ----------------------------------
+# Built once, here, so no role can be launched with a different mode from
+# its peers. Each role names its own keypair; the RP additionally names one
+# peer key per kind of peer it talks to.
+case "$DTLS_MODE" in
+    off) DTLS_TM= ; DTLS_ATT= ; DTLS_VER= ; DTLS_RP= ;;
+    psk)
+        DTLS_TM="--psk"
+        DTLS_ATT="--psk"
+        DTLS_VER="--psk"
+        DTLS_RP="--psk"
+        ;;
+    rpk)
+        DTLS_TM="--rpk --private-key=keys/trust_manager.der \
+                 --public-key=keys/trust_manager.pub.der \
+                 --peer-public-key=keys/relying_party.pub.der"
+        DTLS_ATT="--rpk --private-key=keys/attester.der \
+                  --public-key=keys/attester.pub.der \
+                  --peer-public-key=keys/relying_party.pub.der"
+        DTLS_VER="--rpk --private-key=keys/verifier.der \
+                  --public-key=keys/verifier.pub.der \
+                  --peer-public-key=keys/relying_party.pub.der"
+        DTLS_RP="--rpk --private-key=keys/relying_party.der \
+                 --public-key=keys/relying_party.pub.der \
+                 --attester-public-key=keys/attester.pub.der \
+                 --verifier-public-key=keys/verifier.pub.der \
+                 --trust-manager-public-key=keys/trust_manager.pub.der"
+        ;;
+    *)
+        echo "ERROR: DTLS_MODE must be off, psk or rpk (got '$DTLS_MODE')." >&2
+        exit 1
+        ;;
+esac
 
 # --- sanity checks that span two processes ----------------------------------
 # None of these are fatal on their own; the run still works, it just stops
@@ -227,6 +281,11 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
   -e ATTESTER_EXTRA_ARGS="$ATTESTER_EXTRA_ARGS" \
   -e REBUILD="$REBUILD" \
   -e RESET_TPM="$RESET_TPM" \
+  -e DTLS_MODE="$DTLS_MODE" \
+  -e DTLS_TM="$DTLS_TM" \
+  -e DTLS_ATT="$DTLS_ATT" \
+  -e DTLS_VER="$DTLS_VER" \
+  -e DTLS_RP="$DTLS_RP" \
   "$IMAGE" \
   bash -lc '
     set -e
@@ -330,8 +389,8 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
 
     # Only these two open a TPM. The Verifiers never do -- every check they
     # run is public-key math in mbedTLS -- and neither does trust_manager.
-    bin/trust_manager > logs/trust_manager.log 2>&1 &
-    CHARRA_TCTI="$ATTESTER_TCTI" bin/attester $ATTESTER_EXTRA_ARGS \
+    bin/trust_manager $DTLS_TM > logs/trust_manager.log 2>&1 &
+    CHARRA_TCTI="$ATTESTER_TCTI" bin/attester $DTLS_ATT $ATTESTER_EXTRA_ARGS \
         > logs/attester.log 2>&1 &
 
     # start_verifiers.sh also generates verifiers_config.txt for exactly these
@@ -341,7 +400,7 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
         --host "$VERIFIER_HOST" \
         --logdir logs \
         --qualification-validity "$VERIFIER_QUALIFICATION_VALIDITY" \
-        $VERIFIER_EXTRA_ARGS
+        $DTLS_VER $VERIFIER_EXTRA_ARGS
     sleep 2
 
     rp_args="--verifiers $RP_VERIFIERS \
@@ -350,6 +409,7 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
              --attester-timeout $RP_ATTESTER_TIMEOUT"
     [ "$RP_DURATION" -gt 0 ] && rp_args="$rp_args --duration $RP_DURATION"
     [ "$RP_CYCLES"   -gt 0 ] && rp_args="$rp_args --cycles $RP_CYCLES"
+    rp_args="$rp_args $DTLS_RP"
 
     echo "--- relying_party $rp_args $RP_EXTRA_ARGS"
     echo

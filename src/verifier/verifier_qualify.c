@@ -31,8 +31,21 @@
 
 #define LOG_NAME "verifier"
 
-/* How many synthetic log entries /qualify challenges the RP with. */
-#define CHARRA_RP_QUALIFICATION_NUM_ENTRIES 5
+/* Monotonic seconds since an arbitrary epoch; the /qualify stage timings
+ * below are differences of it. */
+static double charra_now_s(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* How many synthetic log entries /qualify challenges the RP with. Sized to
+ * exercise the redaction pipeline over a realistic number of entries rather
+ * than a token few -- a real IMA log in this testbed is 33 entries, so a
+ * 40-entry challenge covers that range with margin. The whole log is
+ * generated, redacted twice and compared per handshake, so this is the main
+ * knob on what a qualification costs. */
+#define CHARRA_RP_QUALIFICATION_NUM_ENTRIES 40
 
 /* The one outstanding challenge's golden answer. Single slot, matching the
  * one-round-in-flight assumption the rest of this Verifier makes. The
@@ -68,6 +81,7 @@ void coap_qualify_handler(struct coap_resource_t* resource,
     charra_rp_qualification_state_free(&qualification_state);
     memset(qualification_salt, 0, sizeof(qualification_salt));
 
+    const double gen_start = charra_now_s();
     uint32_t seed = 0;
     if ((charra_r = charra_random_bytes(
                  sizeof(seed), (uint8_t*)&seed)) != CHARRA_RC_SUCCESS) {
@@ -88,6 +102,7 @@ void coap_qualify_handler(struct coap_resource_t* resource,
         goto cleanup;
     }
 
+    const double synth_start = charra_now_s();
     if ((charra_r = charra_rp_qualification_generate(
                  CHARRA_RP_QUALIFICATION_NUM_ENTRIES, seed, salt,
                  &qualification_state, &challenge_log,
@@ -96,6 +111,12 @@ void coap_qualify_handler(struct coap_resource_t* resource,
                 "[" LOG_NAME "] /qualify: could not generate challenge.");
         goto cleanup;
     }
+    charra_log_info("[" LOG_NAME "] Timing: /qualify generate synthetic log + "
+                    "golden answer took %f second(s).",
+            charra_now_s() - synth_start);
+    charra_log_info("[" LOG_NAME "] Timing: /qualify seed + salt + synthetic "
+                    "generation took %f second(s).",
+            charra_now_s() - gen_start);
 
     msg_qualify_response_dto resp = {
             .challenge_log_len = challenge_log_len,
@@ -234,10 +255,14 @@ void coap_qualify_submit_handler(struct coap_resource_t* resource,
                 }
                 memcpy(signed_data + req.submitted_redacted_log_len,
                         qualification_salt, sizeof(qualification_salt));
+                const double sigchk_start = charra_now_s();
                 signature_ok = charra_crypto_rsa_verify_signature(
                                        &rp_rsa_pub_key, MBEDTLS_MD_SHA256,
                                        signed_data, signed_len,
                                        req.rp_signature) == CHARRA_RC_SUCCESS;
+                charra_log_info("[" LOG_NAME "] Timing: /qualify_submit verify "
+                                "RP signature took %f second(s).",
+                        charra_now_s() - sigchk_start);
                 free(signed_data);
             }
             mbedtls_rsa_free(&rp_rsa_pub_key);
@@ -259,9 +284,13 @@ void coap_qualify_submit_handler(struct coap_resource_t* resource,
      * salt (see coap_qualify_handler()) is what makes a correctly-behaving
      * RP's redaction come out byte-identical, so a pass here is the expected
      * common case, not a known-broken path. --- */
+    const double check_start = charra_now_s();
     CHARRA_RC qualification_rc = charra_rp_qualification_check(
             &qualification_state, req.submitted_redacted_log,
             req.submitted_redacted_log_len, time(NULL));
+    charra_log_info("[" LOG_NAME "] Timing: /qualify_submit compare golden vs "
+                    "submitted redaction took %f second(s).",
+            charra_now_s() - check_start);
     /* Read the granted deadline BEFORE freeing the state: this Verifier's
      * --qualification-validity is what stamped it, and it is the number
      * every other Verifier will honour. */

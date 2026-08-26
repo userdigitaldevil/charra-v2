@@ -34,6 +34,14 @@ void rp_interruptible_sleep(unsigned int seconds) {
  * were rejected: two timeouts differing only by letter case is a footgun. */
 #define RP_OPT_VERIFIER_TIMEOUT 128
 #define RP_OPT_ATTESTER_TIMEOUT 129
+/* DTLS. The RP is a client to THREE kinds of peer, so it cannot use
+ * cli_util's single --peer-public-key: it needs one path per peer kind. */
+#define RP_OPT_RPK_PRIVATE_KEY 130
+#define RP_OPT_RPK_PUBLIC_KEY 131
+#define RP_OPT_RPK_VERIFY_PEER 132
+#define RP_OPT_RPK_ATTESTER_KEY 133
+#define RP_OPT_RPK_VERIFIER_KEY 134
+#define RP_OPT_RPK_TRUST_MANAGER_KEY 135
 
 static const struct option rp_long_options[] = {{"help", no_argument, 0, '0'},
         {"verbose", no_argument, 0, 'v'},
@@ -45,6 +53,17 @@ static const struct option rp_long_options[] = {{"help", no_argument, 0, '0'},
         {"cycles", required_argument, 0, 'C'},
         {"verifier-timeout", required_argument, 0, RP_OPT_VERIFIER_TIMEOUT},
         {"attester-timeout", required_argument, 0, RP_OPT_ATTESTER_TIMEOUT},
+        {"psk", no_argument, 0, 'p'},
+        {"key", required_argument, 0, 'k'},
+        {"identity", required_argument, 0, 'i'},
+        {"rpk", no_argument, 0, 'r'},
+        {"private-key", required_argument, 0, RP_OPT_RPK_PRIVATE_KEY},
+        {"public-key", required_argument, 0, RP_OPT_RPK_PUBLIC_KEY},
+        {"verify-peer", required_argument, 0, RP_OPT_RPK_VERIFY_PEER},
+        {"attester-public-key", required_argument, 0, RP_OPT_RPK_ATTESTER_KEY},
+        {"verifier-public-key", required_argument, 0, RP_OPT_RPK_VERIFIER_KEY},
+        {"trust-manager-public-key", required_argument, 0,
+                RP_OPT_RPK_TRUST_MANAGER_KEY},
         {0}};
 
 /* Which options actually appeared on the command line, indexed by their
@@ -69,7 +88,7 @@ int parse_rp_command_line(int argc, char** argv) {
     for (;;) {
         int index = -1;
         int identifier =
-                getopt_long(argc, argv, "vl:BI:n:D:C:", rp_long_options, &index);
+                getopt_long(argc, argv, "vl:BI:n:D:C:pk:i:r", rp_long_options, &index);
         if (identifier == -1) {
             break;
         }
@@ -121,6 +140,41 @@ int parse_rp_command_line(int argc, char** argv) {
                    "Attester's evidence before giving up, ending the cycle. "
                    "Default %d.\n",
                     RP_DEFAULT_ATTESTER_TIMEOUT_S);
+            printf("\nDTLS Options (PSK and RPK are mutually exclusive):\n");
+            printf("                               EVERY role must use the "
+                   "SAME mode. A Verifier speaking DTLS to an RP speaking "
+                   "plain UDP does not error -- the request times out, which "
+                   "counts as a NO vote, so a mismatch reads as a failed "
+                   "attestation. run_daemon.sh's DTLS_MODE sets all four "
+                   "roles at once for exactly this reason.\n");
+            printf(" -p, --psk:                    Enable DTLS-PSK. Default "
+                   "key '%s', identity '%s'.\n",
+                    dtls_config.psk_key, dtls_config.psk_identity);
+            printf(" -k, --key=KEY:                Pre-shared key. Implies "
+                   "--psk.\n");
+            printf(" -i, --identity=IDENTITY:      PSK identity. Implies "
+                   "--psk.\n");
+            printf(" -r, --rpk:                    Enable DTLS-RPK (raw "
+                   "public keys), which authenticates BOTH ends against the "
+                   "keypairs in keys/.\n");
+            printf("     --private-key=PATH:       This RP's private key. "
+                   "Default '%s'. Implies --rpk.\n",
+                    dtls_config.rpk_private_key_path);
+            printf("     --public-key=PATH:        This RP's public key. "
+                   "Default '%s'. Implies --rpk.\n",
+                    dtls_config.rpk_public_key_path);
+            printf("     --verify-peer=[0,1]:      Check each peer's key "
+                   "against the reference below. Default %d.\n",
+                    dtls_config.rpk_verify_peer_public_key ? 1 : 0);
+            printf("     --attester-public-key=PATH:      Default '%s'.\n",
+                    dtls_rpk_attester_public_key_path);
+            printf("     --verifier-public-key=PATH:      Default '%s'.\n",
+                    dtls_rpk_verifier_public_key_path);
+            printf("     --trust-manager-public-key=PATH: Default '%s'.\n",
+                    dtls_rpk_trust_manager_public_key_path);
+            printf("                               Three separate paths "
+                   "because the RP is a client to three kinds of peer, "
+                   "unlike the Attester and Verifier which each face one.\n");
             return 1;
         case 'v':
             charra_log_level = CHARRA_LOG_DEBUG;
@@ -178,11 +232,58 @@ int parse_rp_command_line(int argc, char** argv) {
             }
             rp_max_cycles = (unsigned long)value;
             break;
+        case 'p':
+            dtls_config.use_psk = true;
+            break;
+        case 'k':
+            dtls_config.psk_key = optarg;
+            dtls_config.use_psk = true;
+            break;
+        case 'i':
+            dtls_config.psk_identity = optarg;
+            dtls_config.use_psk = true;
+            break;
+        case 'r':
+            dtls_config.use_rpk = true;
+            break;
+        case RP_OPT_RPK_PRIVATE_KEY:
+            dtls_config.rpk_private_key_path = optarg;
+            dtls_config.use_rpk = true;
+            break;
+        case RP_OPT_RPK_PUBLIC_KEY:
+            dtls_config.rpk_public_key_path = optarg;
+            dtls_config.use_rpk = true;
+            break;
+        case RP_OPT_RPK_VERIFY_PEER:
+            if (!charra_cli_parse_uint_arg(
+                        LOG_NAME, "--verify-peer", optarg, 0, 1, &value)) {
+                return -1;
+            }
+            dtls_config.rpk_verify_peer_public_key = (value == 1);
+            break;
+        case RP_OPT_RPK_ATTESTER_KEY:
+            dtls_rpk_attester_public_key_path = optarg;
+            break;
+        case RP_OPT_RPK_VERIFIER_KEY:
+            dtls_rpk_verifier_public_key_path = optarg;
+            break;
+        case RP_OPT_RPK_TRUST_MANAGER_KEY:
+            dtls_rpk_trust_manager_public_key_path = optarg;
+            break;
         default:
             charra_log_error(
                     "[" LOG_NAME "] Unrecognized option. Try --help.");
             return -1;
         }
+    }
+
+    /* Rejected here rather than left to rp_coap_open_session(), which would
+     * refuse per exchange -- one clear failure at startup beats N identical
+     * errors once the daemon is already running. */
+    if (dtls_config.use_psk && dtls_config.use_rpk) {
+        charra_log_error("[" LOG_NAME "] --psk and --rpk are mutually "
+                         "exclusive; pick one.");
+        return -1;
     }
 
     return 0;
@@ -284,6 +385,32 @@ void rp_log_effective_configuration(void) {
     charra_log_info("[" LOG_NAME "]   %-22s '%s'  (in use: %s, no flag)",
             "IMA test log", ima_test_log_path,
             use_ima_test_log ? "yes" : "no");
+    /* Named explicitly, and never as a bare boolean: "DTLS-PSK enabled:
+     * false" was the only signal this transport existed, and it read as a
+     * setting rather than as the one that must match every peer. */
+    if (dtls_config.use_psk) {
+        charra_log_info("[" LOG_NAME "]   %-22s PSK, identity '%s'", "--psk",
+                dtls_config.psk_identity);
+    } else if (dtls_config.use_rpk) {
+        charra_log_info("[" LOG_NAME "]   %-22s RPK, key '%s', verify peer: %s",
+                "--rpk", dtls_config.rpk_private_key_path,
+                dtls_config.rpk_verify_peer_public_key ? "yes" : "no");
+        charra_log_info("[" LOG_NAME "]   %-22s attester '%s'", "peer keys",
+                dtls_rpk_attester_public_key_path);
+        charra_log_info("[" LOG_NAME "]   %-22s verifier '%s'", "",
+                dtls_rpk_verifier_public_key_path);
+        charra_log_info("[" LOG_NAME "]   %-22s trust manager '%s'", "",
+                dtls_rpk_trust_manager_public_key_path);
+    } else {
+        charra_log_info("[" LOG_NAME "]   %-22s off -- plain UDP (default)",
+                "DTLS");
+    }
+    if (dtls_config.use_psk || dtls_config.use_rpk) {
+        charra_log_info("[" LOG_NAME "]   EVERY peer must use this same mode. "
+                        "A mismatch times out, and a timeout is a NO vote -- "
+                        "so it looks like a failed attestation, not a "
+                        "misconfiguration.");
+    }
     charra_log_info("[" LOG_NAME "] Run with --help for every flag and its "
                     "accepted range.");
     charra_log_info("[" LOG_NAME

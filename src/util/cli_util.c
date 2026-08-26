@@ -173,15 +173,11 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
                                 ? (long)*(variables->verifier_config
                                                   .qualification_validity_seconds)
                                 : (long)CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS);
-                printf("                                 WARNING: the Relying "
-                       "Party is the only client in this system and it speaks "
-                       "plain UDP only -- it has no --psk or --rpk flag of "
-                       "its own (see src/rp/rp_config.c).\n");
-                printf("                                 Enabling DTLS below "
-                       "therefore makes this role unreachable, and an RP "
-                       "request that times out counts as a NO vote rather "
-                       "than an error -- so the run degrades quietly "
-                       "instead of failing.\n");
+                printf("                                 EVERY role must "
+                       "use the SAME DTLS mode. A mismatch does not error: "
+                       "the request times out, which counts as a NO vote, so "
+                       "it reads as a failed attestation. run_daemon.sh's "
+                       "DTLS_MODE sets all four roles at once.\n");
                 printf("DTLS-PSK Options:\n");
                 printf(" -p, --psk:                      Enable DTLS protocol "
                        "with PSK. By default the key '%s' and identity '%s' "
@@ -196,15 +192,11 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
                 printf("     --port=PORT:                Open PORT instead of "
                        "port %u.\n",
                         *(variables->common_config.port));
-                printf("                                 WARNING: the Relying "
-                       "Party is the only client in this system and it speaks "
-                       "plain UDP only -- it has no --psk or --rpk flag of "
-                       "its own (see src/rp/rp_config.c).\n");
-                printf("                                 Enabling DTLS below "
-                       "therefore makes this role unreachable, and an RP "
-                       "request that times out counts as a NO vote rather "
-                       "than an error -- so the run degrades quietly "
-                       "instead of failing.\n");
+                printf("                                 EVERY role must "
+                       "use the SAME DTLS mode. A mismatch does not error: "
+                       "the request times out, which counts as a NO vote, so "
+                       "it reads as a failed attestation. run_daemon.sh's "
+                       "DTLS_MODE sets all four roles at once.\n");
                 printf("DTLS-PSK Options:\n");
                 printf(" -p, --psk:                      Enable DTLS protocol "
                        "with PSK. By default the key '%s' and hint '%s' are "

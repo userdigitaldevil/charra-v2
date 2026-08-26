@@ -58,10 +58,20 @@
 CHARRA_RC rp_sign_with_ak(const uint8_t* data, size_t data_len,
         uint8_t* signature_out, TPM2B_PUBLIC* ak_public_key_out);
 
-/** PCR the RP replays log_r into. Not PCR 10: this one must be rewound
- * before each replay, and PCR 10 -- correctly -- refuses (see
- * tpm2_pcr_reset()). 23 is also outside the Attester's quoted selection
- * ({0..7, 10}), so RP activity here cannot perturb Quote_a. */
+/** PCR the RP replays log_r into. Not PCR 10, for one reason that always
+ * applies and one that applies only in a fallback configuration.
+ *
+ * Always: this PCR must be rewound before each replay (see tpm2_pcr_reset()
+ * below), and PCR 10 -- correctly -- refuses, being in the 0-15 range. Only
+ * 16 and 23 are resettable from locality 0 on this simulator.
+ *
+ * Only when the TPMs are shared: 23 is outside the Attester's quoted
+ * selection ({0..7, 10}), so RP activity here cannot perturb Quote_a. Under
+ * the normal two-TPM setup that is moot -- the roles hold separate devices,
+ * so the RP cannot reach the Attester's PCRs whatever index it uses. It
+ * matters under TWO_TPMS=0 (run_daemon.sh), which points the RP at the
+ * Attester's own TCTI; there, replaying into PCR 10 would corrupt the PCR
+ * Quote_a attests to. */
 #define RP_REPLAY_PCR_INDEX 23
 
 /**

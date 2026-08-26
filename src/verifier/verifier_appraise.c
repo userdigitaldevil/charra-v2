@@ -33,6 +33,14 @@
 
 #define LOG_NAME "verifier"
 
+/* Monotonic seconds since an arbitrary epoch. The Step 3b timings below are
+ * differences of it; mirrors the helpers in rp_evidence.c / rp_attestation.c. */
+static double charra_now_s(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
 /**
  * @brief The one way a verdict leaves this Verifier.
  *
@@ -56,6 +64,7 @@ static void send_verdict(struct coap_resource_t* resource,
 
     uint8_t* buf = NULL;
     uint32_t buf_len = 0;
+    const double sign_start = charra_now_s();
     if (charra_verdict_sign(&verdict, verdict_signing_key_path, &buf_len,
                 &buf) != CHARRA_RC_SUCCESS) {
         /* An unsigned answer is one the RP counts as NO regardless, so the
@@ -64,6 +73,9 @@ static void send_verdict(struct coap_resource_t* resource,
         coap_pdu_set_code(response, COAP_RESPONSE_CODE_INTERNAL_ERROR);
         return;
     }
+
+    charra_log_info("[" LOG_NAME "] Timing: sign the verdict took %f "
+                    "second(s).", charra_now_s() - sign_start);
 
     coap_pdu_set_code(response, COAP_RESPONSE_CODE_CONTENT);
     if (coap_add_data_large_response(resource, session, request, response,
@@ -245,6 +257,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     bool rp_identity_known = false;
     char rp_fingerprint_hex[17] = {0};
 
+    const double ak_r_start = charra_now_s();
     if (res.rp_public_key_len == 0) {
         ekak_rp_why = "MISSING -- the RP sent no public key for itself";
         charra_log_error("[" LOG_NAME "]     => the RP sent an EMPTY public "
@@ -283,7 +296,12 @@ void coap_appraise_handler(struct coap_resource_t* resource,
      * shared by every Verifier (see verifier_qualified_rps.h), so an RP
      * that qualified once, with any one of us, is qualified here too --
      * until the deadline that Verifier granted passes. */
+    charra_log_info("[" LOG_NAME "] Timing: verify AK_r (trust anchor + "
+                    "fingerprint) took %f second(s).",
+            charra_now_s() - ak_r_start);
+
     bool attestation_result_qualified = false;
+    const double qual_start = charra_now_s();
     if (rp_identity_known) {
         attestation_result_qualified = verifier_qualified_rps_is_qualified(
                 qualified_rps_file_path, rp_fingerprint, time(NULL));
@@ -297,6 +315,8 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                     rp_fingerprint_hex);
         }
     }
+    charra_log_info("[" LOG_NAME "] Timing: RP qualification lookup took %f "
+                    "second(s).", charra_now_s() - qual_start);
 
     /* Step 3a item 2: verify Quote_r's signature -- RSA-PSS/SHA-256 over
      * the TPMS_ATTEST the RP's TPM built, under RP's public key. Same
@@ -506,6 +526,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
          * relayed alongside it, because there is nothing to relay: both
          * roles' public keys were written offline into the one trust
          * anchor every Verifier reads. */
+        const double ak_a_start = charra_now_s();
         if (res.tpm2_public_key_len == 0) {
             ekak_att_why = "MISSING -- the RP forwarded no Attester key";
             charra_log_error("[" LOG_NAME "]     => the RP forwarded an EMPTY "
@@ -529,7 +550,11 @@ void coap_appraise_handler(struct coap_resource_t* resource,
             }
         }
 
+        charra_log_info("[" LOG_NAME "] Timing: verify AK_a (trust anchor) "
+                        "took %f second(s).", charra_now_s() - ak_a_start);
+
         /* Step 3b item 2: verify Quote_a signature */
+        const double sig_a_start = charra_now_s();
         TPM2B_PUBLIC* tpm2_public_key = (TPM2B_PUBLIC*)res.tpm2_public_key;
         TPMT_SIGNATURE signature = {0};
         memcpy(&signature, res.tpm2_signature, res.tpm2_signature_len);
@@ -566,12 +591,18 @@ void coap_appraise_handler(struct coap_resource_t* resource,
          * charra_verify_tpm2_quote_qualifying_data() compares two
          * zero-length buffers as equal, so with nothing outstanding a quote
          * carrying empty extraData would pass. */
+        charra_log_info("[" LOG_NAME "] Timing: verify Quote_a signature "
+                        "took %f second(s).", charra_now_s() - sig_a_start);
+
         charra_log_info("[" LOG_NAME "] Verifying nonce ...");
+        const double nonce_a_start = charra_now_s();
         attestation_result_nonce =
                 last_request.nonce_len != 0 &&
                 charra_verify_tpm2_quote_qualifying_data(
                         last_request.nonce_len, last_request.nonce,
                         &attest_struct);
+        charra_log_info("[" LOG_NAME "] Timing: verify Quote_a nonce took %f "
+                        "second(s).", charra_now_s() - nonce_a_start);
         char expected_nonce_hex[17] = {0};
         charra_hex_encode_prefix(last_request.nonce, last_request.nonce_len,
                 expected_nonce_hex, sizeof(expected_nonce_hex));

@@ -6,16 +6,31 @@ The keys in this folder are only supposed to be used for testing, in actual prod
 * Generate public key file: `openssl ec -in <name>.der -inform DER -pubout -out <name>.pub.der -outform DER`
 
 The `*.der` / `*.pub.der` pairs above are the DTLS raw-public-key identities
-for the CoAP transport (`attester`, `relying_party`, `verifier`). For
-`attester` and `relying_party` that is still all they are -- and DTLS is
-currently off, so even that role goes unused (see `src/relying_party.c`).
+for the CoAP transport. There are four, one per role: `attester`,
+`relying_party`, `verifier`, `trust_manager`.
 
-`verifier.der` is the exception: it doubles as the key every Verifier signs
+DTLS is **off by default** -- `run_daemon.sh` starts every role in plain
+UDP unless `DTLS_MODE` says otherwise:
+
+```sh
+DTLS_MODE=rpk ./run_daemon.sh     # mutual auth using these keypairs
+DTLS_MODE=psk ./run_daemon.sh     # one shared secret instead
+```
+
+Under `rpk` each role proves possession of its own private key and checks
+its peer against the reference public key. The three servers each face one
+client -- the RP -- so each pins `relying_party.pub.der`; the RP faces three
+servers, so it pins one key per peer kind.
+
+`verifier.der` does double duty: it is also the key every Verifier signs
 its `/appraise` verdict with (`src/core/charra_verdict.h`), since all
 Verifier instances currently share one keypair. That signature is checked
 against `verifier.pub.der` by the RP (`verifier_public_key_path` in
-`src/relying_party.c`), independently of DTLS being on or off. Neither
-pairing is attestation identity in the AK sense -- see below for that.
+`src/relying_party.c`) **independently of DTLS** -- the verdict is
+end-to-end and survives a compromised hop, whereas DTLS is hop-by-hop.
+The two are complementary, not alternatives.
+
+None of these four is attestation identity in the AK sense -- see below.
 
 # The attestation trust anchor
 

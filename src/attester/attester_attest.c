@@ -182,6 +182,8 @@ void coap_attest_handler(struct coap_resource_t* resource,
     clock_gettime(CLOCK_MONOTONIC, &start_time);
 
     /* initialize ESAPI */
+    struct timespec start_init, end_init;
+    clock_gettime(CLOCK_MONOTONIC, &start_init);
     const char* charra_tcti = getenv("CHARRA_TCTI");
     charra_log_info("[" LOG_NAME "] CHARRA_TCTI = '%s'.",
             (charra_tcti != NULL) ? charra_tcti : "(null)");
@@ -196,6 +198,11 @@ void coap_attest_handler(struct coap_resource_t* resource,
         charra_log_error("[" LOG_NAME "] Esys_Initialize failed: 0x%x.", tss_r);
         goto error;
     }
+    clock_gettime(CLOCK_MONOTONIC, &end_init);
+    charra_log_info("[" LOG_NAME "] Timing: TCTI + ESYS init took %f "
+                    "second(s).",
+            (end_init.tv_sec - start_init.tv_sec) +
+                    (end_init.tv_nsec - start_init.tv_nsec) / 1e9);
 
     /* Extend the IMA log into the PCRs, once per process: PCRs 0-15 cannot
      * be reset without a reboot, so replaying the log on every request would
@@ -203,6 +210,11 @@ void coap_attest_handler(struct coap_resource_t* resource,
      * it. */
     static bool ima_log_extended = false;
     if (!ima_log_extended) {
+        /* Timed separately because it happens exactly once per process and
+         * dominates that first request: averaging it into /attest would
+         * make the steady-state figure meaningless. */
+        struct timespec start_extend, end_extend;
+        clock_gettime(CLOCK_MONOTONIC, &start_extend);
         const uint8_t* log = NULL;
         uint32_t log_len = 0;
         if (charra_get_ima_log(ima_test_log_path, &log, &log_len) ==
@@ -220,6 +232,11 @@ void coap_attest_handler(struct coap_resource_t* resource,
                             "unextended.");
         }
         ima_log_extended = true;
+        clock_gettime(CLOCK_MONOTONIC, &end_extend);
+        charra_log_info("[" LOG_NAME "] Timing: extending the IMA log into "
+                        "the TPM PCRs took %f second(s).",
+                (end_extend.tv_sec - start_extend.tv_sec) +
+                        (end_extend.tv_nsec - start_extend.tv_nsec) / 1e9);
     } else {
         charra_log_debug(
                 "[" LOG_NAME "] PCRs already extended from IMA log earlier "

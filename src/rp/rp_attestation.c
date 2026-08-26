@@ -32,6 +32,14 @@
 
 #define LOG_NAME "relying party"
 
+/* Monotonic seconds since an arbitrary epoch; the per-step timings below are
+ * differences of it. Mirrors the helper in rp_evidence.c. */
+static double charra_now_s(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
 /* /attest_result carries no payload to parse -- this handler only needs to
  * know the round trip completed. */
 static bool processing_attestation_result_response = false;
@@ -91,6 +99,9 @@ static CHARRA_RC create_attestation_request(msg_attestation_request_dto* attesta
     /* generate nonce */
     const uint32_t nonce_len = 20;
     uint8_t nonce[nonce_len];
+    /* Timed because the two paths differ by orders of magnitude: the TPM RNG
+     * is a round trip to the device, charra_random_bytes() is local. */
+    const double nonce_gen_start = charra_now_s();
     if (USE_TPM_FOR_RANDOM_NONCE_GENERATION) {
         if ((err = charra_random_bytes_from_tpm(nonce_len, nonce)) !=
                 CHARRA_RC_SUCCESS) {
@@ -110,6 +121,10 @@ static CHARRA_RC create_attestation_request(msg_attestation_request_dto* attesta
         }
     }
 
+    charra_log_info("[" LOG_NAME "] Timing: nonce generation (%s) took %f "
+                    "second(s).",
+            USE_TPM_FOR_RANDOM_NONCE_GENERATION ? "TPM RNG" : "software",
+            charra_now_s() - nonce_gen_start);
     charra_log_info("[" LOG_NAME "] Generated nonce of length %d:", nonce_len);
     charra_print_hex(CHARRA_LOG_INFO, nonce_len, nonce,
             "                                                  0x", "\n",
@@ -258,6 +273,7 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
     size_t data_len = 0;
     const uint8_t* data = NULL;
     bool accepted = false;
+    const double verdict_start = charra_now_s();
     if (charra_coap_get_payload(received, LOG_NAME, "/appraise response",
                 &data, &data_len, NULL) &&
             charra_verdict_verify((uint32_t)data_len, data,
@@ -265,6 +281,8 @@ static coap_response_t coap_verifier_handler_appraisal(coap_session_t* session,
                     verifier_nonce_lens[*index],
                     verifier_evidence_digests[*index], time(NULL),
                     &accepted) == CHARRA_RC_SUCCESS) {
+        charra_log_info("[" LOG_NAME "] Timing: verify the signed verdict "
+                        "took %f second(s).", charra_now_s() - verdict_start);
         attestation_results[*index] = accepted;
         verifier_verdict_verified[*index] = true;
         charra_log_info("[" LOG_NAME "] Verifier n\u00b0 %d returned a valid "
@@ -403,8 +421,6 @@ CHARRA_RC get_verifiers(int* requested_ids, int num_verifiers) {
         return result;
     }
 
-    /* The Trust Manager has no configured DTLS-RPK peer key, so this
-     * exchange is plain UDP even under --rpk. */
     result = rp_coap_exchange(&(rp_coap_request){
             .host = trust_manager_host, .port = trust_manager_port,
             .uri_path = "get_verifiers",
@@ -413,7 +429,8 @@ CHARRA_RC get_verifiers(int* requested_ids, int num_verifiers) {
             .response_pending = &processing_trust_manager_response,
             .session_app_data = &num_verifiers,
             .timeout_seconds = trust_manager_response_timeout,
-            .dtls_rpk_peer_public_key_path = NULL,
+            .dtls_rpk_peer_public_key_path =
+                    dtls_rpk_trust_manager_public_key_path,
     });
 
     charra_free_if_not_null(req_buf);
@@ -553,6 +570,7 @@ void* get_attestation_results_thread(void* arg) {
     verifier_nonce_lens[verifier_index] = 0;
     charra_log_info("[" LOG_NAME "] Requesting a nonce from Verifier n\u00b0 %d ...",
             verifier_index + 1);
+    const double nonce_rt_start = charra_now_s();
     CHARRA_RC result = rp_coap_exchange(&(rp_coap_request){
             .host = verifier->ip_address, .port = verifier->port_number,
             .uri_path = "nonce",
@@ -563,6 +581,8 @@ void* get_attestation_results_thread(void* arg) {
             .timeout_seconds = verifier_response_timeout,
             .dtls_rpk_peer_public_key_path = dtls_rpk_verifier_public_key_path,
     });
+    charra_log_info("[" LOG_NAME "] Timing: /nonce round trip took %f "
+                    "second(s).", charra_now_s() - nonce_rt_start);
     charra_free_if_not_null(nonce_req_buf);
     if (result != CHARRA_RC_SUCCESS ||
             verifier_nonce_lens[verifier_index] == 0) {
@@ -577,17 +597,22 @@ void* get_attestation_results_thread(void* arg) {
     uint32_t evidence_buf_len = 0;
     /* Local, not a shared global: every Verifier thread runs this, so one
      * thread's failure must not be readable as another's. */
+    const double build_start = charra_now_s();
     if (charra_rp_build_evidence_message(verifier_index, &evidence_buf_len,
                 &evidence_buf) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Error building RP evidence message.");
         return NULL;
     }
+    charra_log_info("[" LOG_NAME "] Timing: build evidence message "
+                    "(incl. Quote_r) took %f second(s).",
+            charra_now_s() - build_start);
     charra_log_info(
             "[" LOG_NAME "] Sending %u bytes of RP evidence to Verifier n\u00b0 %d.",
             evidence_buf_len, verifier_index + 1);
 
     /* Kept for the response handler, which checks the signed verdict names
      * this exact submission -- by then evidence_buf is freed. */
+    const double digest_start = charra_now_s();
     if (hash_sha256(evidence_buf_len, evidence_buf,
                 verifier_evidence_digests[verifier_index]) !=
             CHARRA_RC_SUCCESS) {
@@ -595,6 +620,9 @@ void* get_attestation_results_thread(void* arg) {
         charra_free_if_not_null(evidence_buf);
         return NULL;
     }
+
+    charra_log_info("[" LOG_NAME "] Timing: SHA-256 over the submission took "
+                    "%f second(s).", charra_now_s() - digest_start);
 
     struct timespec appraisal_start, appraisal_end;
     clock_gettime(CLOCK_MONOTONIC, &appraisal_start);
@@ -626,10 +654,18 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
     /* Privacy-clean once, before any verifier thread starts: the redaction
      * is randomised, so doing it per thread would give each Verifier a
      * different log_r for the same attestation. */
+    const double prepare_start = charra_now_s();
     if (charra_rp_prepare_evidence() != CHARRA_RC_SUCCESS) {
         charra_rp_release_evidence();
         return CHARRA_RC_ERROR;
     }
+    /* Top-level operation 4: everything the RP does to its own TPM before it
+     * can submit anything -- redaction plus the log_r replay that rebuilds
+     * PCR_r. Bracketed here rather than derived, so it carries its own
+     * per-cycle distribution. */
+    charra_log_info("[" LOG_NAME "] Timing: prepareEvidence_r (redact + TPM "
+                    "replay) took %f second(s).",
+            charra_now_s() - prepare_start);
     if (quit) {
         charra_rp_release_evidence();
         return CHARRA_RC_ERROR;
@@ -641,8 +677,19 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
      * only when the previous grant has actually lapsed. No Verifier will
      * accept /appraise without one, so abort here rather than spawning
      * threads that would all fail identically. */
-    if (rp_perform_qualification_handshake_once(num_verifiers) !=
-            CHARRA_RC_SUCCESS) {
+    struct timespec start_qualify, end_qualify;
+    clock_gettime(CLOCK_MONOTONIC, &start_qualify);
+    CHARRA_RC qualify_rc =
+            rp_perform_qualification_handshake_once(num_verifiers);
+    clock_gettime(CLOCK_MONOTONIC, &end_qualify);
+    /* Covers /qualify + /qualify_submit together, and is a no-op round when
+     * the previous grant is still valid -- so a near-zero sample here means
+     * "grant still held", not "handshake was free". */
+    charra_log_info("[" LOG_NAME "] Timing: /qualify handshake took %f "
+                    "second(s).",
+            (end_qualify.tv_sec - start_qualify.tv_sec) +
+                    (end_qualify.tv_nsec - start_qualify.tv_nsec) / 1e9);
+    if (qualify_rc != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not qualify with any "
                          "reachable Verifier; aborting attestation run.");
         charra_rp_release_evidence();
@@ -656,6 +703,12 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
     }
 
     CHARRA_RC result = CHARRA_RC_ERROR;
+
+    /* Top-level operation 5: the per-Verifier fan-out -- /nonce, Quote_r,
+     * /appraise, and verdict verification -- plus the majority aggregation.
+     * Starts after qualification so a one-off handshake is not blended into
+     * a steady-state number. */
+    const double submit_start = charra_now_s();
 
     charra_log_info("[" LOG_NAME "] Forwarding (redacted) evidence to the verifiers.");
     charra_log_info("[" LOG_NAME "]  +------------ Interaction with the Verifiers --------------+");
@@ -767,8 +820,13 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
 
     result = CHARRA_RC_SUCCESS;
 
-    /* Common exit, not an error-only one -- the success path falls in here. */
+    /* Common exit, not an error-only one -- the success path falls in here.
+     * Reached only from after submit_start is set (the earlier failures
+     * return directly), so the timer below is always initialised. */
 done:
+    charra_log_info("[" LOG_NAME "] Timing: submitAndCollect (per-Verifier "
+                    "fan-out + aggregation) took %f second(s).",
+            charra_now_s() - submit_start);
     charra_rp_release_evidence();
     return result;
 

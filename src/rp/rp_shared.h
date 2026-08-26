@@ -152,6 +152,13 @@ extern uint32_t verifier_nonce_lens[MAX_VERIFIERS];
 /** SHA-256 of the evidence sent to each Verifier, kept because the signed
  * verdict coming back names it and the response handler has no other way
  * to reach the buffer, which is freed by then. See charra_verdict.h. */
+/* Seconds the RP's own appraisal of evidence_a took in the current cycle.
+ * Written by charra_rp_appraise_evidence(), read by the getEvidence phase so
+ * it can report the Attester round trip with the local appraisal taken out --
+ * the two are interleaved (the appraisal runs inside the /attest response
+ * handler), so no timer pair can bracket the round trip alone. */
+extern double rp_last_appraise_a_seconds;
+
 extern uint8_t verifier_evidence_digests[MAX_VERIFIERS]
                                         [TPM2_SHA256_DIGEST_SIZE];
 
@@ -182,6 +189,7 @@ extern uint16_t attester_response_timeout;
 extern charra_dtls_config dtls_config;
 extern char* dtls_rpk_attester_public_key_path;
 extern char* dtls_rpk_verifier_public_key_path;
+extern char* dtls_rpk_trust_manager_public_key_path;
 /** Public half of the key Verifiers sign their verdicts with. */
 extern char* verifier_public_key_path;
 extern char* ima_event_log_path;

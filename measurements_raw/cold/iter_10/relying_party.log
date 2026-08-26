@@ -1,0 +1,506 @@
+[32mINFO [0m[relying party] ============================================================
+[32mINFO [0m[relying party] MODE: DAEMON -- continuous attestation until stopped (default; pass --benchmark for the timing sweep).
+[32mINFO [0m[relying party] ============================================================
+[32mINFO [0m[relying party] Settings for this run -- "(default)" means the flag was not given; pass it to change the value.
+[32mINFO [0m[relying party]   --verifiers            5 (default)
+[32mINFO [0m[relying party]   --interval             1s
+[32mINFO [0m[relying party]   --duration             unlimited (default)
+[32mINFO [0m[relying party]   --cycles               2
+[32mINFO [0m[relying party]   --log-level            DEBUG (default)
+[32mINFO [0m[relying party]   --verifier-timeout     6s (default)
+[32mINFO [0m[relying party]   --attester-timeout     6s (default)
+[32mINFO [0m[relying party]   whitelist              'whitelist-hashes.txt'  (no flag)
+[32mINFO [0m[relying party]   blacklist              'blacklist-hashes.txt'  (no flag)
+[32mINFO [0m[relying party]   IMA test log           'ima_test_logs.txt'  (in use: yes, no flag)
+[32mINFO [0m[relying party] Run with --help for every flag and its accepted range.
+[32mINFO [0m[relying party] ============================================================
+[32mINFO [0m[relying party] Entering attestation loop; Ctrl+C (SIGINT) to stop.
+[32mINFO [0m[relying party] ============================================================
+[32mINFO [0m[relying party] Starting new attestation run with 5 verifier(s) (cycle 1).
+[32mINFO [0m[relying party] ============================================================
+[32mINFO [0m[relying party] Getting verifiers.
+[32mINFO [0m[relying party]  +------------ Interaction with the Trust Manager --------------+
+[32mINFO [0m[relying party] Received data of length 72.
+[32mINFO [0m[relying party] Received data of total length 72.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[32mINFO [0m[relying party] Verifier ID 1: IP Address = 127.0.0.1, Port Number = 5684
+[32mINFO [0m[relying party] Verifier ID 2: IP Address = 127.0.0.1, Port Number = 5685
+[32mINFO [0m[relying party] Verifier ID 3: IP Address = 127.0.0.1, Port Number = 5686
+[32mINFO [0m[relying party] Verifier ID 4: IP Address = 127.0.0.1, Port Number = 5687
+[32mINFO [0m[relying party] Verifier ID 5: IP Address = 127.0.0.1, Port Number = 5688
+[32mINFO [0m[relying party] Phase timing: get_verifiers took 0.016s.
+[32mINFO [0m[relying party] Getting evidence.
+[32mINFO [0m[relying party]  +------------ Interaction with the Attester --------------+
+[32mINFO [0m[relying party] Creating attestation request.
+[32mINFO [0m[relying party] Timing: nonce generation (software) took 0.001216 second(s).
+[32mINFO [0m[relying party] Generated nonce of length 20:
+                                                  0x480feceb7b5c38cd322ef756fb7f23cdccc600ae
+[36mDEBUG[0mSize of marshaled data is 63 bytes.
+[36mDEBUG[0mAllocated 63 bytes of memory.
+[32mINFO [0m[relying party] Sending attestation request.
+[32mINFO [0m[relying party] Received evidence of total length 6007.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[relying party]  +------------ RP Appraisal of the Evidence --------------+
+[32mINFO [0m[relying party] Verifying the Attester's signing key ...
+[32mINFO [0m[relying party]     => trusted: 'attester'
+[32mINFO [0m[relying party] Timing: RP verify AK_a (trust anchor) took 0.002483 second(s).
+[32mINFO [0m[relying party] Verifying quote signature ...
+[32mINFO [0m[relying party]     => quote signature is valid!
+[32mINFO [0m[relying party] Timing: RP verify Quote_a signature took 0.002303 second(s).
+[32mINFO [0m[relying party] Timing: RP unmarshal Quote_a took 0.003148 second(s).
+[32mINFO [0m[relying party] Verifying nonce ...
+[32mINFO [0m[relying party]     => nonce in the quote matches the one sent!
+[32mINFO [0m[relying party] Timing: RP verify Quote_a nonce took 0.000029 second(s).
+[32mINFO [0m[relying party] Verifying log entry self-consistency ...
+[36mDEBUG[0m[event_log] Detected template digest size: 32 bytes.
+[32mINFO [0m[relying party]     => log entries are self-consistent!
+[32mINFO [0m[relying party] Timing: RP verify log_a self-consistency took 0.000251 second(s).
+[32mINFO [0m[relying party] Replaying the log into the PCRs ...
+[36mDEBUG[0m[event_log] Detected template digest size: 32 bytes.
+[36mDEBUG[0m[event_log] Replayed PCR 0:
+                        0x0000000000000000000000000000000000000000000000000000000000000000
+[36mDEBUG[0m[event_log] Replayed PCR 1:
+                        0x0000000000000000000000000000000000000000000000000000000000000000
+[36mDEBUG[0m[event_log] Replayed PCR 2:
+                        0x0000000000000000000000000000000000000000000000000000000000000000
+[36mDEBUG[0m[event_log] Replayed PCR 3:
+                        0x0000000000000000000000000000000000000000000000000000000000000000
+[36mDEBUG[0m[event_log] Replayed PCR 4:
+                        0x0000000000000000000000000000000000000000000000000000000000000000
+[36mDEBUG[0m[event_log] Replayed PCR 5:
+                        0x0000000000000000000000000000000000000000000000000000000000000000
+[36mDEBUG[0m[event_log] Replayed PCR 6:
+                        0x0000000000000000000000000000000000000000000000000000000000000000
+[36mDEBUG[0m[event_log] Replayed PCR 7:
+                        0x0000000000000000000000000000000000000000000000000000000000000000
+[36mDEBUG[0m[event_log] Replayed PCR 10:
+                        0xbce31f0f128ef7244955dc185a0206aaeed66e8eca95f55970e3ea7d76e5deab
+                                              0x2b24614b17f7ac48f5081665fbc1bdc6091887c4f3272492b18f22d592f2509b
+[32mINFO [0m[relying party]     => PCR composite digest matches the quote!
+[32mINFO [0m[relying party] Timing: RP replay log_a + PCR composite took 0.000474 second(s).
+[32mINFO [0m[relying party] Checking file hashes against the whitelist/blacklist policy ...
+[33mWARN [0m[event_log] File-hash policy: allow-by-default -- whitelist 'whitelist-hashes.txt' is empty, so only the blacklist ('blacklist-hashes.txt', 0 entries) can reject anything.
+[32mINFO [0m[relying party]     => file hashes are not blacklisted!
+[32mINFO [0m[relying party] Timing: RP whitelist/blacklist policy took 0.000573 second(s).
+[32mINFO [0m[relying party] Timing: RP total appraisal of evidence_a took 0.009343 second(s).
+[32mINFO [0m[relying party] +----------------------------+
+[32mINFO [0m[relying party] |  RP Appraisal Successful   |
+[32mINFO [0m[relying party] +----------------------------+
+[32mINFO [0m[relying party] Evidence appraised locally; privacy-cleaning before forwarding to the Verifiers.
+[32mINFO [0m[relying party] Sent Step 2a verdict (accepted) to the Attester.
+[32mINFO [0m[relying party] Phase timing: get_evidence (Attester round trip + local appraisal) took 3.121s.
+[32mINFO [0m[relying party] Timing: getEvidence round trip (excluding local appraisal) took 3.111158 second(s).
+[32mINFO [0m[relying party] Getting attestation results.
+[32mINFO [0m[relying party]  +------------ RP Privacy Cleaning --------------+
+[36mDEBUG[0m[event_log] Detected template digest size: 32 bytes.
+[32mINFO [0m[sdk] Redacted 33 entries (4728 bytes in, 4257 out).
+[32mINFO [0m[relying party] log_r is 4257 bytes (raw log was 4728), redaction took 0.001s.
+[36mDEBUG[0m[event_log] Detected template digest size: 32 bytes.
+[36mDEBUG[0m[event_log] Replayed 33 of 33 event log entries into PCR 10.
+                        expected PCR_r: 0x317ab6e364a2db07157b13c242943f333f91b42897df0de585342ff00789e48f
+[36mDEBUG[0m[event_log] Detected template digest size: 32 bytes.
+[32mINFO [0m[relying party] Replayed 33 log_r entr(ies) into PCR 23; every Verifier this cycle quotes that one replay.
+[32mINFO [0m[relying party] TPM replay of log_r took 2.858s.
+[32mINFO [0m[relying party] Timing: prepareEvidence_r (redact + TPM replay) took 2.858954 second(s).
+[32mINFO [0m[relying party]  +------------ RP Qualification (Verifier n° 1, port 5684) --------------+
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[relying party] Timing: /qualify fetch challenge round trip took 0.018607 second(s).
+[32mINFO [0m[relying party] Received a 5210-byte challenge log.
+[36mDEBUG[0m[event_log] Detected template digest size: 32 bytes.
+[32mINFO [0m[sdk] Redacted 40 entries (5210 bytes in, 5160 out).
+[32mINFO [0m[relying party] Timing: /qualify redact challenge log took 0.000093 second(s).
+[32mINFO [0mUnrestricted primary key created successfully.
+[32mINFO [0m[relying party] Timing: /qualify sign submission (derive AK + Esys_Sign) took 0.189485 second(s).
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[32mINFO [0m[relying party] Timing: /qualify_submit round trip took 0.005992 second(s).
+[32mINFO [0m[relying party] |  RP QUALIFIED with Verifier n° 1 (port 5684)  |
+[32mINFO [0m[relying party] Qualification valid until 1787735196 (180 second(s) from now, as granted by this Verifier); every Verifier honours it from the list they all read.
+[32mINFO [0m[relying party] Timing: /qualify handshake took 0.214626 second(s).
+[32mINFO [0m[relying party] Forwarding (redacted) evidence to the verifiers.
+[32mINFO [0m[relying party]  +------------ Interaction with the Verifiers --------------+
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 1 (port 5684) ...
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 2 (port 5685) ...
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 3 (port 5686) ...
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 4 (port 5687) ...
+[36mDEBUG[0m [V1:5684]Size of marshaled data is 63 bytes.
+[36mDEBUG[0m [V1:5684]Allocated 63 bytes of memory.
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 5 (port 5688) ...
+[36mDEBUG[0m [V3:5686]Size of marshaled data is 63 bytes.
+[36mDEBUG[0m [V3:5686]Allocated 63 bytes of memory.
+[32mINFO [0m [V3:5686][relying party] Requesting a nonce from Verifier n° 3 ...
+[36mDEBUG[0m [V4:5687]Size of marshaled data is 63 bytes.
+[36mDEBUG[0m [V5:5688]Size of marshaled data is 63 bytes.
+[36mDEBUG[0m [V5:5688]Allocated 63 bytes of memory.
+[32mINFO [0m [V5:5688][relying party] Requesting a nonce from Verifier n° 5 ...
+[36mDEBUG[0m [V2:5685]Size of marshaled data is 63 bytes.
+[36mDEBUG[0m [V2:5685]Allocated 63 bytes of memory.
+[32mINFO [0m [V1:5684][relying party] Requesting a nonce from Verifier n° 1 ...
+[36mDEBUG[0m [V4:5687]Allocated 63 bytes of memory.
+[32mINFO [0m [V4:5687][relying party] Requesting a nonce from Verifier n° 4 ...
+[32mINFO [0m [V2:5685][relying party] Requesting a nonce from Verifier n° 2 ...
+[32mINFO [0m [V1:5684][relying party] Received nonce of 32 bytes from Verifier n° 1.
+[32mINFO [0m [V1:5684][relying party] Timing: /nonce round trip took 0.000556 second(s).
+[32mINFO [0m [V3:5686][relying party] Received nonce of 32 bytes from Verifier n° 3.
+[32mINFO [0m [V3:5686][relying party] Timing: /nonce round trip took 0.008670 second(s).
+[32mINFO [0m [V5:5688][relying party] Received nonce of 32 bytes from Verifier n° 5.
+[32mINFO [0m [V2:5685][relying party] Received nonce of 32 bytes from Verifier n° 2.
+[32mINFO [0m [V5:5688][relying party] Timing: /nonce round trip took 0.008628 second(s).
+[32mINFO [0m [V2:5685][relying party] Timing: /nonce round trip took 0.008366 second(s).
+[32mINFO [0m [V4:5687][relying party] Received nonce of 32 bytes from Verifier n° 4.
+[32mINFO [0m [V4:5687][relying party] Timing: /nonce round trip took 0.008979 second(s).
+[32mINFO [0m [V1:5684]Unrestricted primary key created successfully.
+[32mINFO [0m [V1:5684][relying party] Timing: RP produce Quote_r (derive key + tpm2_quote) took 0.184498 second(s).
+[36mDEBUG[0m [V1:5684]Size of marshaled RP evidence is 6582 bytes.
+[32mINFO [0m [V1:5684][relying party] Timing: build evidence message (incl. Quote_r) took 0.184846 second(s).
+[32mINFO [0m [V1:5684][relying party] Sending 6582 bytes of RP evidence to Verifier n° 1.
+[32mINFO [0m [V1:5684][relying party] Timing: SHA-256 over the submission took 0.000119 second(s).
+[36mDEBUG[0m [V1:5684]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V1:5684]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V1:5684]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V1:5684]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V1:5684]CBOR parser: found type CborIntegerType.
+[36mDEBUG[0m [V1:5684]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V1:5684]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V1:5684]CBOR parser: found type CborIntegerType.
+[32mINFO [0m [V1:5684][relying party] Timing: verify the signed verdict took 0.003888 second(s).
+[32mINFO [0m [V1:5684][relying party] Verifier n° 1 returned a valid signed verdict: ACCEPTED.
+[32mINFO [0m [V3:5686]Unrestricted primary key created successfully.
+[32mINFO [0m [V3:5686][relying party] Timing: RP produce Quote_r (derive key + tpm2_quote) took 0.370523 second(s).
+[36mDEBUG[0m [V3:5686]Size of marshaled RP evidence is 6582 bytes.
+[32mINFO [0m [V3:5686][relying party] Timing: build evidence message (incl. Quote_r) took 0.370626 second(s).
+[32mINFO [0m [V3:5686][relying party] Sending 6582 bytes of RP evidence to Verifier n° 3.
+[32mINFO [0m [V3:5686][relying party] Timing: SHA-256 over the submission took 0.000045 second(s).
+[36mDEBUG[0m [V3:5686]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V3:5686]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V3:5686]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V3:5686]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V3:5686]CBOR parser: found type CborIntegerType.
+[36mDEBUG[0m [V3:5686]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V3:5686]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V3:5686]CBOR parser: found type CborIntegerType.
+[32mINFO [0m [V3:5686][relying party] Timing: verify the signed verdict took 0.001699 second(s).
+[32mINFO [0m [V3:5686][relying party] Verifier n° 3 returned a valid signed verdict: ACCEPTED.
+[32mINFO [0m [V5:5688]Unrestricted primary key created successfully.
+[32mINFO [0m [V5:5688][relying party] Timing: RP produce Quote_r (derive key + tpm2_quote) took 0.567732 second(s).
+[36mDEBUG[0m [V5:5688]Size of marshaled RP evidence is 6582 bytes.
+[32mINFO [0m [V5:5688][relying party] Timing: build evidence message (incl. Quote_r) took 0.567777 second(s).
+[32mINFO [0m [V5:5688][relying party] Sending 6582 bytes of RP evidence to Verifier n° 5.
+[32mINFO [0m [V5:5688][relying party] Timing: SHA-256 over the submission took 0.000048 second(s).
+[36mDEBUG[0m [V5:5688]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V5:5688]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V5:5688]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V5:5688]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V5:5688]CBOR parser: found type CborIntegerType.
+[36mDEBUG[0m [V5:5688]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V5:5688]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V5:5688]CBOR parser: found type CborIntegerType.
+[32mINFO [0m [V5:5688][relying party] Timing: verify the signed verdict took 0.001842 second(s).
+[32mINFO [0m [V5:5688][relying party] Verifier n° 5 returned a valid signed verdict: ACCEPTED.
+[32mINFO [0m [V2:5685]Unrestricted primary key created successfully.
+[32mINFO [0m [V2:5685][relying party] Timing: RP produce Quote_r (derive key + tpm2_quote) took 0.762151 second(s).
+[36mDEBUG[0m [V2:5685]Size of marshaled RP evidence is 6582 bytes.
+[32mINFO [0m [V2:5685][relying party] Timing: build evidence message (incl. Quote_r) took 0.762185 second(s).
+[32mINFO [0m [V2:5685][relying party] Sending 6582 bytes of RP evidence to Verifier n° 2.
+[32mINFO [0m [V2:5685][relying party] Timing: SHA-256 over the submission took 0.000046 second(s).
+[36mDEBUG[0m [V2:5685]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V2:5685]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V2:5685]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V2:5685]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V2:5685]CBOR parser: found type CborIntegerType.
+[36mDEBUG[0m [V2:5685]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V2:5685]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V2:5685]CBOR parser: found type CborIntegerType.
+[32mINFO [0m [V2:5685][relying party] Timing: verify the signed verdict took 0.001695 second(s).
+[32mINFO [0m [V2:5685][relying party] Verifier n° 2 returned a valid signed verdict: ACCEPTED.
+[32mINFO [0m [V4:5687]Unrestricted primary key created successfully.
+[32mINFO [0m [V4:5687][relying party] Timing: RP produce Quote_r (derive key + tpm2_quote) took 0.951824 second(s).
+[36mDEBUG[0m [V4:5687]Size of marshaled RP evidence is 6582 bytes.
+[32mINFO [0m [V4:5687][relying party] Timing: build evidence message (incl. Quote_r) took 0.951847 second(s).
+[32mINFO [0m [V4:5687][relying party] Sending 6582 bytes of RP evidence to Verifier n° 4.
+[32mINFO [0m [V4:5687][relying party] Timing: SHA-256 over the submission took 0.000025 second(s).
+[36mDEBUG[0m [V4:5687]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V4:5687]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V4:5687]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V4:5687]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V4:5687]CBOR parser: found type CborIntegerType.
+[36mDEBUG[0m [V4:5687]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V4:5687]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V4:5687]CBOR parser: found type CborIntegerType.
+[32mINFO [0m [V4:5687][relying party] Timing: verify the signed verdict took 0.001272 second(s).
+[32mINFO [0m [V4:5687][relying party] Verifier n° 4 returned a valid signed verdict: ACCEPTED.
+[32mINFO [0m[relying party] Verifier 1 (port 5684): Attestation successful!
+[32mINFO [0m[relying party] Verifier 2 (port 5685): Attestation successful!
+[32mINFO [0m[relying party] Verifier 3 (port 5686): Attestation successful!
+[32mINFO [0m[relying party] Verifier 4 (port 5687): Attestation successful!
+[32mINFO [0m[relying party] Verifier 5 (port 5688): Attestation successful!
+[32mINFO [0m[relying party] Attestation successful by majority vote! (5/5 Verifiers passed)
+[32mINFO [0m[relying party]  +------------ Run Summary --------------+
+[32mINFO [0m[relying party] log_r: 4257 bytes redacted from a 4728-byte raw log.
+[32mINFO [0m[relying party] Verifier 1 (127.0.0.1:5684): PASS |    18 ms | OK
+[32mINFO [0m[relying party] Verifier 2 (127.0.0.1:5685): PASS |    21 ms | OK
+[32mINFO [0m[relying party] Verifier 3 (127.0.0.1:5686): PASS |    21 ms | OK
+[32mINFO [0m[relying party] Verifier 4 (127.0.0.1:5687): PASS |    13 ms | OK
+[32mINFO [0m[relying party] Verifier 5 (127.0.0.1:5688): PASS |    22 ms | OK
+[32mINFO [0m[relying party] Timing: submitAndCollect (per-Verifier fan-out + aggregation) took 0.977091 second(s).
+[32mINFO [0m[relying party] Phase timing: get_attestation_results (all Verifiers) took 4.051s.
+[32mINFO [0m[relying party] Cycle 1 done; sleeping 1s until the next attestation.
+[32mINFO [0m[relying party] ============================================================
+[32mINFO [0m[relying party] Starting new attestation run with 5 verifier(s) (cycle 2).
+[32mINFO [0m[relying party] ============================================================
+[32mINFO [0m[relying party] Getting verifiers.
+[32mINFO [0m[relying party]  +------------ Interaction with the Trust Manager --------------+
+[32mINFO [0m[relying party] Received data of length 72.
+[32mINFO [0m[relying party] Received data of total length 72.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[32mINFO [0m[relying party] Verifier ID 1: IP Address = 127.0.0.1, Port Number = 5684
+[32mINFO [0m[relying party] Verifier ID 2: IP Address = 127.0.0.1, Port Number = 5685
+[32mINFO [0m[relying party] Verifier ID 3: IP Address = 127.0.0.1, Port Number = 5686
+[32mINFO [0m[relying party] Verifier ID 4: IP Address = 127.0.0.1, Port Number = 5687
+[32mINFO [0m[relying party] Verifier ID 5: IP Address = 127.0.0.1, Port Number = 5688
+[32mINFO [0m[relying party] Phase timing: get_verifiers took 0.001s.
+[32mINFO [0m[relying party] Getting evidence.
+[32mINFO [0m[relying party]  +------------ Interaction with the Attester --------------+
+[32mINFO [0m[relying party] Creating attestation request.
+[32mINFO [0m[relying party] Timing: nonce generation (software) took 0.000042 second(s).
+[32mINFO [0m[relying party] Generated nonce of length 20:
+                                                  0xce13ea9226415ac54af180fcd6fc715c971413e9
+[36mDEBUG[0mSize of marshaled data is 63 bytes.
+[36mDEBUG[0mAllocated 63 bytes of memory.
+[32mINFO [0m[relying party] Sending attestation request.
+[32mINFO [0m[relying party] Received evidence of total length 6007.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[relying party]  +------------ RP Appraisal of the Evidence --------------+
+[32mINFO [0m[relying party] Verifying the Attester's signing key ...
+[32mINFO [0m[relying party]     => trusted: 'attester'
+[32mINFO [0m[relying party] Timing: RP verify AK_a (trust anchor) took 0.000167 second(s).
+[32mINFO [0m[relying party] Verifying quote signature ...
+[32mINFO [0m[relying party]     => quote signature is valid!
+[32mINFO [0m[relying party] Timing: RP verify Quote_a signature took 0.000348 second(s).
+[32mINFO [0m[relying party] Timing: RP unmarshal Quote_a took 0.000032 second(s).
+[32mINFO [0m[relying party] Verifying nonce ...
+[32mINFO [0m[relying party]     => nonce in the quote matches the one sent!
+[32mINFO [0m[relying party] Timing: RP verify Quote_a nonce took 0.000022 second(s).
+[32mINFO [0m[relying party] Verifying log entry self-consistency ...
+[36mDEBUG[0m[event_log] Detected template digest size: 32 bytes.
+[32mINFO [0m[relying party]     => log entries are self-consistent!
+[32mINFO [0m[relying party] Timing: RP verify log_a self-consistency took 0.000068 second(s).
+[32mINFO [0m[relying party] Replaying the log into the PCRs ...
+[36mDEBUG[0m[event_log] Detected template digest size: 32 bytes.
+[36mDEBUG[0m[event_log] Replayed PCR 0:
+                        0x0000000000000000000000000000000000000000000000000000000000000000
+[36mDEBUG[0m[event_log] Replayed PCR 1:
+                        0x0000000000000000000000000000000000000000000000000000000000000000
+[36mDEBUG[0m[event_log] Replayed PCR 2:
+                        0x0000000000000000000000000000000000000000000000000000000000000000
+[36mDEBUG[0m[event_log] Replayed PCR 3:
+                        0x0000000000000000000000000000000000000000000000000000000000000000
+[36mDEBUG[0m[event_log] Replayed PCR 4:
+                        0x0000000000000000000000000000000000000000000000000000000000000000
+[36mDEBUG[0m[event_log] Replayed PCR 5:
+                        0x0000000000000000000000000000000000000000000000000000000000000000
+[36mDEBUG[0m[event_log] Replayed PCR 6:
+                        0x0000000000000000000000000000000000000000000000000000000000000000
+[36mDEBUG[0m[event_log] Replayed PCR 7:
+                        0x0000000000000000000000000000000000000000000000000000000000000000
+[36mDEBUG[0m[event_log] Replayed PCR 10:
+                        0xbce31f0f128ef7244955dc185a0206aaeed66e8eca95f55970e3ea7d76e5deab
+                                              0x2b24614b17f7ac48f5081665fbc1bdc6091887c4f3272492b18f22d592f2509b
+[32mINFO [0m[relying party]     => PCR composite digest matches the quote!
+[32mINFO [0m[relying party] Timing: RP replay log_a + PCR composite took 0.000381 second(s).
+[32mINFO [0m[relying party] Checking file hashes against the whitelist/blacklist policy ...
+[33mWARN [0m[event_log] File-hash policy: allow-by-default -- whitelist 'whitelist-hashes.txt' is empty, so only the blacklist ('blacklist-hashes.txt', 0 entries) can reject anything.
+[32mINFO [0m[relying party]     => file hashes are not blacklisted!
+[32mINFO [0m[relying party] Timing: RP whitelist/blacklist policy took 0.000045 second(s).
+[32mINFO [0m[relying party] Timing: RP total appraisal of evidence_a took 0.001160 second(s).
+[32mINFO [0m[relying party] +----------------------------+
+[32mINFO [0m[relying party] |  RP Appraisal Successful   |
+[32mINFO [0m[relying party] +----------------------------+
+[32mINFO [0m[relying party] Evidence appraised locally; privacy-cleaning before forwarding to the Verifiers.
+[32mINFO [0m[relying party] Sent Step 2a verdict (accepted) to the Attester.
+[32mINFO [0m[relying party] Phase timing: get_evidence (Attester round trip + local appraisal) took 0.204s.
+[32mINFO [0m[relying party] Timing: getEvidence round trip (excluding local appraisal) took 0.202359 second(s).
+[32mINFO [0m[relying party] Getting attestation results.
+[32mINFO [0m[relying party]  +------------ RP Privacy Cleaning --------------+
+[36mDEBUG[0m[event_log] Detected template digest size: 32 bytes.
+[32mINFO [0m[sdk] Redacted 33 entries (4728 bytes in, 4257 out).
+[32mINFO [0m[relying party] log_r is 4257 bytes (raw log was 4728), redaction took 0.001s.
+[36mDEBUG[0m[event_log] Detected template digest size: 32 bytes.
+[36mDEBUG[0m[event_log] Replayed 33 of 33 event log entries into PCR 10.
+                        expected PCR_r: 0x43839f23fb1134d11966446ae5ebb8685f73e42f075b5e05dd7965882f42f903
+[36mDEBUG[0m[event_log] Detected template digest size: 32 bytes.
+[32mINFO [0m[relying party] Replayed 33 log_r entr(ies) into PCR 23; every Verifier this cycle quotes that one replay.
+[32mINFO [0m[relying party] TPM replay of log_r took 2.817s.
+[32mINFO [0m[relying party] Timing: prepareEvidence_r (redact + TPM replay) took 2.817685 second(s).
+[32mINFO [0m[relying party] Timing: /qualify handshake took 0.000015 second(s).
+[32mINFO [0m[relying party] Forwarding (redacted) evidence to the verifiers.
+[32mINFO [0m[relying party]  +------------ Interaction with the Verifiers --------------+
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 1 (port 5684) ...
+[36mDEBUG[0m [V1:5684]Size of marshaled data is 63 bytes.
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 2 (port 5685) ...
+[36mDEBUG[0m [V1:5684]Allocated 63 bytes of memory.
+[32mINFO [0m [V1:5684][relying party] Requesting a nonce from Verifier n° 1 ...
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 3 (port 5686) ...
+[36mDEBUG[0m [V2:5685]Size of marshaled data is 63 bytes.
+[36mDEBUG[0m [V2:5685]Allocated 63 bytes of memory.
+[32mINFO [0m [V2:5685][relying party] Requesting a nonce from Verifier n° 2 ...
+[36mDEBUG[0m [V3:5686]Size of marshaled data is 63 bytes.
+[36mDEBUG[0m [V3:5686]Allocated 63 bytes of memory.
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 4 (port 5687) ...
+[36mDEBUG[0m [V4:5687]Size of marshaled data is 63 bytes.
+[32mINFO [0m [V3:5686][relying party] Requesting a nonce from Verifier n° 3 ...
+[36mDEBUG[0m [V4:5687]Allocated 63 bytes of memory.
+[32mINFO [0m [V4:5687][relying party] Requesting a nonce from Verifier n° 4 ...
+[32mINFO [0m[relying party] Forwarding evidence to Verifier n° 5 (port 5688) ...
+[36mDEBUG[0m [V5:5688]Size of marshaled data is 63 bytes.
+[36mDEBUG[0m [V5:5688]Allocated 63 bytes of memory.
+[32mINFO [0m [V5:5688][relying party] Requesting a nonce from Verifier n° 5 ...
+[32mINFO [0m [V1:5684][relying party] Received nonce of 32 bytes from Verifier n° 1.
+[32mINFO [0m [V1:5684][relying party] Timing: /nonce round trip took 0.000759 second(s).
+[32mINFO [0m [V2:5685][relying party] Received nonce of 32 bytes from Verifier n° 2.
+[32mINFO [0m [V2:5685][relying party] Timing: /nonce round trip took 0.000606 second(s).
+[32mINFO [0m [V4:5687][relying party] Received nonce of 32 bytes from Verifier n° 4.
+[32mINFO [0m [V5:5688][relying party] Received nonce of 32 bytes from Verifier n° 5.
+[32mINFO [0m [V3:5686][relying party] Received nonce of 32 bytes from Verifier n° 3.
+[32mINFO [0m [V5:5688][relying party] Timing: /nonce round trip took 0.000714 second(s).
+[32mINFO [0m [V4:5687][relying party] Timing: /nonce round trip took 0.000833 second(s).
+[32mINFO [0m [V3:5686][relying party] Timing: /nonce round trip took 0.000889 second(s).
+[32mINFO [0m [V1:5684]Unrestricted primary key created successfully.
+[32mINFO [0m [V1:5684][relying party] Timing: RP produce Quote_r (derive key + tpm2_quote) took 0.190301 second(s).
+[36mDEBUG[0m [V1:5684]Size of marshaled RP evidence is 6582 bytes.
+[32mINFO [0m [V1:5684][relying party] Timing: build evidence message (incl. Quote_r) took 0.190354 second(s).
+[32mINFO [0m [V1:5684][relying party] Sending 6582 bytes of RP evidence to Verifier n° 1.
+[32mINFO [0m [V1:5684][relying party] Timing: SHA-256 over the submission took 0.000034 second(s).
+[36mDEBUG[0m [V1:5684]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V1:5684]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V1:5684]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V1:5684]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V1:5684]CBOR parser: found type CborIntegerType.
+[36mDEBUG[0m [V1:5684]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V1:5684]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V1:5684]CBOR parser: found type CborIntegerType.
+[32mINFO [0m [V1:5684][relying party] Timing: verify the signed verdict took 0.001872 second(s).
+[32mINFO [0m [V1:5684][relying party] Verifier n° 1 returned a valid signed verdict: ACCEPTED.
+[32mINFO [0m [V2:5685]Unrestricted primary key created successfully.
+[32mINFO [0m [V2:5685][relying party] Timing: RP produce Quote_r (derive key + tpm2_quote) took 0.372487 second(s).
+[36mDEBUG[0m [V2:5685]Size of marshaled RP evidence is 6582 bytes.
+[32mINFO [0m [V2:5685][relying party] Timing: build evidence message (incl. Quote_r) took 0.372531 second(s).
+[32mINFO [0m [V2:5685][relying party] Sending 6582 bytes of RP evidence to Verifier n° 2.
+[32mINFO [0m [V2:5685][relying party] Timing: SHA-256 over the submission took 0.000040 second(s).
+[36mDEBUG[0m [V2:5685]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V2:5685]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V2:5685]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V2:5685]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V2:5685]CBOR parser: found type CborIntegerType.
+[36mDEBUG[0m [V2:5685]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V2:5685]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V2:5685]CBOR parser: found type CborIntegerType.
+[32mINFO [0m [V2:5685][relying party] Timing: verify the signed verdict took 0.002231 second(s).
+[32mINFO [0m [V2:5685][relying party] Verifier n° 2 returned a valid signed verdict: ACCEPTED.
+[32mINFO [0m [V5:5688]Unrestricted primary key created successfully.
+[32mINFO [0m [V5:5688][relying party] Timing: RP produce Quote_r (derive key + tpm2_quote) took 0.565878 second(s).
+[36mDEBUG[0m [V5:5688]Size of marshaled RP evidence is 6582 bytes.
+[32mINFO [0m [V5:5688][relying party] Timing: build evidence message (incl. Quote_r) took 0.565915 second(s).
+[32mINFO [0m [V5:5688][relying party] Sending 6582 bytes of RP evidence to Verifier n° 5.
+[32mINFO [0m [V5:5688][relying party] Timing: SHA-256 over the submission took 0.000046 second(s).
+[36mDEBUG[0m [V5:5688]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V5:5688]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V5:5688]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V5:5688]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V5:5688]CBOR parser: found type CborIntegerType.
+[36mDEBUG[0m [V5:5688]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V5:5688]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V5:5688]CBOR parser: found type CborIntegerType.
+[32mINFO [0m [V5:5688][relying party] Timing: verify the signed verdict took 0.002449 second(s).
+[32mINFO [0m [V5:5688][relying party] Verifier n° 5 returned a valid signed verdict: ACCEPTED.
+[32mINFO [0m [V4:5687]Unrestricted primary key created successfully.
+[32mINFO [0m [V4:5687][relying party] Timing: RP produce Quote_r (derive key + tpm2_quote) took 0.755937 second(s).
+[36mDEBUG[0m [V4:5687]Size of marshaled RP evidence is 6582 bytes.
+[32mINFO [0m [V4:5687][relying party] Timing: build evidence message (incl. Quote_r) took 0.755989 second(s).
+[32mINFO [0m [V4:5687][relying party] Sending 6582 bytes of RP evidence to Verifier n° 4.
+[32mINFO [0m [V4:5687][relying party] Timing: SHA-256 over the submission took 0.000020 second(s).
+[36mDEBUG[0m [V4:5687]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V4:5687]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V4:5687]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V4:5687]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V4:5687]CBOR parser: found type CborIntegerType.
+[36mDEBUG[0m [V4:5687]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V4:5687]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V4:5687]CBOR parser: found type CborIntegerType.
+[32mINFO [0m [V4:5687][relying party] Timing: verify the signed verdict took 0.001703 second(s).
+[32mINFO [0m [V4:5687][relying party] Verifier n° 4 returned a valid signed verdict: ACCEPTED.
+[32mINFO [0m [V3:5686]Unrestricted primary key created successfully.
+[32mINFO [0m [V3:5686][relying party] Timing: RP produce Quote_r (derive key + tpm2_quote) took 0.943308 second(s).
+[36mDEBUG[0m [V3:5686]Size of marshaled RP evidence is 6582 bytes.
+[32mINFO [0m [V3:5686][relying party] Timing: build evidence message (incl. Quote_r) took 0.943425 second(s).
+[32mINFO [0m [V3:5686][relying party] Sending 6582 bytes of RP evidence to Verifier n° 3.
+[32mINFO [0m [V3:5686][relying party] Timing: SHA-256 over the submission took 0.000053 second(s).
+[36mDEBUG[0m [V3:5686]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V3:5686]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V3:5686]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V3:5686]CBOR parser: found type CborArrayType.
+[36mDEBUG[0m [V3:5686]CBOR parser: found type CborIntegerType.
+[36mDEBUG[0m [V3:5686]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V3:5686]CBOR parser: found type CborByteStringType.
+[36mDEBUG[0m [V3:5686]CBOR parser: found type CborIntegerType.
+[32mINFO [0m [V3:5686][relying party] Timing: verify the signed verdict took 0.002526 second(s).
+[32mINFO [0m [V3:5686][relying party] Verifier n° 3 returned a valid signed verdict: ACCEPTED.
+[32mINFO [0m[relying party] Verifier 1 (port 5684): Attestation successful!
+[32mINFO [0m[relying party] Verifier 2 (port 5685): Attestation successful!
+[32mINFO [0m[relying party] Verifier 3 (port 5686): Attestation successful!
+[32mINFO [0m[relying party] Verifier 4 (port 5687): Attestation successful!
+[32mINFO [0m[relying party] Verifier 5 (port 5688): Attestation successful!
+[32mINFO [0m[relying party] Attestation successful by majority vote! (5/5 Verifiers passed)
+[32mINFO [0m[relying party]  +------------ Run Summary --------------+
+[32mINFO [0m[relying party] log_r: 4257 bytes redacted from a 4728-byte raw log.
+[32mINFO [0m[relying party] Verifier 1 (127.0.0.1:5684): PASS |     5 ms | OK
+[32mINFO [0m[relying party] Verifier 2 (127.0.0.1:5685): PASS |     4 ms | OK
+[32mINFO [0m[relying party] Verifier 3 (127.0.0.1:5686): PASS |     5 ms | OK
+[32mINFO [0m[relying party] Verifier 4 (127.0.0.1:5687): PASS |     4 ms | OK
+[32mINFO [0m[relying party] Verifier 5 (127.0.0.1:5688): PASS |     5 ms | OK
+[32mINFO [0m[relying party] Timing: submitAndCollect (per-Verifier fan-out + aggregation) took 0.951255 second(s).
+[32mINFO [0m[relying party] Phase timing: get_attestation_results (all Verifiers) took 3.769s.
+[32mINFO [0m[relying party] Shutting down (--cycles reached) after 2 cycle(s).

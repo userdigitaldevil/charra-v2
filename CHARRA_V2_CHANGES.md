@@ -99,6 +99,14 @@ individually in §4.
 | `--attester-timeout=SECONDS` | 6 | Exceeding it abandons the cycle. |
 | `-l, --log-level=LEVEL` | INFO | TRACE…FATAL. |
 | `-v, --verbose` | off | Shorthand for DEBUG. |
+| `-p, --psk` · `-k, --key` · `-i, --identity` | off | DTLS-PSK. |
+| `-r, --rpk` · `--private-key` · `--public-key` · `--verify-peer` | off | DTLS-RPK, mutually authenticated. |
+| `--attester-public-key` · `--verifier-public-key` · `--trust-manager-public-key` | `keys/*.pub.der` | One peer key per kind of peer — the RP is a client to three servers, so the shared single `--peer-public-key` does not fit it. |
+
+PSK and RPK are mutually exclusive, rejected at parse time rather than
+per-exchange. **Every role must use the same mode**: a mismatch does not
+error, it times out, and a timeout is a NO vote — so it reads as a failed
+attestation rather than a misconfiguration.
 
 **Daemon mode is now the default.** The baseline ran one attestation and
 exited; `--benchmark` selects the old sweep behaviour.
@@ -130,8 +138,16 @@ inherited from upstream CHARRA and unchanged.
 
 ### `trust_manager`
 
-Takes no options beyond `--help`. Port (6000) and config path are compiled
-in.
+| Flag | Default | Effect |
+|---|---|---|
+| `--port=PORT` | 6000 | Listen port. |
+| `--psk` · `--key` · `--hint` | off | DTLS-PSK. |
+| `--rpk` · `--private-key` · `--public-key` · `--peer-public-key` · `--verify-peer` | off | DTLS-RPK. One peer key, since it faces only the RP. |
+
+It previously took no options at all — `main()` rejected every argument
+except `--help` — and had no DTLS config, so `/get_verifiers` stayed
+plaintext even with every other leg encrypted. The config file path is
+still fixed.
 
 ### In practice you pass none of these
 
@@ -527,10 +543,23 @@ Grouped as: **cadence** (`RP_INTERVAL`, `RP_VERIFIERS`, `RP_CYCLES`,
 `RP_ATTESTER_TIMEOUT`) · **the grant** (`VERIFIER_QUALIFICATION_VALIDITY`) ·
 **TPMs** (`TWO_TPMS`, `ATTESTER_TPM_PORT`, `RP_TPM_PORT`, `TPM_STATE_DIR`,
 `RESET_TPM`) · **topology** (`VERIFIER_START_PORT`, `VERIFIER_HOST`) ·
+**DTLS** (`DTLS_MODE`) ·
 **logging** (`LOG_LEVEL`, `LOG_LEVEL_COAP`) · **environment** (`IMAGE`,
 `CONTAINER_NAME`, `REBUILD`). Plus `RP_EXTRA_ARGS` / `VERIFIER_EXTRA_ARGS` /
 `ATTESTER_EXTRA_ARGS` as free-form pass-through for any flag the script does
 not name.
+
+**DTLS is off by default and turned on with one variable**, because all four
+roles must agree:
+
+```sh
+DTLS_MODE=rpk ./run_daemon.sh     # mutual auth using the keypairs in keys/
+DTLS_MODE=psk ./run_daemon.sh     # one shared secret, no peer identity
+```
+
+The script builds each role's flags from that single setting, so they cannot
+diverge. A mismatch would not error — the request times out, a timeout is a
+NO vote, and the run reports 0/N as though attestation had failed.
 
 One option rather than a variable: `--keep-state` keeps each NVChip instead
 of wiping it, so both AKs — and therefore `keys/trusted_keys.txt` — survive

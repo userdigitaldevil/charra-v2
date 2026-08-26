@@ -30,6 +30,14 @@
 
 #define LOG_NAME "relying party"
 
+/* Monotonic seconds since an arbitrary epoch; the handshake stage timings
+ * below are differences of it. Mirrors the helper in rp_evidence.c. */
+static double charra_now_s(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
 static coap_response_t coap_qualify_response_handler(
         coap_session_t* session CHARRA_UNUSED,
         const coap_pdu_t* sent CHARRA_UNUSED, const coap_pdu_t* received,
@@ -154,6 +162,7 @@ CHARRA_RC rp_perform_qualification_handshake_once(int num_verifiers) {
 
         /* --- 1. fetch a fresh challenge --- */
         qualify_response_rc = CHARRA_RC_ERROR;
+        const double q_fetch_start = charra_now_s();
         result = rp_coap_exchange(&(rp_coap_request){
             .host = verifier->ip_address, .port = verifier->port_number,
             .uri_path = "qualify",
@@ -170,13 +179,19 @@ CHARRA_RC rp_perform_qualification_handshake_once(int num_verifiers) {
                     verifier_index + 1, verifier->port_number);
             continue;
         }
+        charra_log_info("[" LOG_NAME "] Timing: /qualify fetch challenge "
+                        "round trip took %f second(s).",
+                charra_now_s() - q_fetch_start);
         charra_log_info("[" LOG_NAME "] Received a %u-byte challenge log.",
                 qualify_challenge_log_len);
 
         /* --- 2. redact it with the exact same pipeline real evidence uses --- */
+        const double q_redact_start = charra_now_s();
         result = charra_sdk_redact_ima_log(qualify_challenge_log,
                 qualify_challenge_log_len, qualify_challenge_salt,
                 &redacted_log, &redacted_log_len);
+        charra_log_info("[" LOG_NAME "] Timing: /qualify redact challenge log "
+                        "took %f second(s).", charra_now_s() - q_redact_start);
         if (result != CHARRA_RC_SUCCESS) {
             charra_log_error("[" LOG_NAME "] Could not redact the "
                              "qualification challenge log.");
@@ -213,8 +228,12 @@ CHARRA_RC rp_perform_qualification_handshake_once(int num_verifiers) {
         memcpy(signed_data, redacted_log, redacted_log_len);
         memcpy(signed_data + redacted_log_len, qualify_challenge_salt,
                 sizeof(qualify_challenge_salt));
+        const double q_sign_start = charra_now_s();
         result = rp_sign_with_ak(
                 signed_data, signed_len, rp_signature, &ak_public_key);
+        charra_log_info("[" LOG_NAME "] Timing: /qualify sign submission "
+                        "(derive AK + Esys_Sign) took %f second(s).",
+                charra_now_s() - q_sign_start);
         free(signed_data);
         if (result != CHARRA_RC_SUCCESS) {
             charra_log_error("[" LOG_NAME "] Could not sign the qualification "
@@ -241,6 +260,7 @@ CHARRA_RC rp_perform_qualification_handshake_once(int num_verifiers) {
             goto done;
         }
 
+        const double q_submit_start = charra_now_s();
         result = rp_coap_exchange(&(rp_coap_request){
             .host = verifier->ip_address, .port = verifier->port_number,
             .uri_path = "qualify_submit",
@@ -250,6 +270,8 @@ CHARRA_RC rp_perform_qualification_handshake_once(int num_verifiers) {
             .timeout_seconds = verifier_response_timeout,
             .dtls_rpk_peer_public_key_path = dtls_rpk_verifier_public_key_path,
         });
+        charra_log_info("[" LOG_NAME "] Timing: /qualify_submit round trip "
+                        "took %f second(s).", charra_now_s() - q_submit_start);
         charra_free_if_not_null(submit_buf);
         if (result != CHARRA_RC_SUCCESS) {
             charra_log_error(

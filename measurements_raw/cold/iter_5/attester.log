@@ -1,0 +1,132 @@
+[32mINFO [0m[attester] Effective configuration: port=5683 ima_test_log='ima_test_logs.txt'
+[36mDEBUG[0m[attester] Attester Configuration:
+[36mDEBUG[0m[attester]     Used local port: 5683
+[36mDEBUG[0m[attester]     DTLS-PSK enabled: false
+[36mDEBUG[0m[attester]     DTLS-RPK enabled: false
+[32mINFO [0m[attester] Initializing CoAP in block-wise mode.
+[32mINFO [0m[attester] Creating CoAP server endpoint using UDP.
+[32mINFO [0m[attester] Registering CoAP resources.
+[36mDEBUG[0m[attester] Entering main loop.
+[32mINFO [0m[attester] ============================================================
+[32mINFO [0m[attester] Starting /attest request #1.
+[32mINFO [0m[attester] ============================================================
+[32mINFO [0m[attester] /attest: request from 127.0.0.1:44201.
+[32mINFO [0m[attester] Resource 'attest': Received message.
+[32mINFO [0m[attester] Received attestation request of 63 byte(s).
+[32mINFO [0m[attester] Parsing received CBOR data.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborFalseType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[attester] Preparing TPM quote data.
+[32mINFO [0m[attester] Received nonce of length 20:
+                                   0x7247b2d0c71ab6d73a110dca6542a87874db8a7e
+[32mINFO [0m[attester] Signing key ID: 'attester'.
+[32mINFO [0m[attester] Quoting PCR(s): 0,1,2,3,4,5,6,7,10.
+[32mINFO [0m[attester] CHARRA_TCTI = 'mssim:host=127.0.0.1,port=2321'.
+[32mINFO [0m[attester] Timing: TCTI + ESYS init took 0.007245 second(s).
+[32mINFO [0m[attester] Converted 33 ASCII IMA entries from "ima_test_logs.txt" into 4728 bytes of binary log.
+[36mDEBUG[0m[event_log] Detected template digest size: 32 bytes.
+[32mINFO [0m[attester] Extended 33 IMA log entries into the PCRs.
+[32mINFO [0m[attester] Timing: extending the IMA log into the TPM PCRs took 2.736803 second(s).
+[32mINFO [0m[attester] Loading TPM key.
+[32mINFO [0mLoading key "attester".
+[32mINFO [0mRestricted primary key created successfully.
+[32mINFO [0m[attester] Timing: TPM key load took 0.132564 second(s).
+[32mINFO [0m[attester] Do TPM Quote.
+[32mINFO [0m[attester] TPM Quote successful.
+[32mINFO [0m[attester] Timing: TPM Quote itself took 0.089743 second(s).
+[attester] Quote's PCR composite digest = 0x2b24614b17f7ac48f5081665fbc1bdc6091887c4f3272492b18f22d592f2509b
+[32mINFO [0m[attester] Timing: total /attest handling took 2.971687 second(s).
+[32mINFO [0m[attester] Reading IMA event log from 'ima_test_logs.txt' (same file the PCRs were extended from).
+[32mINFO [0m[attester] IMA event log has a size of 4728 bytes.
+[32mINFO [0m[attester] Preparing response.
+[32mINFO [0m[attester] Response components: attestation_data=133 byte(s), tpm2_signature=518 byte(s), tpm2_public_key=616 byte(s), event_log=4728 byte(s).
+[32mINFO [0m[attester] Marshaling response to CBOR.
+[36mDEBUG[0mSize of marshaled data is 6007 bytes.
+[36mDEBUG[0mAllocated 6007 bytes of memory.
+[32mINFO [0m[attester] Size of marshaled response is 6007 bytes.
+[32mINFO [0m[attester] Adding marshaled data to CoAP response PDU and send it.
+[32mINFO [0m[attester] Evidence sent to the relying party.
+[32mINFO [0m[attester] +----------------------------+
+[32mINFO [0m[attester] |   EVIDENCE GENERATED OK    |
+[32mINFO [0m[attester] +----------------------------+
+[32mINFO [0m[attester] /attest_result: request from 127.0.0.1:54054.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[attester]  +--- RP ACCEPTED this Attester's evidence (Step 2a passed) ---+
+[32mINFO [0m[attester] ============================================================
+[32mINFO [0m[attester] Starting /attest request #2.
+[32mINFO [0m[attester] ============================================================
+[32mINFO [0m[attester] /attest: request from 127.0.0.1:51056.
+[32mINFO [0m[attester] Resource 'attest': Received message.
+[32mINFO [0m[attester] Received attestation request of 63 byte(s).
+[32mINFO [0m[attester] Parsing received CBOR data.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborFalseType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[attester] Preparing TPM quote data.
+[32mINFO [0m[attester] Received nonce of length 20:
+                                   0x744315317d5ae3eba4cb6a2c45c8c2930104f0e5
+[32mINFO [0m[attester] Signing key ID: 'attester'.
+[32mINFO [0m[attester] Quoting PCR(s): 0,1,2,3,4,5,6,7,10.
+[32mINFO [0m[attester] CHARRA_TCTI = 'mssim:host=127.0.0.1,port=2321'.
+[32mINFO [0m[attester] Timing: TCTI + ESYS init took 0.003534 second(s).
+[36mDEBUG[0m[attester] PCRs already extended from IMA log earlier this process's lifetime -- skipping (would grow PCR 10 further and break replay if repeated).
+[32mINFO [0m[attester] Loading TPM key.
+[32mINFO [0mLoading key "attester".
+[32mINFO [0mRestricted primary key created successfully.
+[32mINFO [0m[attester] Timing: TPM key load took 0.028741 second(s).
+[32mINFO [0m[attester] Do TPM Quote.
+[32mINFO [0m[attester] TPM Quote successful.
+[32mINFO [0m[attester] Timing: TPM Quote itself took 0.086783 second(s).
+[attester] Quote's PCR composite digest = 0x2b24614b17f7ac48f5081665fbc1bdc6091887c4f3272492b18f22d592f2509b
+[32mINFO [0m[attester] Timing: total /attest handling took 0.119237 second(s).
+[32mINFO [0m[attester] Reading IMA event log from 'ima_test_logs.txt' (same file the PCRs were extended from).
+[32mINFO [0m[attester] IMA event log has a size of 4728 bytes.
+[32mINFO [0m[attester] Preparing response.
+[32mINFO [0m[attester] Response components: attestation_data=133 byte(s), tpm2_signature=518 byte(s), tpm2_public_key=616 byte(s), event_log=4728 byte(s).
+[32mINFO [0m[attester] Marshaling response to CBOR.
+[36mDEBUG[0mSize of marshaled data is 6007 bytes.
+[36mDEBUG[0mAllocated 6007 bytes of memory.
+[32mINFO [0m[attester] Size of marshaled response is 6007 bytes.
+[32mINFO [0m[attester] Adding marshaled data to CoAP response PDU and send it.
+[32mINFO [0m[attester] Evidence sent to the relying party.
+[32mINFO [0m[attester] +----------------------------+
+[32mINFO [0m[attester] |   EVIDENCE GENERATED OK    |
+[32mINFO [0m[attester] +----------------------------+
+[32mINFO [0m[attester] /attest_result: request from 127.0.0.1:38590.
+[36mDEBUG[0mCBOR parser: found type CborArrayType.
+[36mDEBUG[0mCBOR parser: found type CborIntegerType.
+[36mDEBUG[0mCBOR parser: found type CborByteStringType.
+[32mINFO [0m[attester]  +--- RP ACCEPTED this Attester's evidence (Step 2a passed) ---+

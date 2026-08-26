@@ -80,6 +80,8 @@ Read the vocabulary table first — several words below are narrower than they l
       <TD ALIGN="LEFT">Wipe each NVChip and re-run TPM2_Startup. This changes every AK, which is why the<BR ALIGN="LEFT"/>trust anchor is regenerated straight afterwards.</TD></TR>
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">VERIFIER_START_PORT</FONT> / <FONT FACE="Courier">VERIFIER_HOST</FONT></TD><TD ALIGN="LEFT">—</TD><TD ALIGN="RIGHT"><B>5684 / 127.0.0.1</B></TD>
       <TD ALIGN="LEFT">First Verifier port, rest follow; address written into verifiers_config.txt.</TD></TR>
+  <TR><TD ALIGN="LEFT" BGCOLOR="#fff7ed"><FONT FACE="Courier">DTLS_MODE</FONT></TD><TD ALIGN="LEFT" BGCOLOR="#fff7ed"><B>--psk</B> / <B>--rpk</B></TD><TD ALIGN="RIGHT" BGCOLOR="#fff7ed"><B>off</B></TD>
+      <TD ALIGN="LEFT" BGCOLOR="#fff7ed"><FONT FACE="Courier">off</FONT> | <FONT FACE="Courier">psk</FONT> | <FONT FACE="Courier">rpk</FONT>. One variable for <B>all four roles</B>, because they must agree and a<BR ALIGN="LEFT"/>mismatch does not error: the request times out, and a timeout is a <B>NO</B> vote — so it reads as<BR ALIGN="LEFT"/>a failed attestation. <FONT FACE="Courier">rpk</FONT> is mutual, using the keypairs in <FONT FACE="Courier">keys/</FONT>. Hop-by-hop, so it does<BR ALIGN="LEFT"/><B>not</B> replace the signed verdict, which is end-to-end.</TD></TR>
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">LOG_LEVEL</FONT> / <FONT FACE="Courier">LOG_LEVEL_COAP</FONT></TD><TD ALIGN="LEFT"><B>--log-level</B></TD><TD ALIGN="RIGHT"><B>INFO</B> / unset</TD>
       <TD ALIGN="LEFT">TRACE DEBUG INFO WARN ERROR FATAL. CoAP unset leaves libcoap at its own default.</TD></TR>
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">REBUILD</FONT></TD><TD ALIGN="LEFT">—</TD><TD ALIGN="RIGHT"><B>1</B></TD>
