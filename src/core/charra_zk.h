@@ -19,6 +19,8 @@
 #include "../common/charra_error.h"
 #include "charra_poseidon.h"
 
+struct charra_zk_public_inputs;
+
 /**
  * Entries the circuit is compiled for. A circuit has no runtime loop bound,
  * so this is fixed at compile time and a log of any other length cannot be
@@ -54,5 +56,23 @@ typedef struct charra_zk_witness {
  */
 CHARRA_RC charra_zk_write_witness_json(
         const charra_zk_witness* witness, const char* path);
+
+/**
+ * @brief Rebuild the proof's public inputs from log_r and the signed quote.
+ *
+ * The Verifier must never take these from the RP. A proof is only ever a
+ * proof *about its public inputs* -- accept the RP's copy and a genuine
+ * proof of a fabricated log verifies perfectly. So the file hashes and
+ * commitments are read out of the log_r the Verifier is appraising, and
+ * pcrdigest_a comes from the Quote_a whose signature it has already checked
+ * against the trust anchor.
+ *
+ * @param log_r        the redacted log, as received.
+ * @param pcrdigest_a  from attest_struct.attested.quote.pcrDigest.
+ * @param out          filled in on success.
+ */
+CHARRA_RC charra_zk_public_inputs_from_log_r(const uint8_t* log_r,
+        uint32_t log_r_len, const uint8_t pcrdigest_a[32],
+        struct charra_zk_public_inputs* out);
 
 #endif /* CHARRA_ZK_H */

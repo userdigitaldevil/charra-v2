@@ -19,6 +19,8 @@
 #include "../core/charra_helper.h"
 #include "../core/charra_marshaling.h"
 #include "../core/charra_trusted_keys.h"
+#include "../core/charra_zk.h"
+#include "../core/charra_zk_job.h"
 #include "../util/charra_util.h"
 #include "../util/coap_util.h"
 #include "../util/crypto_util.h"
@@ -378,6 +380,14 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     const char* ekak_att_why = "not verified";
     bool attestation_result_signature = false;
     bool attestation_result_nonce = false;
+    bool attestation_result_zk = false;
+    const char* zk_why = "";
+    /* Function scope, not block scope: item 4 below needs the pcrDigest,
+     * and it must be the one from the quote whose signature item 2 checked
+     * -- not a value re-read from anywhere the RP controls. Stays zeroed if
+     * step 3b never got far enough to unmarshal it, which item 4 treats as
+     * a rejection. */
+    TPMS_ATTEST attest_struct = {0};
     /* Step 3b runs whatever Step 3a decided. Its checks read only fields of
      * the received evidence (the Attester's public key, Quote_a, and the
      * nonce), so nothing here depends on RP's identity having verified --
@@ -453,8 +463,7 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                 attestation_result_signature ? "valid" : "NOT valid");
 
         /* unmarshal Quote_a's attestation data -- needed for its nonce
-         * check right below */
-        TPMS_ATTEST attest_struct = {0};
+         * check right below, and for the redaction proof after it */
         if ((charra_r = charra_unmarshal_tpm2_quote(res.attestation_data_len,
                      res.attestation_data, &attest_struct)) !=
                 CHARRA_RC_SUCCESS) {
@@ -507,11 +516,74 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         }
     }
 
+    /* Step 3b item 4: is log_r's redaction honest?
+     *
+     * Everything above establishes that Quote_a is genuine and that log_r
+     * replays to Quote_r. Neither says the redacted paths correspond to the
+     * files the Attester actually measured -- the RP could have replaced
+     * them wholesale and produced a log_r that replays perfectly into its
+     * own PCR. The proof is what closes that gap, and it is the whole
+     * reason the simulated TEE was removed.
+     *
+     * The public inputs are rebuilt here rather than taken from the RP. A
+     * proof only ever proves a statement *about its public inputs*, so
+     * accepting the prover's copy would let a valid proof of an invented
+     * log verify. They come instead from the log_r being appraised and from
+     * attest_struct, whose signature was checked against the trust anchor
+     * in item 2. */
+    if (res.zk_proof_len == 0) {
+        zk_why = "MISSING -- the RP forwarded no proof of its redaction";
+        charra_log_error("[" LOG_NAME "]     => no ZK proof was supplied. "
+                         "Rejecting.");
+    } else if (attest_struct.attested.quote.pcrDigest.size != 32) {
+        zk_why = "Quote_a's pcrDigest is not 32 bytes";
+        charra_log_error("[" LOG_NAME "]     => Quote_a's pcrDigest is %u "
+                         "bytes, not 32. Rejecting.",
+                attest_struct.attested.quote.pcrDigest.size);
+    } else {
+        charra_zk_public_inputs zk_inputs = {0};
+        CHARRA_RC zk_r = charra_zk_public_inputs_from_log_r(res.log_r,
+                res.log_r_len, attest_struct.attested.quote.pcrDigest.buffer,
+                &zk_inputs);
+        if (zk_r != CHARRA_RC_SUCCESS) {
+            zk_why = "log_r is not in the shape the circuit proves about";
+            charra_log_error("[" LOG_NAME "]     => could not rebuild the "
+                             "proof's public inputs from log_r. Rejecting.");
+        } else {
+            charra_log_info("[" LOG_NAME "] Verifying the redaction proof "
+                            "(%u bytes) ...",
+                    res.zk_proof_len);
+            /* A rejected proof and an unrunnable check are different
+             * outcomes: zk_r says whether the check could be performed,
+             * attestation_result_zk says what it concluded. Both lead to a
+             * NO vote, but only one of them means the RP cheated. */
+            zk_r = charra_zk_verify(res.zk_proof, res.zk_proof_len, &zk_inputs,
+                    &attestation_result_zk);
+            if (zk_r != CHARRA_RC_SUCCESS) {
+                attestation_result_zk = false;
+                zk_why = "the proof could not be checked -- is the proof "
+                         "watcher running?";
+                charra_log_error("[" LOG_NAME "]     => the proof could not be "
+                                 "checked. Rejecting.");
+            } else if (!attestation_result_zk) {
+                zk_why = "INVALID -- log_r's cleaned paths are not "
+                         "commitments to the measured files";
+                charra_log_error("[" LOG_NAME "]     => the redaction proof is "
+                                 "NOT valid. Rejecting.");
+            } else {
+                charra_log_info("[" LOG_NAME "]     => redaction proof is "
+                                "valid: every cleaned path commits to a file "
+                                "whose measurement is in Quote_a.");
+            }
+        }
+    }
+
     /* --- output result --- */
     /* Order matches Step 3a then Step 3b, RP's evidence before Attester's. */
     bool attestation_result = step_3a_passed && attestation_result_ekak &&
                               attestation_result_signature &&
-                              attestation_result_nonce;
+                              attestation_result_nonce &&
+                              attestation_result_zk;
 
     /* Every reason this vote is a NO, in one place. Logged HERE ONLY -- the
      * RP is told the verdict, not the analysis. It cannot act on most of
@@ -553,6 +625,9 @@ void coap_appraise_handler(struct coap_resource_t* resource,
         if (!attestation_result_nonce) {
             LOG_REASON("Attester nonce (Step 3b item 3): WRONG -- Quote_a is "
                        "not bound to the expected nonce");
+        }
+        if (!attestation_result_zk) {
+            LOG_REASON("redaction proof (Step 3b item 4): %s", zk_why);
         }
 #undef LOG_REASON
     }

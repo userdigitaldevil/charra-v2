@@ -11,6 +11,7 @@
 #include <string.h>
 #include <time.h>
 
+#include <mbedtls/platform_util.h>
 #include <mbedtls/rsa.h>
 
 #include "../common/charra_log.h"
@@ -19,6 +20,8 @@
 #include "../core/charra_marshaling.h"
 #include "../core/charra_sdk.h"
 #include "../core/charra_trusted_keys.h"
+#include "../core/charra_zk.h"
+#include "../core/charra_zk_job.h"
 #include "../util/charra_util.h"
 #include "../util/crypto_util.h"
 #include "../util/io_util.h"
@@ -151,6 +154,13 @@ done:;
     return appraisal_ok;
 }
 
+/* The proof over log_r, produced once per cycle alongside it. Held here
+ * rather than regenerated per Verifier: every Verifier receives the same
+ * log_r and the same Quote_a, so the proof is the same too, and proving is
+ * the most expensive step in the cycle by two orders of magnitude. */
+static uint8_t* rp_zk_proof = NULL;
+static uint32_t rp_zk_proof_len = 0;
+
 CHARRA_RC charra_rp_prepare_evidence(void) {
     charra_rp_release_evidence();
 
@@ -160,12 +170,17 @@ CHARRA_RC charra_rp_prepare_evidence(void) {
     /* --- redact: only the path of each entry is replaced --------------- */
     struct timespec redact_start, redact_end;
     clock_gettime(CLOCK_MONOTONIC, &redact_start);
-    CHARRA_RC charra_r = charra_sdk_redact_ima_log(last_response.event_log,
-            last_response.event_log_len, &rp_log_r, &rp_log_r_len);
+    /* The witness holds the real paths and their salts. It never leaves
+     * this function's storage, is never marshaled, and is erased below --
+     * it is exactly what redaction exists to withhold. */
+    charra_zk_witness witness = {0};
+    CHARRA_RC charra_r = charra_sdk_redact_ima_log_with_witness(
+            last_response.event_log, last_response.event_log_len, &rp_log_r,
+            &rp_log_r_len, &witness);
     clock_gettime(CLOCK_MONOTONIC, &redact_end);
     if (charra_r != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Redaction of the event log failed.");
-        return charra_r;
+        goto erase_witness;  /* it may hold entries redacted before the failure */
     }
     double redact_duration = (redact_end.tv_sec - redact_start.tv_sec) +
                               (redact_end.tv_nsec - redact_start.tv_nsec) / 1e9;
@@ -181,7 +196,8 @@ CHARRA_RC charra_rp_prepare_evidence(void) {
     if (charra_replay_ima_log(rp_log_r, rp_log_r_len, CHARRA_IMA_PCR_INDEX,
                 rp_pcr_r) != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Replay of log_r failed.");
-        return CHARRA_RC_ERROR;
+        charra_r = CHARRA_RC_ERROR;
+        goto erase_witness;
     }
     charra_print_hex(CHARRA_LOG_INFO, sizeof(rp_pcr_r), rp_pcr_r,
             "                        expected PCR_r: 0x", "\n", false);
@@ -200,19 +216,63 @@ CHARRA_RC charra_rp_prepare_evidence(void) {
     if (charra_r != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not replay log_r into the "
                          "TPM; no Verifier can be answered this cycle.");
-        return charra_r;
+        goto erase_witness;
     }
     charra_log_info("[" LOG_NAME "] TPM replay of log_r took %.3fs.",
             (replay_end.tv_sec - replay_start.tv_sec) +
                     (replay_end.tv_nsec - replay_start.tv_nsec) / 1e9);
 
-    return CHARRA_RC_SUCCESS;
+    /* --- prove the redaction ------------------------------------------
+     * The circuit is checked against pcrdigest_a, so it has to come from
+     * the quote the Attester's TPM signed -- the same value the Verifier
+     * will independently pull out of that quote. Anything the RP could
+     * choose freely here would make the proof vacuous. */
+    TPMS_ATTEST attest = {0};
+    charra_r = charra_unmarshal_tpm2_quote(last_response.attestation_data_len,
+            last_response.attestation_data, &attest);
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not read pcrDigest out of "
+                         "Quote_a; cannot prove the redaction.");
+        goto erase_witness;
+    }
+    if (attest.attested.quote.pcrDigest.size != sizeof(witness.pcrdigest_a)) {
+        charra_log_error("[" LOG_NAME "] Quote_a's pcrDigest is %u bytes, not "
+                         "the 32 the circuit expects.",
+                attest.attested.quote.pcrDigest.size);
+        charra_r = CHARRA_RC_ERROR;
+        goto erase_witness;
+    }
+    memcpy(witness.pcrdigest_a, attest.attested.quote.pcrDigest.buffer,
+            sizeof(witness.pcrdigest_a));
+
+    struct timespec prove_start, prove_end;
+    clock_gettime(CLOCK_MONOTONIC, &prove_start);
+    charra_r = charra_zk_prove(&witness, &rp_zk_proof, &rp_zk_proof_len);
+    clock_gettime(CLOCK_MONOTONIC, &prove_end);
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not prove the redaction; no "
+                         "Verifier can be answered this cycle.");
+        goto erase_witness;
+    }
+    charra_log_info("[" LOG_NAME "] Proof is %u bytes, took %.3fs.",
+            rp_zk_proof_len,
+            (prove_end.tv_sec - prove_start.tv_sec) +
+                    (prove_end.tv_nsec - prove_start.tv_nsec) / 1e9);
+
+erase_witness:
+    /* Overwrite rather than merely drop: these are the paths the whole
+     * design exists to keep off the wire. */
+    mbedtls_platform_zeroize(&witness, sizeof(witness));
+    return charra_r;
 }
 
 void charra_rp_release_evidence(void) {
     charra_free_if_not_null(rp_log_r);
     rp_log_r = NULL;
     rp_log_r_len = 0;
+    charra_free_if_not_null(rp_zk_proof);
+    rp_zk_proof = NULL;
+    rp_zk_proof_len = 0;
     /* Nothing key-related to release: the signing key is derived and
      * discarded inside each signature, never held here. */
 }
@@ -291,6 +351,9 @@ CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
 
     ev.log_r = rp_log_r;
     ev.log_r_len = rp_log_r_len;
+
+    ev.zk_proof = rp_zk_proof;
+    ev.zk_proof_len = rp_zk_proof_len;
 
     return charra_marshal_rp_evidence(&ev, marshaled_len, marshaled);
 }

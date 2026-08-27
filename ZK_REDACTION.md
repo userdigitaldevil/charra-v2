@@ -217,8 +217,28 @@ is where byte-exactness either works or doesn't.
 | 4b | Full replay, N=33 | Circuit asserts `== pcrdigest_a` — **done** |
 | 4c | Poseidon commitments as public outputs | Witness solves and returns 33 fields — **done** |
 | 4d | Soundness smoke test | Tampered witnesses rejected — **done, 4/4** |
-| 5 | C integration | New DTO field, marshaling, RP + Verifier subprocess calls |
+| 5 | C integration | DTO field, marshaling, RP proves, Verifier verifies — **written, not yet built** |
 | 6 | Docs, tests, live run | `run_live_test.sh` passes end to end |
+
+### How the pieces fit, after phase 5
+
+    RP   charra_sdk_redact_ima_log_with_witness()   paths+salts captured
+         charra_poseidon_commit()                   log_r's cleaned paths
+         charra_zk_prove()          -> watcher -> bb prove
+         ev.zk_proof                                14.6 KB on the wire
+
+    V    step 3b item 4
+         charra_zk_public_inputs_from_log_r()       from log_r + Quote_a
+         charra_zk_verify()         -> watcher -> bb verify
+
+The witness never leaves the RP and is zeroized on every exit path from
+charra_rp_prepare_evidence(), including the failures — it holds precisely
+the paths the redaction exists to withhold.
+
+The proof is produced once per cycle, not once per Verifier: every Verifier
+receives the same log_r and the same Quote_a, so the proof is identical, and
+at ten seconds it is the most expensive step in the cycle by two orders of
+magnitude.
 
 If Phase 1 shows SHA-256 costing far more than expected, stop and
 reconsider the backend before writing the real circuit. If proving is too

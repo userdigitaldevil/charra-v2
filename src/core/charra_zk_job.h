@@ -46,7 +46,7 @@
  * PCR 0-7 are not stored: an IMA log never extends them, so they are zero,
  * and if that were ever false the proof would simply fail to verify.
  */
-typedef struct {
+typedef struct charra_zk_public_inputs {
     uint8_t file_hashes[CHARRA_ZK_NUM_ENTRIES][32];
     uint8_t commitments[CHARRA_ZK_NUM_ENTRIES][32];
     uint8_t pcrdigest_a[32];
