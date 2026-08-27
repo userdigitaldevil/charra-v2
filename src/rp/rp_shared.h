@@ -71,6 +71,12 @@ extern unsigned int rp_attestation_interval_s;
 extern int rp_num_verifiers;
 extern unsigned int rp_duration_s;
 extern unsigned long rp_max_cycles;
+/** How this RP proves it is running the expected appraisal code:
+ * CHARRA_TRUST_MODE_QUALIFY (the /qualify handshake, the default) or
+ * CHARRA_TRUST_MODE_TEE (a simulated TEE Attestation Document). Every
+ * Verifier must be configured the same way; the value travels in
+ * msg_rp_evidence_dto so a mismatch is named rather than guessed at. */
+extern charra_trust_mode rp_trust_mode;
 
 /* Set by the SIGINT/SIGTERM handler; polled by the daemon loop and by
  * rp_interruptible_sleep(). */

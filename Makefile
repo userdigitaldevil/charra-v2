@@ -133,6 +133,9 @@ OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/util/, cbor_util charra_util co
 # that list is linked into every binary, and these carry RP-specific state
 # the Attester/Verifier/Trust Manager have no business pulling in.
 RP_OBJECTS = $(addsuffix .o, $(addprefix $(OBJDIR)/rp/, rp_stats rp_config rp_coap rp_signing_key rp_qualification rp_evidence rp_attestation))
+# src/core/TEE.c lives in core/ but links only here: it holds a process-wide
+# keypair and only the RP calls it, so the reasoning above applies to it too.
+RP_OBJECTS += $(OBJDIR)/core/TEE.o
 
 # Verifier-only modules (src/verifier/), kept out of $(OBJECTS) for the same
 # reason as RP_OBJECTS above.
@@ -163,7 +166,8 @@ TEST_SUITES = test_event_log \
               test_message_marshaling \
               test_key_mgr \
               test_crypto_util \
-              test_parser_util
+              test_parser_util \
+              test_tee
 
 .PHONY: all attester verifier verifier_old relying_party trust_manager \
         provision_trusted_keys test $(TEST_SUITES) clean
@@ -232,8 +236,14 @@ $(BINDIR)/test_qualified_rps: tests/test_qualified_rps.c $(VERIFIER_OBJECTS) $(O
 	@mkdir -p $(@D)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
-# One rule for every suite in TEST_SUITES. test_qualified_rps additionally
-# links the Verifier-only objects, which its own rule above supplies.
+# TEE.o is an RP-only object (see RP_OBJECTS), so it is not in $(OBJECTS)
+# and this suite has to name it.
+$(BINDIR)/test_tee: tests/test_tee.c $(OBJDIR)/core/TEE.o $(OBJECTS)
+	@mkdir -p $(@D)
+	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
+
+# One rule for every suite in TEST_SUITES. test_qualified_rps and test_tee
+# additionally link objects outside $(OBJECTS), which their own rules supply.
 $(BINDIR)/test_%: tests/test_%.c $(OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)

@@ -33,6 +33,73 @@
 
 #define LOG_NAME "verifier"
 
+/** Source files this Verifier expects the RP's appraisal-and-redaction to
+ * run -- its own reference measurement, known independently rather than
+ * asked of the RP or of any TEE code: exactly as a real relying party holds
+ * its own copy of an expected enclave measurement, not one fetched from the
+ * device it is checking. Must name the same files, in the same order, that
+ * rp_evidence.c passes to its TEE (see rp_appraisal_code_files there); keep
+ * the two in sync by hand if either ever changes -- there is deliberately no
+ * shared symbol between them, since the Verifier does not call into the RP's
+ * TEE code at all.
+ *
+ * Hashing them at runtime means this Verifier needs the RP's sources on its
+ * own filesystem, at these paths. True here because every role runs from one
+ * bind-mounted checkout; not true of a real deployment, where the reference
+ * measurement would be provisioned instead. */
+static const char* const expected_appraisal_code_files[] = {
+        "src/rp/rp_evidence.c",
+        "src/core/charra_sdk.c",
+        "src/core/charra_event_log.c",
+};
+
+/**
+ * @brief Independently hashes expected_appraisal_code_files together, in
+ * list order -- the same construction TEE.c's tee_hash_files() uses, but run
+ * here, by the Verifier itself against its own copy of the source, and never
+ * by calling into the RP's TEE code.
+ */
+static CHARRA_RC verifier_hash_expected_appraisal_code(
+        uint8_t hash_out[TPM2_SHA256_DIGEST_SIZE]) {
+    uint8_t* combined = NULL;
+    size_t combined_len = 0;
+    CHARRA_RC result = CHARRA_RC_SUCCESS;
+
+    for (size_t i = 0; i < sizeof(expected_appraisal_code_files) /
+                                sizeof(expected_appraisal_code_files[0]);
+            i++) {
+        char* content = NULL;
+        size_t content_len = 0;
+        if (charra_io_read_file(expected_appraisal_code_files[i], &content,
+                    &content_len) != CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Could not read reference source "
+                             "'%s'.", expected_appraisal_code_files[i]);
+            result = CHARRA_RC_ERROR;
+            break;
+        }
+        if (content_len == 0) {
+            charra_io_free_file_buffer(&content);
+            continue;
+        }
+        uint8_t* grown = realloc(combined, combined_len + content_len);
+        if (grown == NULL) {
+            charra_io_free_file_buffer(&content);
+            result = CHARRA_RC_ERROR;
+            break;
+        }
+        combined = grown;
+        memcpy(combined + combined_len, content, content_len);
+        combined_len += content_len;
+        charra_io_free_file_buffer(&content);
+    }
+
+    if (result == CHARRA_RC_SUCCESS) {
+        result = hash_sha256(combined_len, combined, hash_out);
+    }
+    free(combined);
+    return result;
+}
+
 /* Monotonic seconds since an arbitrary epoch. The Step 3b timings below are
  * differences of it; mirrors the helpers in rp_evidence.c / rp_attestation.c. */
 static double charra_now_s(void) {
@@ -300,9 +367,33 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                     "fingerprint) took %f second(s).",
             charra_now_s() - ak_r_start);
 
-    bool attestation_result_qualified = false;
+    /* Do both sides require the same proof of RP integrity? Established
+     * before anything reads either mechanism's fields, so a misconfiguration
+     * is named as one rather than surfacing as a puzzling failure of
+     * whichever check happens to run first. */
+    const bool trust_mode_agreed =
+            (res.trust_mode == (uint32_t)verifier_trust_mode);
+    const bool require_qualification =
+            trust_mode_agreed &&
+            verifier_trust_mode == CHARRA_TRUST_MODE_QUALIFY;
+    const bool require_tee =
+            trust_mode_agreed && verifier_trust_mode == CHARRA_TRUST_MODE_TEE;
+    if (!trust_mode_agreed) {
+        charra_log_error("[" LOG_NAME "]     => trust mode MISMATCH: this "
+                         "Verifier requires %s, the RP sent %s. Both roles "
+                         "must be configured alike.",
+                verifier_trust_mode == CHARRA_TRUST_MODE_TEE ? "tee"
+                                                            : "qualify",
+                res.trust_mode == CHARRA_TRUST_MODE_TEE ? "tee" : "qualify");
+    }
+
+    /* Each mechanism is neutral -- true -- when it is not the one in force,
+     * so exactly one of them gates the verdict. Both are false when the two
+     * sides disagree about which that is. */
+    bool attestation_result_qualified =
+            trust_mode_agreed && !require_qualification;
     const double qual_start = charra_now_s();
-    if (rp_identity_known) {
+    if (require_qualification && rp_identity_known) {
         attestation_result_qualified = verifier_qualified_rps_is_qualified(
                 qualified_rps_file_path, rp_fingerprint, time(NULL));
         if (attestation_result_qualified) {
@@ -315,8 +406,10 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                     rp_fingerprint_hex);
         }
     }
-    charra_log_info("[" LOG_NAME "] Timing: RP qualification lookup took %f "
-                    "second(s).", charra_now_s() - qual_start);
+    if (require_qualification) {
+        charra_log_info("[" LOG_NAME "] Timing: RP qualification lookup took "
+                        "%f second(s).", charra_now_s() - qual_start);
+    }
 
     /* Step 3a item 2: verify Quote_r's signature -- RSA-PSS/SHA-256 over
      * the TPMS_ATTEST the RP's TPM built, under RP's public key. Same
@@ -490,6 +583,15 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                           attestation_result_nonce_rp &&
                           attestation_result_pcr_rp;
 
+    /* The TEE arm of the RP-integrity gate. It cannot be evaluated with the
+     * rest of Step 3a because REPORT_DATA binds to Quote_a's pcrDigest,
+     * which Step 3b is what parses -- so it is checked inside that block and
+     * folded into the verdict below. Neutral (true) when qualification is
+     * the mechanism in force; false when the two sides disagree about
+     * which. */
+    bool attestation_result_tee = trust_mode_agreed && !require_tee;
+    const char* tee_why = "not verified";
+
     bool attestation_result_ekak = false;
     /* Why Step 3b item 1 failed, for the reason list at the verdict. */
     const char* ekak_att_why = "not verified";
@@ -631,11 +733,177 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                     expected_attester_nonce_len, expected_nonce_hex,
                     attest_struct.extraData.size, received_nonce_hex);
         }
+
+        /* --- the RP's TEE Attestation Document --------------------------
+         * Five checks, each gating the next, so a failure is reported at the
+         * first thing that is actually wrong:
+         *   1. AK_r is in the trust anchor          (already done above)
+         *   2. AK_r certified this TEE public key   -- without this the key
+         *      is unanchored and the whole document forgeable
+         *   3. the document verifies under that key
+         *   4. the measured code is the code we expect
+         *   5. the document is bound to THIS evidence
+         * The Verifier never calls into the RP's TEE code for any of it. */
+        if (require_tee) {
+            charra_log_info("[" LOG_NAME "] Verifying the RP's TEE "
+                            "Attestation Document ...");
+            const double tee_start = charra_now_s();
+
+            /* 2. AK_r's certification of the TEE key. rp_rsa_pub_key was
+             * freed after Quote_r's check, so convert again rather than keep
+             * a context alive across half the function. */
+            bool tee_key_certified = false;
+            mbedtls_rsa_context ak_r_pub = {0};
+            if (!attestation_result_ekak_rp) {
+                tee_why = "NOT EVALUATED -- AK_r is not in the trust anchor, "
+                          "so its certification of the TEE key means nothing";
+            } else if (res.tee_public_key_len == 0 ||
+                       res.tee_public_key_sig_len !=
+                               CHARRA_RSA_SIGNATURE_LEN) {
+                tee_why = "MALFORMED -- no TEE public key, or its "
+                          "certification is not an RSA-2048 signature";
+            } else if (res.rp_public_key_len != sizeof(TPM2B_PUBLIC) ||
+                       charra_crypto_tpm_pub_key_to_mbedtls_pub_key(
+                               (const TPM2B_PUBLIC*)res.rp_public_key,
+                               &ak_r_pub) != CHARRA_RC_SUCCESS) {
+                tee_why = "MALFORMED -- could not read AK_r to check its "
+                          "certification of the TEE key";
+            } else {
+                tee_key_certified =
+                        charra_crypto_rsa_verify_signature(&ak_r_pub,
+                                MBEDTLS_MD_SHA256, res.tee_public_key,
+                                res.tee_public_key_len,
+                                res.tee_public_key_sig) == CHARRA_RC_SUCCESS;
+                mbedtls_rsa_free(&ak_r_pub);
+                if (!tee_key_certified) {
+                    tee_why = "UNCERTIFIED KEY -- AK_r did not sign the TEE "
+                              "public key, so nothing vouches for it";
+                    charra_log_error("[" LOG_NAME "]     => the TEE's public "
+                                     "key is NOT certified by AK_r!");
+                }
+            }
+
+            /* 3. the document, under the key AK_r just vouched for. */
+            bool tee_signature_ok = false;
+            if (tee_key_certified) {
+                mbedtls_pk_context tee_pub_key_ctx;
+                mbedtls_pk_init(&tee_pub_key_ctx);
+                if (mbedtls_pk_parse_public_key(&tee_pub_key_ctx,
+                            res.tee_public_key, res.tee_public_key_len) != 0) {
+                    tee_why = "MALFORMED -- could not parse the TEE's public "
+                              "key";
+                } else if (mbedtls_pk_get_type(&tee_pub_key_ctx) !=
+                           MBEDTLS_PK_RSA) {
+                    tee_why = "MALFORMED -- the TEE's public key is not RSA";
+                } else if (mbedtls_rsa_set_padding(
+                                   mbedtls_pk_rsa(tee_pub_key_ctx),
+                                   MBEDTLS_RSA_PKCS_V21,
+                                   MBEDTLS_MD_SHA256) != 0) {
+                    tee_why = "Verifier-side error: could not select RSA-PSS "
+                              "padding";
+                } else if (res.tee_signature_len != CHARRA_RSA_SIGNATURE_LEN) {
+                    tee_why = "MALFORMED -- the TEE signature is not an "
+                              "RSA-2048 signature";
+                } else {
+                    uint8_t tee_signed_data[sizeof(res.tee_file_hash) +
+                            sizeof(res.tee_report_data)] = {0};
+                    memcpy(tee_signed_data, res.tee_file_hash,
+                            sizeof(res.tee_file_hash));
+                    memcpy(tee_signed_data + sizeof(res.tee_file_hash),
+                            res.tee_report_data, sizeof(res.tee_report_data));
+                    tee_signature_ok =
+                            charra_crypto_rsa_verify_signature(
+                                    mbedtls_pk_rsa(tee_pub_key_ctx),
+                                    MBEDTLS_MD_SHA256, tee_signed_data,
+                                    sizeof(tee_signed_data),
+                                    res.tee_signature) == CHARRA_RC_SUCCESS;
+                    if (!tee_signature_ok) {
+                        tee_why = "MISMATCH -- not a valid signature by the "
+                                  "TEE over its Attestation Document";
+                        charra_log_error("[" LOG_NAME "]     => TEE "
+                                         "Attestation Document signature is "
+                                         "NOT valid!");
+                    }
+                }
+                mbedtls_pk_free(&tee_pub_key_ctx);
+            }
+
+            /* 4. the code that ran, against our own reference. */
+            bool tee_file_hash_ok = false;
+            if (tee_signature_ok) {
+                uint8_t expected_file_hash[TPM2_SHA256_DIGEST_SIZE] = {0};
+                tee_file_hash_ok =
+                        verifier_hash_expected_appraisal_code(
+                                expected_file_hash) == CHARRA_RC_SUCCESS &&
+                        memcmp(expected_file_hash, res.tee_file_hash,
+                                sizeof(expected_file_hash)) == 0;
+                if (!tee_file_hash_ok) {
+                    tee_why = "WRONG CODE -- the attested file_hash does not "
+                              "match this Verifier's own measurement of the "
+                              "expected appraisal sources";
+                    charra_log_error("[" LOG_NAME "]     => file_hash does "
+                                     "NOT match our reference measurement!");
+                }
+            }
+
+            /* 5. bound to this nonce, this Attester evidence, this log. */
+            bool tee_report_data_ok = false;
+            if (tee_file_hash_ok) {
+                size_t expected_input_len = (size_t)rp_attest.extraData.size +
+                        attest_struct.attested.quote.pcrDigest.size +
+                        res.log_r_len;
+                uint8_t* expected_input = malloc(expected_input_len);
+                if (expected_input == NULL) {
+                    tee_why = "Verifier-side error: out of memory recomputing "
+                              "REPORT_DATA";
+                } else {
+                    size_t off = 0;
+                    memcpy(expected_input + off, rp_attest.extraData.buffer,
+                            rp_attest.extraData.size);
+                    off += rp_attest.extraData.size;
+                    memcpy(expected_input + off,
+                            attest_struct.attested.quote.pcrDigest.buffer,
+                            attest_struct.attested.quote.pcrDigest.size);
+                    off += attest_struct.attested.quote.pcrDigest.size;
+                    memcpy(expected_input + off, res.log_r, res.log_r_len);
+
+                    uint8_t expected_report_data[TPM2_SHA256_DIGEST_SIZE] = {0};
+                    tee_report_data_ok =
+                            hash_sha256(expected_input_len, expected_input,
+                                    expected_report_data) ==
+                                    CHARRA_RC_SUCCESS &&
+                            memcmp(expected_report_data, res.tee_report_data,
+                                    sizeof(expected_report_data)) == 0;
+                    free(expected_input);
+                    if (!tee_report_data_ok) {
+                        tee_why = "WRONG BINDING -- the attested report_data "
+                                  "does not match hash(verifier_nonce || "
+                                  "pcrdigest_a || log_r) for this evidence";
+                        charra_log_error("[" LOG_NAME "]     => report_data "
+                                         "does NOT match hash(verifier_nonce "
+                                         "|| pcrdigest_a || log_r)!");
+                    }
+                }
+            }
+
+            attestation_result_tee = tee_key_certified && tee_signature_ok &&
+                                     tee_file_hash_ok && tee_report_data_ok;
+            if (attestation_result_tee) {
+                charra_log_info("[" LOG_NAME "]     => TEE Attestation "
+                                "Document is valid: key certified by AK_r, "
+                                "correct code, correctly bound to this "
+                                "evidence!");
+            }
+            charra_log_info("[" LOG_NAME "] Timing: verify TEE Attestation "
+                            "Document took %f second(s).",
+                    charra_now_s() - tee_start);
+        }
     }
 
     /* --- output result --- */
     /* Order matches Step 3a then Step 3b, RP's evidence before Attester's. */
-    bool attestation_result = step_3a_passed && attestation_result_ekak &&
+    bool attestation_result = step_3a_passed && attestation_result_tee &&
+                              attestation_result_ekak &&
                               attestation_result_signature &&
                               attestation_result_nonce;
 
@@ -660,11 +928,21 @@ void coap_appraise_handler(struct coap_resource_t* resource,
             /* The lookup is keyed by the RP's public key; without one it
              * never ran and must not be reported as a real failure. */
             LOG_REASON("RP qualification (Step 3a item 1b): %s",
-                    !rp_identity_known
+                    !trust_mode_agreed
+                            ? "MODE MISMATCH -- this Verifier and the RP "
+                              "require different proofs of RP integrity"
+                    : !rp_identity_known
                             ? "NOT EVALUATED -- the RP sent no key to identify "
                               "it by"
                             : "MISSING or EXPIRED -- this RP must re-run "
                               "/qualify");
+        }
+        if (!attestation_result_tee) {
+            LOG_REASON("RP TEE Attestation Document: %s",
+                    !trust_mode_agreed
+                            ? "MODE MISMATCH -- this Verifier and the RP "
+                              "require different proofs of RP integrity"
+                            : tee_why);
         }
         if (!attestation_result_signature_rp) {
             LOG_REASON("Quote_r signature (Step 3a item 2): MISMATCH -- not "

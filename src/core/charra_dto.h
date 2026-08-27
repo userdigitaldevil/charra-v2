@@ -125,6 +125,23 @@ typedef struct {
  * The Attester's raw event log is deliberately absent: log_r replaces it,
  * and forwarding the raw one would defeat the redaction entirely.
  */
+/**
+ * @brief How the RP proves it is running the expected appraisal code.
+ *
+ * Both roles must be configured alike. The value travels in
+ * msg_rp_evidence_dto so a mismatch is reported as one, rather than
+ * presenting as an unexplained NO vote.
+ */
+typedef enum {
+    /** /qualify + /qualify_submit: the RP redacts a synthetic log the
+     * Verifier already knows the answer to. Proves the redaction OUTPUT
+     * matches, not which code produced it. The default. */
+    CHARRA_TRUST_MODE_QUALIFY = 0,
+    /** A simulated TEE Attestation Document naming the code that ran and
+     * binding it to this evidence. See src/core/TEE.h. */
+    CHARRA_TRUST_MODE_TEE = 1,
+} charra_trust_mode;
+
 typedef struct {
     /* --- Quote_r: the TPM's own signed attestation --- */
     /** TPMS_ATTEST the RP's TPM produced, carrying extraData (the
@@ -165,6 +182,35 @@ typedef struct {
     /* --- log_r itself --- */
     uint32_t log_r_len;
     uint8_t* log_r;
+
+    /* --- the simulated TEE's Attestation Document (TEE mode only) ------
+     * Empty in CHARRA_TRUST_MODE_QUALIFY, where the RP proves itself with
+     * the /qualify handshake instead and the Verifier checks none of
+     * these. trust_mode says which, so a Verifier configured for the other
+     * mode reports a mismatch rather than silently voting NO. */
+    /** Which proof of RP integrity this message carries. */
+    uint32_t trust_mode;
+    /** SHA-256 over the RP's appraisal/redaction sources, concatenated in
+     * a fixed order. The Verifier recomputes it from its own copy rather
+     * than believing this value; it travels so a mismatch can be named. */
+    uint8_t tee_file_hash[TPM2_SHA256_DIGEST_SIZE];
+    /** hash(verifier_nonce || pcrdigest_a || log_r), binding the document
+     * to this Verifier's challenge, this Attester evidence and this log. */
+    uint8_t tee_report_data[TPM2_SHA256_DIGEST_SIZE];
+    /** RSA-PSS/SHA-256 over (tee_file_hash || tee_report_data), under the
+     * TEE's own key. */
+    uint32_t tee_signature_len;
+    uint8_t tee_signature[CHARRA_RSA_SIGNATURE_LEN];
+    /** The TEE's public key, DER. Not pre-shared -- unlike AK_r it is
+     * generated per process, so it has to travel. */
+    uint32_t tee_public_key_len;
+    uint8_t tee_public_key[CHARRA_RSA_PUB_KEY_DER_MAX];
+    /** AK_r's signature over tee_public_key. This is what makes the key
+     * above believable: AK_r is in the trust anchor, so the Verifier
+     * reaches the TEE key by a chain it already trusts instead of
+     * accepting whatever arrived beside the signature. */
+    uint32_t tee_public_key_sig_len;
+    uint8_t tee_public_key_sig[CHARRA_RSA_SIGNATURE_LEN];
 } msg_rp_evidence_dto;
 
 /**

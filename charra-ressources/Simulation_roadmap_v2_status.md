@@ -18,12 +18,12 @@ Measured across the two:
 
 | | starting point | now |
 |---|:--:|:--:|
-| Source files in `src/` (`.c` + `.h`) | 35 | 85 |
-| Lines of C in `src/` | 8 057 | 17 954 |
+| Source files in `src/` (`.c` + `.h`) | 35 | 87 |
+| Lines of C in `src/` | 8 057 | 19 083 |
 | Binaries built | 5 | 6 |
 | CoAP resources served | 4 | 7 |
 | Marshalled message types (`msg_*_dto`) | 2 | 10 |
-| Test suites | 0 | 16 (358 assertions) |
+| Test suites | 0 | 17 (407 assertions) |
 
 ---
 
@@ -137,6 +137,10 @@ byte-identical. Grants are recorded per RP fingerprint in a registry every
 Verifier reads (`verifier_qualified_rps_is_qualified`). **Appendix B** walks
 through the exchange.
 
+This is the default, and until 4.10 it was the only option. **In TEE mode the
+handshake does not run at all** — the RP is never asked to qualify and no
+grant is looked up, because it proves itself per message instead.
+
 **4.5 Signed verdicts.** Verifiers used to return an unauthenticated result.
 They now return `charra_verdict`, a signed record binding the verdict to the
 challenge nonce, an `evidence_digest` over the exact submission appraised, and a
@@ -179,13 +183,14 @@ ignored.
 
 **4.8 Restructuring and tests.** `src/` gained `attester/`, `rp/` and
 `verifier/` subdirectories; `verifier.c` shrank from 678 lines to 245 plus 11
-files under `src/verifier/`. Six new modules appeared under `src/core/`:
+files under `src/verifier/`. Seven new modules appeared under `src/core/`:
 `charra_event_log`, `charra_rp_qualification`, `charra_sdk`,
-`charra_synthetic_log`, `charra_trusted_keys`, `charra_verdict`. There were
-**no tests at all** before; there are now 16 suites and 358 assertions. That they need
+`charra_synthetic_log`, `charra_trusted_keys`, `charra_verdict` and `TEE`
+(the last introduced in 4.10 below). There were
+**no tests at all** before; there are now 17 suites and 407 assertions. That they need
 neither a TPM nor the network is not an assumption — the suite was re-run inside
 a container started with `--network none` and with `tpm_server` killed, and all
-16 suites still reported 358 assertions and 0 failures.
+17 suites still reported 407 assertions and 0 failures.
 
 **4.9 DTLS, which previously could not be switched on at all.** Roadmap v1
 recorded DTLS as "present in the code but not enabled". That was accurate but
@@ -252,6 +257,63 @@ against the reference copy — 28 authenticated handshakes per two-cycle run.
 
 This is hop-by-hop, so it does not replace the signed verdict of 4.5, which is
 end-to-end and survives a compromised endpoint. The two are complementary.
+
+**4.10 A second way for the RP to prove itself: a simulated TEE.** Until now
+the RP had exactly one way to show it was not fabricating the redaction — the
+`/qualify` handshake of 4.4, which proves the redaction *output* matches a
+synthetic challenge the Verifier already knows the answer to. It says nothing
+about *which code* produced that output. A second mechanism answers the other
+question.
+
+`src/core/TEE.{h,c}` simulates the primitive a real TEE provides: an
+Attestation Document binding a measurement of the code that ran to a
+caller-supplied value, signed by a key that never leaves the enclave. Here the
+"enclave image" is a SHA-256 over the RP's own appraisal sources
+(`rp_evidence.c`, `charra_sdk.c`, `charra_event_log.c`, in that order — order
+is part of the measurement), and the bound value is
+`hash(verifier_nonce || pcrdigest_a || log_r)`: this Verifier's own challenge,
+the exact TPM-signed digest that gated appraisal, and the exact redacted log
+being submitted. One document per Verifier, since each contributes its own
+nonce.
+
+*Why the TEE's key is certified by AK_r.* The keypair is generated per process
+and has to travel with every document, since no Verifier can know it in
+advance. On its own that would prove nothing: a dishonest RP could generate
+its own keypair, sign any document it liked, attach the matching public key,
+and pass every check — the measurement is over public source files, so
+claiming the expected hash costs nothing. What makes a real enclave's document
+unforgeable is the chain from its signing key to a vendor root, and that chain
+is the part software cannot simulate. It is replaced here with a root the
+system already has: the RP certifies the TEE's public key with **AK_r**, which
+is in `keys/trusted_keys.txt`. The Verifier therefore reaches the TEE key by a
+chain it already checks — anchor → AK_r → TEE key → document — instead of
+believing what arrived beside the signature. This also gives AK_r's
+unrestricted template a second justification: in TEE mode the qualification
+handshake, previously its only caller, does not run.
+
+The Verifier's five checks are its own work throughout. It holds an
+independent copy of the file list and hashes its own sources; it never calls
+into the RP's TEE code, and there is no shared symbol between the two.
+
+Which mechanism is in force is a CLI flag on both roles, `--trust-mode=qualify`
+(the default, so nothing that ran before changes) or `--trust-mode=tee`, set
+for both at once by `run_daemon.sh`'s `TRUST_MODE`. **Unlike `DTLS_MODE`, a
+mismatch is reported rather than guessed at**: the RP states its mode in every
+`/appraise` request, so a Verifier configured the other way votes NO and logs
+`MODE MISMATCH` — the DTLS behaviour above, where disagreement presents as a
+timeout, is precisely what this avoids.
+
+Measured over the full 1..5-Verifier sweep, TEE mode costs between 1.8 % and
+3.4 % more per cycle. The fixed cost is unchanged and the whole difference is
+marginal, about 24 ms per Verifier — the shape the design predicts rather than
+a surprise, since the handshake is once per cycle and usually a no-op whereas
+a TEE document is built and signed per Verifier. The figures are in
+`charra_measurements_v2`, which is where they are maintained.
+
+Neither mechanism subsumes the other. Qualification proves the output and
+anchors to a key the trust anchor already holds; the TEE names the code and,
+with the certification above, anchors to the same place. Running both would be
+a third mode; it is not implemented.
 
 ---
 

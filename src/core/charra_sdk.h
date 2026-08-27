@@ -1,7 +1,7 @@
 /**
  * @file charra_sdk.h
  * @brief The Verifier's "desensitization and cleaning module (SDK)", per the
- * privacy-preserving redaction design (see CHARRA_V2_NOTES.md).
+ * privacy-preserving redaction design.
  *
  * The Verifier authors this logic and sends it to the RP -- the RP runs it
  * unmodified rather than writing its own redaction routine. Applied both to

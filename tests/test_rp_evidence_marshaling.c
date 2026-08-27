@@ -66,6 +66,16 @@ static void test_round_trips(void) {
     ev.log_r = log_r;
     ev.log_r_len = sizeof(log_r);
 
+    ev.trust_mode = CHARRA_TRUST_MODE_TEE;
+    memset(ev.tee_file_hash, 0x99, sizeof(ev.tee_file_hash));
+    memset(ev.tee_report_data, 0xAA, sizeof(ev.tee_report_data));
+    ev.tee_signature_len = sizeof(ev.tee_signature);
+    memset(ev.tee_signature, 0xBB, ev.tee_signature_len);
+    ev.tee_public_key_len = sizeof(ev.tee_public_key);
+    memset(ev.tee_public_key, 0xDD, ev.tee_public_key_len);
+    ev.tee_public_key_sig_len = sizeof(ev.tee_public_key_sig);
+    memset(ev.tee_public_key_sig, 0xEE, ev.tee_public_key_sig_len);
+
     uint32_t marshaled_len = 0;
     uint8_t* marshaled = NULL;
     CHARRA_RC rc = charra_marshal_rp_evidence(&ev, &marshaled_len, &marshaled);
@@ -110,6 +120,28 @@ static void test_round_trips(void) {
             res.log_r_len == ev.log_r_len &&
                     memcmp(res.log_r, ev.log_r, ev.log_r_len) == 0);
 
+    /* The TEE fields are appended after log_r, so a positional-array bug
+     * would most likely show up here first. */
+    check("trust_mode round-trips", res.trust_mode == ev.trust_mode);
+    check("tee_file_hash round-trips",
+            memcmp(res.tee_file_hash, ev.tee_file_hash,
+                    sizeof(ev.tee_file_hash)) == 0);
+    check("tee_report_data round-trips",
+            memcmp(res.tee_report_data, ev.tee_report_data,
+                    sizeof(ev.tee_report_data)) == 0);
+    check("tee_signature round-trips",
+            res.tee_signature_len == ev.tee_signature_len &&
+                    memcmp(res.tee_signature, ev.tee_signature,
+                            ev.tee_signature_len) == 0);
+    check("tee_public_key round-trips",
+            res.tee_public_key_len == ev.tee_public_key_len &&
+                    memcmp(res.tee_public_key, ev.tee_public_key,
+                            ev.tee_public_key_len) == 0);
+    check("tee_public_key_sig round-trips",
+            res.tee_public_key_sig_len == ev.tee_public_key_sig_len &&
+                    memcmp(res.tee_public_key_sig, ev.tee_public_key_sig,
+                            ev.tee_public_key_sig_len) == 0);
+
     free(marshaled);
 }
 
@@ -148,8 +180,14 @@ static void test_empty_log_accepted(void) {
 
 /** How many byte strings charra_marshal_rp_evidence_internal() encodes:
  * rp_attestation_data, rp_signature, rp_public_key, attester_nonce,
- * attestation_data, tpm2_signature, tpm2_public_key, log_r. */
-#define RAW_FIELD_COUNT 8
+ * attestation_data, tpm2_signature, tpm2_public_key, log_r, then -- after
+ * the trust_mode integer -- tee_file_hash, tee_report_data, tee_signature,
+ * tee_public_key, tee_public_key_sig. */
+#define RAW_FIELD_COUNT 13
+/** Byte strings that precede the trust_mode integer on the wire. */
+#define RAW_FIELDS_BEFORE_TRUST_MODE 8
+/** The two TEE digests are fixed-width; the encoder must emit exactly this. */
+#define RAW_TEE_DIGEST_LEN 32
 
 /** One byte string per field, in the exact order
  * charra_marshal_rp_evidence_internal() encodes them, so any single field
@@ -159,8 +197,8 @@ typedef struct {
     size_t len;
 } raw_field;
 
-static void encode_raw_evidence(
-        const raw_field f[RAW_FIELD_COUNT], uint8_t** out, size_t* out_len) {
+static void encode_raw_evidence_mode(const raw_field f[RAW_FIELD_COUNT],
+        uint64_t trust_mode, uint8_t** out, size_t* out_len) {
     size_t cap = 256;
     for (int i = 0; i < RAW_FIELD_COUNT; i++) {
         cap += f[i].len;
@@ -170,7 +208,12 @@ static void encode_raw_evidence(
     QCBOREncodeContext ec = {0};
     QCBOREncode_Init(&ec, (UsefulBuf){.ptr = buf, .len = cap});
     QCBOREncode_OpenArray(&ec);
-    for (int i = 0; i < RAW_FIELD_COUNT; i++) {
+    for (int i = 0; i < RAW_FIELDS_BEFORE_TRUST_MODE; i++) {
+        QCBOREncode_AddBytes(
+                &ec, (UsefulBufC){.ptr = f[i].ptr, .len = f[i].len});
+    }
+    QCBOREncode_AddUInt64(&ec, trust_mode);
+    for (int i = RAW_FIELDS_BEFORE_TRUST_MODE; i < RAW_FIELD_COUNT; i++) {
         QCBOREncode_AddBytes(
                 &ec, (UsefulBufC){.ptr = f[i].ptr, .len = f[i].len});
     }
@@ -182,7 +225,12 @@ static void encode_raw_evidence(
     *out_len = buf_out.len;
 }
 
-/** Fills every field with a small valid value; callers then oversize one. */
+/** A valid 32-byte digest for the two fixed-width TEE fields. */
+static const uint8_t valid_tee_digest[RAW_TEE_DIGEST_LEN] = {0};
+
+/** Fills every field with a small valid value; callers then oversize one.
+ * The two TEE digests get exactly their required width, since anything else
+ * is rejected for a different reason than the one under test. */
 static void fill_valid(raw_field f[RAW_FIELD_COUNT], const uint8_t* small, size_t small_len,
         const uint8_t* attest, size_t attest_len) {
     f[0].ptr = attest;
@@ -191,18 +239,27 @@ static void fill_valid(raw_field f[RAW_FIELD_COUNT], const uint8_t* small, size_
         f[i].ptr = small;
         f[i].len = small_len;
     }
+    f[8].ptr = valid_tee_digest; /* tee_file_hash */
+    f[8].len = sizeof(valid_tee_digest);
+    f[9].ptr = valid_tee_digest; /* tee_report_data */
+    f[9].len = sizeof(valid_tee_digest);
 }
 
-static void expect_rejected(const char* name, raw_field f[RAW_FIELD_COUNT]) {
+static void expect_rejected_mode(
+        const char* name, raw_field f[RAW_FIELD_COUNT], uint64_t trust_mode) {
     uint8_t* raw = NULL;
     size_t raw_len = 0;
-    encode_raw_evidence(f, &raw, &raw_len);
+    encode_raw_evidence_mode(f, trust_mode, &raw, &raw_len);
 
     msg_rp_evidence_dto res = {0};
     CHARRA_RC rc = charra_unmarshal_rp_evidence((uint32_t)raw_len, raw, &res);
     check(name, rc == CHARRA_RC_MARSHALING_ERROR);
 
     free(raw);
+}
+
+static void expect_rejected(const char* name, raw_field f[RAW_FIELD_COUNT]) {
+    expect_rejected_mode(name, f, CHARRA_TRUST_MODE_QUALIFY);
 }
 
 #define OVERSIZED_FIELD_TEST(idx, field, label)                                \
@@ -228,6 +285,9 @@ static void test_oversized_fields_rejected(void) {
     OVERSIZED_FIELD_TEST(4, attestation_data, "attestation_data");
     OVERSIZED_FIELD_TEST(5, tpm2_signature, "tpm2_signature");
     OVERSIZED_FIELD_TEST(6, tpm2_public_key, "tpm2_public_key");
+    OVERSIZED_FIELD_TEST(10, tee_signature, "tee_signature");
+    OVERSIZED_FIELD_TEST(11, tee_public_key, "tee_public_key");
+    OVERSIZED_FIELD_TEST(12, tee_public_key_sig, "tee_public_key_sig");
 }
 
 /* An EMPTY Quote_r is rejected outright rather than accepted as a
@@ -273,6 +333,72 @@ static void test_truncated_message_rejected(void) {
     free(buf);
 }
 
+/* The two TEE digests are fixed-width. A short one is the dangerous case:
+ * a bounds check written `> sizeof` would accept it and leave the tail of
+ * the destination holding whatever was there before. */
+static void test_tee_digest_width_enforced(void) {
+    uint8_t small[4] = {0x01, 0x02, 0x03, 0x04};
+    uint8_t pcr[sizeof(TPMS_ATTEST)] = {0};
+    uint8_t short_digest[RAW_TEE_DIGEST_LEN - 1] = {0};
+    uint8_t long_digest[RAW_TEE_DIGEST_LEN + 1] = {0};
+
+    printf("\na tee_file_hash of the wrong width is rejected\n");
+    raw_field f[RAW_FIELD_COUNT];
+    fill_valid(f, small, sizeof(small), pcr, sizeof(pcr));
+    f[8].ptr = short_digest;
+    f[8].len = sizeof(short_digest);
+    expect_rejected("a short tee_file_hash is rejected", f);
+
+    fill_valid(f, small, sizeof(small), pcr, sizeof(pcr));
+    f[8].ptr = long_digest;
+    f[8].len = sizeof(long_digest);
+    expect_rejected("a long tee_file_hash is rejected", f);
+
+    printf("\na tee_report_data of the wrong width is rejected\n");
+    fill_valid(f, small, sizeof(small), pcr, sizeof(pcr));
+    f[9].ptr = short_digest;
+    f[9].len = sizeof(short_digest);
+    expect_rejected("a short tee_report_data is rejected", f);
+
+    fill_valid(f, small, sizeof(small), pcr, sizeof(pcr));
+    f[9].ptr = long_digest;
+    f[9].len = sizeof(long_digest);
+    expect_rejected("a long tee_report_data is rejected", f);
+}
+
+/* An unknown trust mode must not be parsed into a Verifier's comparison as
+ * some third value that matches neither side. */
+static void test_unknown_trust_mode_rejected(void) {
+    printf("\nan unknown trust_mode is rejected\n");
+
+    uint8_t small[4] = {0x01, 0x02, 0x03, 0x04};
+    uint8_t pcr[sizeof(TPMS_ATTEST)] = {0};
+    raw_field f[RAW_FIELD_COUNT];
+
+    fill_valid(f, small, sizeof(small), pcr, sizeof(pcr));
+    expect_rejected_mode("trust_mode 2 is rejected", f, 2);
+    fill_valid(f, small, sizeof(small), pcr, sizeof(pcr));
+    expect_rejected_mode("a huge trust_mode is rejected", f, 0xFFFFFFFFu);
+
+    /* And both defined values are accepted, so the check above is rejecting
+     * the right thing rather than everything. */
+    for (uint64_t mode = CHARRA_TRUST_MODE_QUALIFY;
+            mode <= CHARRA_TRUST_MODE_TEE; mode++) {
+        fill_valid(f, small, sizeof(small), pcr, sizeof(pcr));
+        uint8_t* raw = NULL;
+        size_t raw_len = 0;
+        encode_raw_evidence_mode(f, mode, &raw, &raw_len);
+        msg_rp_evidence_dto res = {0};
+        CHARRA_RC rc =
+                charra_unmarshal_rp_evidence((uint32_t)raw_len, raw, &res);
+        check(mode == CHARRA_TRUST_MODE_QUALIFY
+                        ? "trust_mode 'qualify' is accepted"
+                        : "trust_mode 'tee' is accepted",
+                rc == CHARRA_RC_SUCCESS && res.trust_mode == mode);
+        free(raw);
+    }
+}
+
 int main(void) {
     printf("RP evidence (msg_rp_evidence_dto) marshaling tests\n");
     printf("================================================\n");
@@ -280,6 +406,8 @@ int main(void) {
     test_round_trips();
     test_empty_log_accepted();
     test_oversized_fields_rejected();
+    test_tee_digest_width_enforced();
+    test_unknown_trust_mode_rejected();
     test_empty_attestation_rejected();
     test_truncated_message_rejected();
 

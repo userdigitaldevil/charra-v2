@@ -363,7 +363,7 @@ static void coap_handler(struct coap_resource_t* resource,
      * exactly what it declares (QCBOREncode_Finish's own length), so the
      * response_len/actual-bytes-written mismatch that used to leak
      * uninitialized heap memory (and make the RP believe more records had
-     * arrived than really did, see CHARRA_V2_NOTES.md) cannot recur here:
+     * arrived than really did) cannot recur here:
      * there is no separate hand-computed size formula to drift out of
      * sync with what the write loop fills. */
     uint32_t marshaled_len = 0;

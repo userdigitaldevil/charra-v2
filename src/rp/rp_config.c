@@ -42,6 +42,7 @@ void rp_interruptible_sleep(unsigned int seconds) {
 #define RP_OPT_RPK_ATTESTER_KEY 133
 #define RP_OPT_RPK_VERIFIER_KEY 134
 #define RP_OPT_RPK_TRUST_MANAGER_KEY 135
+#define RP_OPT_TRUST_MODE 136
 
 static const struct option rp_long_options[] = {{"help", no_argument, 0, '0'},
         {"verbose", no_argument, 0, 'v'},
@@ -64,6 +65,7 @@ static const struct option rp_long_options[] = {{"help", no_argument, 0, '0'},
         {"verifier-public-key", required_argument, 0, RP_OPT_RPK_VERIFIER_KEY},
         {"trust-manager-public-key", required_argument, 0,
                 RP_OPT_RPK_TRUST_MANAGER_KEY},
+        {"trust-mode", required_argument, 0, RP_OPT_TRUST_MODE},
         {0}};
 
 /* Which options actually appeared on the command line, indexed by their
@@ -175,6 +177,13 @@ int parse_rp_command_line(int argc, char** argv) {
             printf("                               Three separate paths "
                    "because the RP is a client to three kinds of peer, "
                    "unlike the Attester and Verifier which each face one.\n");
+            printf("     --trust-mode=MODE:        How this RP proves it "
+                   "runs the expected appraisal code: 'qualify' (the "
+                   "/qualify handshake; default) or 'tee' (a TEE "
+                   "Attestation Document, one per Verifier). EVERY Verifier "
+                   "must use the SAME mode -- unlike DTLS, a mismatch is "
+                   "reported rather than timing out. run_daemon.sh's "
+                   "TRUST_MODE sets both at once.\n");
             return 1;
         case 'v':
             charra_log_level = CHARRA_LOG_DEBUG;
@@ -270,6 +279,21 @@ int parse_rp_command_line(int argc, char** argv) {
         case RP_OPT_RPK_TRUST_MANAGER_KEY:
             dtls_rpk_trust_manager_public_key_path = optarg;
             break;
+        case RP_OPT_TRUST_MODE:
+            /* Spelled out rather than numeric: an RP proving itself the way
+             * no Verifier expects fails every attestation, so the flag
+             * should be readable in a process list. */
+            if (strcmp(optarg, "qualify") == 0) {
+                rp_trust_mode = CHARRA_TRUST_MODE_QUALIFY;
+            } else if (strcmp(optarg, "tee") == 0) {
+                rp_trust_mode = CHARRA_TRUST_MODE_TEE;
+            } else {
+                charra_log_error("[" LOG_NAME "] --trust-mode must be "
+                                 "'qualify' or 'tee', not '%s'.",
+                        optarg);
+                return -1;
+            }
+            break;
         default:
             charra_log_error(
                     "[" LOG_NAME "] Unrecognized option. Try --help.");
@@ -325,6 +349,12 @@ void rp_log_effective_configuration(void) {
                         "until stopped (default; pass --benchmark for the "
                         "timing sweep).");
     }
+    charra_log_info("[" LOG_NAME "] TRUST MODE: %s -- %s.",
+            rp_trust_mode == CHARRA_TRUST_MODE_TEE ? "TEE" : "QUALIFY",
+            rp_trust_mode == CHARRA_TRUST_MODE_TEE
+                    ? "a TEE Attestation Document per Verifier; the /qualify "
+                      "handshake is skipped"
+                    : "the /qualify handshake; no TEE document is sent");
     charra_log_info("[" LOG_NAME
                     "] ============================================================");
     charra_log_info("[" LOG_NAME "] Settings for this run -- \"(default)\" "

@@ -21,6 +21,7 @@
 #include "rp/rp_stats.h"
 
 bool rp_benchmark_mode = false;
+charra_trust_mode rp_trust_mode = CHARRA_TRUST_MODE_QUALIFY;
 unsigned int rp_attestation_interval_s =
         RP_DEFAULT_ATTESTATION_INTERVAL_S;
 int rp_num_verifiers = RP_DEFAULT_NUM_VERIFIERS;

@@ -149,6 +149,45 @@ CHARRA_RC charra_crypto_pk_verify_file(const char* public_key_path,
 #define CHARRA_RSA_KEY_BITS 2048
 /** Bytes an RSA-2048 signature occupies. */
 #define CHARRA_RSA_SIGNATURE_LEN (CHARRA_RSA_KEY_BITS / 8)
+/** Generous upper bound on the DER encoding of an RSA-2048 public key. */
+#define CHARRA_RSA_PUB_KEY_DER_MAX 512
+
+/**
+ * @brief Generate a fresh RSA keypair configured for RSA-PSS/SHA-256.
+ *
+ * Unlike AK_a and AK_r, which are TPM primaries derived from a hierarchy
+ * seed, this is an ordinary software keypair. Its only caller is the
+ * simulated TEE (src/core/TEE.h), which needs a key that is NOT
+ * TPM-resident.
+ *
+ * @param[out] key an uninitialized context; on success it is initialized and
+ * holds the new keypair. Caller must mbedtls_pk_free() it.
+ */
+CHARRA_RC charra_crypto_rsa_generate_keypair(mbedtls_pk_context* key);
+
+/**
+ * @brief DER-encode a keypair's public half.
+ *
+ * @param[out] der_out buffer of at least CHARRA_RSA_PUB_KEY_DER_MAX bytes
+ * @param[in] der_out_size its capacity
+ * @param[out] der_len_out bytes written into der_out
+ */
+CHARRA_RC charra_crypto_rsa_public_key_to_der(mbedtls_pk_context* key,
+        uint8_t* der_out, size_t der_out_size, uint32_t* der_len_out);
+
+/**
+ * @brief Sign data with RSA-PSS over SHA-256.
+ *
+ * Hashes `data` itself, then signs the digest. Matches what
+ * charra_crypto_rsa_verify_signature() expects, so a peer can check it with
+ * the existing helper once it has parsed the public key.
+ *
+ * @param[out] signature_out buffer of at least CHARRA_RSA_SIGNATURE_LEN
+ * bytes
+ */
+CHARRA_RC charra_crypto_rsa_sign(mbedtls_pk_context* key,
+        const unsigned char* data, size_t data_len,
+        unsigned char* signature_out);
 
 /**
  * @brief Compute PCR composite digest from PCR values and check if it matches

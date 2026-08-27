@@ -29,6 +29,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* command line argument handling */
 static const struct option verifier_options[] = {
@@ -43,7 +44,8 @@ static const struct option verifier_options[] = {
         {"peer-public-key", required_argument, 0, '3'},
         {"verify-peer", required_argument, 0, '4'},
         {"port", required_argument, 0, 'b'},
-        {"qualification-validity", required_argument, 0, '5'}, {0}};
+        {"qualification-validity", required_argument, 0, '5'},
+        {"trust-mode", required_argument, 0, '6'}, {0}};
 
 static const struct option attester_options[] = {
         {"verbose", no_argument, 0, 'v'},
@@ -173,6 +175,13 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
                                 ? (long)*(variables->verifier_config
                                                   .qualification_validity_seconds)
                                 : (long)CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS);
+                printf("     --trust-mode=MODE:          How the RP must "
+                       "prove it runs the expected appraisal code: "
+                       "'qualify' (the /qualify handshake; default) or "
+                       "'tee' (a TEE Attestation Document). The RP must "
+                       "use the SAME mode -- unlike DTLS, a mismatch is "
+                       "reported rather than timing out. run_daemon.sh's "
+                       "TRUST_MODE sets both at once.\n");
                 printf("                                 EVERY role must "
                        "use the SAME DTLS mode. A mismatch does not error: "
                        "the request times out, which counts as a NO vote, so "
@@ -363,7 +372,29 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
             continue;
         }
 
-        if (caller == VERIFIER && identifier == '5') {
+        if (caller == VERIFIER && identifier == '6') {
+            /* Spelled out rather than numeric: a Verifier silently requiring
+             * the wrong proof rejects every attestation, so the flag should
+             * be readable in a process list. */
+            if (variables->verifier_config.trust_mode == NULL) {
+                charra_log_error(
+                        "[%s] --trust-mode is not wired up in this binary.",
+                        log_name);
+                return -1;
+            }
+            if (strcmp(optarg, "qualify") == 0) {
+                *(variables->verifier_config.trust_mode) =
+                        CHARRA_TRUST_MODE_QUALIFY;
+            } else if (strcmp(optarg, "tee") == 0) {
+                *(variables->verifier_config.trust_mode) =
+                        CHARRA_TRUST_MODE_TEE;
+            } else {
+                charra_log_error("[%s] --trust-mode must be 'qualify' or "
+                                 "'tee', not '%s'.",
+                        log_name, optarg);
+                return -1;
+            }
+        } else if (caller == VERIFIER && identifier == '5') {
             // set qualification validity window
             long value = 0;
             if (!charra_cli_parse_uint_arg(log_name,

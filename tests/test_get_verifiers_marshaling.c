@@ -9,7 +9,7 @@
  * This replaced a hand-packed raw-byte layout that trust_manager.c and
  * relying_party.c each independently encoded/decoded with no shared code
  * and no test coverage -- exactly how a response_len miscalculation on the
- * Trust Manager side went unnoticed (see CHARRA_V2_NOTES.md). These tests
+ * Trust Manager side went unnoticed. These tests
  * cover round-tripping (marshal then unmarshal reproduces the original
  * DTO, including a response with fewer verifiers than requested -- the
  * normal "some Verifier IDs missing from configuration" case) and, using

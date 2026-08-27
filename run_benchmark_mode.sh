@@ -40,8 +40,8 @@
 #   8. Launches trust_manager, attester, and verifier instances on ports
 #      5684-5688 (all 5, matching relying_party's own num_verifiers=1..5
 #      benchmark loop -- with fewer than 5 real Verifiers running, that loop
-#      hangs waiting on whichever ports aren't listening, see
-#      CHARRA_V2_NOTES.md), all backgrounded with DEBUG logging to logs/.
+#      hangs waiting on whichever ports aren't listening), all backgrounded
+#      with DEBUG logging to logs/.
 #   9. Runs relying_party in the foreground (tee'd to logs/relying_party.log
 #      too), which is the actual multi-verifier attestation run.
 #      --benchmark is required, not cosmetic: relying_party's default mode
@@ -51,6 +51,19 @@
 #      is what writes timings_RP_multi_verifiers.txt for
 #      plot_multi_verifiers.py). For a bounded *daemon* smoke test instead,
 #      swap it for e.g. --duration 120.
+#
+# Tunables, all overridable from the environment without editing this file
+# and all matching run_daemon.sh's, so the two measure the same stack:
+#
+#   IMAGE=...            which container image to run in
+#   DTLS_MODE=off|psk|rpk    transport security, all four roles at once
+#   TRUST_MODE=qualify|tee   how the RP proves it runs the expected appraisal
+#                            code, the RP and every Verifier at once
+#
+#   TRUST_MODE=tee ./run_benchmark_mode.sh
+#
+# Both mode settings default to the value that keeps figures comparable with
+# those already recorded (off, and qualify).
 #
 # Logs land in logs/*.log either way; Ctrl-C stops relying_party, the
 # container itself is --rm'd on exit but the background bin/* processes
@@ -90,6 +103,10 @@ fi
 tty_flags=""
 [ -t 0 ] && tty_flags="-it"
 
+# Which image to run in. Same default as run_daemon.sh, so the two always
+# measure the same stack unless you deliberately point them apart.
+IMAGE="${IMAGE:-fraunhofer-sit/charra-dev-env:1.9.0}"
+
 # The run scripts do not build the image, they only run in it -- RECOMPILE
 # above is `make` inside the container, not `docker build`. On a fresh clone,
 # or after the Dockerfile changes, the image has to be built once first.
@@ -111,9 +128,16 @@ fi
 # Same three values as run_daemon.sh, and the same rule: one setting for all
 # four roles, because they must agree. Default off keeps every benchmark
 # figure comparable with the ones already recorded.
-# Which image to run in. Same default as run_daemon.sh, so the two always
-# measure the same stack unless you deliberately point them apart.
-IMAGE="${IMAGE:-fraunhofer-sit/charra-dev-env:1.9.0}"
+# How the RP proves it runs the expected appraisal code: qualify (the
+# /qualify handshake, default) or tee (a TEE Attestation Document). Set for
+# BOTH roles at once -- they must agree, and a mismatch is a named NO vote.
+TRUST_MODE="${TRUST_MODE:-qualify}"
+case "$TRUST_MODE" in
+    qualify|tee) TRUST_RP="--trust-mode=$TRUST_MODE"
+                 TRUST_VER="--trust-mode=$TRUST_MODE" ;;
+    *)  echo "ERROR: TRUST_MODE must be qualify or tee (got '$TRUST_MODE')." >&2
+        exit 1 ;;
+esac
 
 DTLS_MODE="${DTLS_MODE:-off}"
 case "$DTLS_MODE" in
@@ -143,6 +167,8 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
   -e DTLS_MODE="$DTLS_MODE" \
   -e DTLS_TM="$DTLS_TM" -e DTLS_ATT="$DTLS_ATT" \
   -e DTLS_VER="$DTLS_VER" -e DTLS_RP="$DTLS_RP" \
+  -e TRUST_MODE="$TRUST_MODE" \
+  -e TRUST_RP="$TRUST_RP" -e TRUST_VER="$TRUST_VER" \
   --name charra --group-add tss \
   "$IMAGE" \
   bash -lc '
@@ -234,13 +260,13 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
         bin/attester $DTLS_ATT > logs/attester.log 2>&1 &
     for i in $(seq 1 "$SWEEP"); do
       p=$((5683 + i))
-      LOG_LEVEL_CHARRA=DEBUG bin/verifier --port $p $DTLS_VER \
+      LOG_LEVEL_CHARRA=DEBUG bin/verifier --port $p $DTLS_VER $TRUST_VER \
           > logs/verifier_$p.log 2>&1 &
     done
     sleep 2
 
     LOG_LEVEL_CHARRA=DEBUG CHARRA_TCTI="$RP_TCTI" \
-        bin/relying_party --benchmark $DTLS_RP 2>&1 \
+        bin/relying_party --benchmark $DTLS_RP $TRUST_RP 2>&1 \
         | tee logs/relying_party.log
 
     # A log that is mostly NUL bytes means two processes shared the file:

@@ -59,6 +59,10 @@ char* durations_file_path = "durations_verifier.txt";
  * the RP's single /qualify handshake is honoured by all of them. */
 char* qualified_rps_file_path = VERIFIER_QUALIFIED_RPS_DEFAULT_PATH;
 
+/* Default matches the RP's: the /qualify handshake, so an unflagged
+ * run behaves exactly as it always has. */
+charra_trust_mode verifier_trust_mode = CHARRA_TRUST_MODE_QUALIFY;
+
 /* Key this Verifier signs its /appraise verdicts with (see
  * charra_verdict.h). Distinct from the DTLS RPK paths above even though it
  * is the same file today: DTLS is off, and conflating a transport key with
@@ -120,6 +124,7 @@ int main(int argc, char** argv) {
             .dtls_psk_identity = &dtls_config.psk_identity,
             .qualification_validity_seconds =
                     &qualification_validity_seconds,
+            .trust_mode = &verifier_trust_mode,
         },
     };
 

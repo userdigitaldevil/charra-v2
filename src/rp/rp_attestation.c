@@ -326,7 +326,7 @@ static coap_response_t coap_trust_manager_handler(coap_session_t* session,
      * to how many records it actually contains. That gap is exactly what
      * once let a Trust Manager response shorter (or, via a since-fixed
      * response_len bug on the Trust Manager side, longer) than expected
-     * be silently over- or mis-read -- see CHARRA_V2_NOTES.md.
+     * be silently over- or mis-read.
      * charra_unmarshal_get_verifiers_response() rejects a malformed or
      * oversized response outright instead. */
     msg_get_verifiers_response_dto resp = {0};
@@ -511,9 +511,9 @@ CHARRA_RC get_evidence(void) {
      * result carries only the CoAP outcome; the Step 2a verdict lives in
      * attestation_rc, and run_one_attestation_cycle() aborts on any
      * non-success return. Folding the verdict in here is what actually
-     * makes Step 2a the hard stop CHARRA_V2_NOTES.md and the automaton
-     * both describe -- without it the RP went on to redact evidence it had
-     * just rejected, qualify, and submit it to every Verifier, none of
+     * makes Step 2a the hard stop the automaton describes -- without it the
+     * RP went on to redact evidence it had just rejected, qualify, and submit
+     * it to every Verifier, none of
      * which can re-run the three log-content checks that failed (they are
      * checked here and nowhere else; see verifier_appraise.c). */
     if (result == CHARRA_RC_SUCCESS && attestation_rc != CHARRA_RC_SUCCESS) {
@@ -677,23 +677,31 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
      * only when the previous grant has actually lapsed. No Verifier will
      * accept /appraise without one, so abort here rather than spawning
      * threads that would all fail identically. */
-    struct timespec start_qualify, end_qualify;
-    clock_gettime(CLOCK_MONOTONIC, &start_qualify);
-    CHARRA_RC qualify_rc =
-            rp_perform_qualification_handshake_once(num_verifiers);
-    clock_gettime(CLOCK_MONOTONIC, &end_qualify);
-    /* Covers /qualify + /qualify_submit together, and is a no-op round when
-     * the previous grant is still valid -- so a near-zero sample here means
-     * "grant still held", not "handshake was free". */
-    charra_log_info("[" LOG_NAME "] Timing: /qualify handshake took %f "
-                    "second(s).",
-            (end_qualify.tv_sec - start_qualify.tv_sec) +
-                    (end_qualify.tv_nsec - start_qualify.tv_nsec) / 1e9);
-    if (qualify_rc != CHARRA_RC_SUCCESS) {
-        charra_log_error("[" LOG_NAME "] Could not qualify with any "
-                         "reachable Verifier; aborting attestation run.");
-        charra_rp_release_evidence();
-        return CHARRA_RC_ERROR;
+    if (rp_trust_mode == CHARRA_TRUST_MODE_QUALIFY) {
+        struct timespec start_qualify, end_qualify;
+        clock_gettime(CLOCK_MONOTONIC, &start_qualify);
+        CHARRA_RC qualify_rc =
+                rp_perform_qualification_handshake_once(num_verifiers);
+        clock_gettime(CLOCK_MONOTONIC, &end_qualify);
+        /* Covers /qualify + /qualify_submit together, and is a no-op round
+         * when the previous grant is still valid -- so a near-zero sample
+         * here means "grant still held", not "handshake was free". */
+        charra_log_info("[" LOG_NAME "] Timing: /qualify handshake took %f "
+                        "second(s).",
+                (end_qualify.tv_sec - start_qualify.tv_sec) +
+                        (end_qualify.tv_nsec - start_qualify.tv_nsec) / 1e9);
+        if (qualify_rc != CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Could not qualify with any "
+                             "reachable Verifier; aborting attestation run.");
+            charra_rp_release_evidence();
+            return CHARRA_RC_ERROR;
+        }
+    } else {
+        /* TEE mode: the RP proves itself per message instead, with an
+         * Attestation Document naming the code that produced this evidence
+         * (see rp_evidence.c). Nothing to do once per cycle. */
+        charra_log_info("[" LOG_NAME "] Trust mode is TEE: skipping the "
+                        "/qualify handshake.");
     }
     /* Last check before spawning threads: past this point a stop costs
      * however long the slowest thread's exchange takes. */

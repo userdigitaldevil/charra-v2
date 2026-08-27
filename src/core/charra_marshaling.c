@@ -584,6 +584,28 @@ static CHARRA_RC charra_marshal_rp_evidence_internal(
             (UsefulBufC){.ptr = rp_evidence->log_r,
                     .len = rp_evidence->log_r_len});
 
+    /* The TEE Attestation Document, appended last so the fields above keep
+     * the positions they have always had. All five are zero-length in
+     * CHARRA_TRUST_MODE_QUALIFY -- they are always PRESENT, because the
+     * array is positional and an omitted field would shift everything
+     * after it. */
+    QCBOREncode_AddUInt64(&ec, (uint64_t)rp_evidence->trust_mode);
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->tee_file_hash,
+                    .len = sizeof(rp_evidence->tee_file_hash)});
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->tee_report_data,
+                    .len = sizeof(rp_evidence->tee_report_data)});
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->tee_signature,
+                    .len = rp_evidence->tee_signature_len});
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->tee_public_key,
+                    .len = rp_evidence->tee_public_key_len});
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->tee_public_key_sig,
+                    .len = rp_evidence->tee_public_key_sig_len});
+
     QCBOREncode_CloseArray(&ec);
 
     return (QCBOREncode_Finish(&ec, buf_out) == QCBOR_SUCCESS)
@@ -726,6 +748,67 @@ CHARRA_RC charra_unmarshal_rp_evidence(const uint32_t marshaled_data_len,
         goto cbor_parse_error;
     res.log_r_len = item.val.string.len;
     res.log_r = (uint8_t*)item.val.string.ptr;
+
+    /* --- the TEE Attestation Document --- */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_INT64)))
+        goto cbor_parse_error;
+    res.trust_mode = (uint32_t)item.val.uint64;
+    if (res.trust_mode != CHARRA_TRUST_MODE_QUALIFY &&
+            res.trust_mode != CHARRA_TRUST_MODE_TEE) {
+        charra_log_error("CBOR parser: unknown trust mode %u.", res.trust_mode);
+        goto cbor_parse_error;
+    }
+
+    /* The two digests are fixed-width, so anything else is malformed --
+     * a short one would leave the tail of the destination holding
+     * whatever was there before. */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    if (item.val.string.len != sizeof(res.tee_file_hash)) {
+        charra_log_error("CBOR parser: TEE file hash is not %zu bytes.",
+                sizeof(res.tee_file_hash));
+        goto cbor_parse_error;
+    }
+    memcpy(res.tee_file_hash, item.val.string.ptr, sizeof(res.tee_file_hash));
+
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    if (item.val.string.len != sizeof(res.tee_report_data)) {
+        charra_log_error("CBOR parser: TEE report data is not %zu bytes.",
+                sizeof(res.tee_report_data));
+        goto cbor_parse_error;
+    }
+    memcpy(res.tee_report_data, item.val.string.ptr,
+            sizeof(res.tee_report_data));
+
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.tee_signature_len = item.val.string.len;
+    if (res.tee_signature_len > sizeof(res.tee_signature)) {
+        charra_log_error("CBOR parser: TEE signature exceeds maximum size.");
+        goto cbor_parse_error;
+    }
+    memcpy(res.tee_signature, item.val.string.ptr, res.tee_signature_len);
+
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.tee_public_key_len = item.val.string.len;
+    if (res.tee_public_key_len > sizeof(res.tee_public_key)) {
+        charra_log_error("CBOR parser: TEE public key exceeds maximum size.");
+        goto cbor_parse_error;
+    }
+    memcpy(res.tee_public_key, item.val.string.ptr, res.tee_public_key_len);
+
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.tee_public_key_sig_len = item.val.string.len;
+    if (res.tee_public_key_sig_len > sizeof(res.tee_public_key_sig)) {
+        charra_log_error("CBOR parser: TEE public key signature exceeds "
+                         "maximum size.");
+        goto cbor_parse_error;
+    }
+    memcpy(res.tee_public_key_sig, item.val.string.ptr,
+            res.tee_public_key_sig_len);
 
     if ((cborerr = QCBORDecode_Finish(&dc))) {
         goto cbor_parse_error;
@@ -1408,9 +1491,8 @@ CHARRA_RC charra_unmarshal_get_verifiers_request(
     /* Bounds-checked against the fixed-size destination array BEFORE the
      * loop below writes anything -- an oversized count here used to be
      * exactly the class of gap that let trust_manager.c's response feed
-     * relying_party.c more "records" than it actually sent (see
-     * CHARRA_V2_NOTES.md); every field in this file is checked the same
-     * way, this one included. */
+     * relying_party.c more "records" than it actually sent; every field
+     * in this file is checked the same way, this one included. */
     if (res.verifier_ids_len > CHARRA_MAX_REQUESTED_VERIFIERS) {
         charra_log_error(
                 "CBOR parser: verifier_ids exceeds maximum allowed count.");
@@ -1567,9 +1649,9 @@ CHARRA_RC charra_unmarshal_get_verifiers_response(
     res.verifiers_len = (uint32_t)item.val.uCount;
     /* Bounds-checked against the fixed-size destination array before the
      * loop writes anything -- this is the exact check the old hand-packed
-     * /get_verifiers layout never had on either side (see
-     * CHARRA_V2_NOTES.md's response_len bug). A malformed or truncated
-     * response is now rejected outright rather than partially parsed. */
+     * /get_verifiers layout never had on either side -- the response_len
+     * bug. A malformed or truncated response is now rejected outright
+     * rather than partially parsed. */
     if (res.verifiers_len > CHARRA_MAX_REQUESTED_VERIFIERS) {
         charra_log_error(
                 "CBOR parser: verifiers exceeds maximum allowed count.");

@@ -414,11 +414,16 @@ number governs 87 % of the attestation cycle.
 
 ## The /qualify handshake
 
-Before any Verifier will accept an `/appraise` submission, the Relying Party
-must hold a qualification grant. `rp_perform_qualification_handshake_once()`
-runs at the top of every attestation run, but performs the `/qualify` +
-`/qualify_submit` exchange only when the previous grant has lapsed — otherwise
-it returns immediately.
+**In `TRUST_MODE=qualify`, the default**, no Verifier will accept an
+`/appraise` submission from a Relying Party that does not hold a qualification
+grant. `rp_perform_qualification_handshake_once()` runs at the top of every
+attestation run, but performs the `/qualify` + `/qualify_submit` exchange only
+when the previous grant has lapsed — otherwise it returns immediately.
+
+**In `TRUST_MODE=tee` there is no handshake at all**: the RP is not asked to
+qualify, no grant is looked up, and the costs below do not arise. It proves
+itself per message instead, with the TEE Attestation Document measured in the
+next section.
 
 Both cases, sampled over 10 cold starts (grant cleared by removing
 `qualified_rps.txt`, then a second cycle run with the fresh grant still valid):
@@ -490,6 +495,67 @@ round, and it is deliberately transmitted to the RP — the one exception to
 "the salt is never sent" — so that a correctly-behaving RP's redaction is
 byte-identical to the golden copy. That is safe only because this log is
 synthetic.
+
+---
+
+## The alternative to /qualify: TEE mode
+
+The handshake above is one of two ways the RP can prove it is running the
+expected appraisal code. The other, selected with `TRUST_MODE=tee`, replaces
+it with a simulated TEE Attestation Document — a measurement of the RP's
+appraisal sources bound to `hash(verifier_nonce || pcrdigest_a || log_r)` and
+signed under a key certified by AK_r. See the manual for what each mechanism
+does and does not establish; what matters here is what each costs.
+
+The two are not interchangeable in cadence, and that is the whole result:
+**the handshake is once per cycle and usually a no-op, while a TEE document is
+built and signed once per Verifier.** Full 1..5 sweep, ten runs at each step,
+same image, same TPM configuration:
+
+| **Verifiers** | **`qualify`** | **`tee`** | **difference** |
+|:--:|:--:|:--:|:--:|
+| 1 | 3225.4 ms ± 19.2 | 3283.4 ms ± 17.8 | +58.1 ms (+1.8 %) |
+| 2 | 3411.4 ms ± 33.9 | 3456.2 ms ± 17.9 | +44.8 ms (+1.3 %) |
+| 3 | 3608.7 ms ± 19.8 | 3686.2 ms ± 10.0 | +77.5 ms (+2.1 %) |
+| 4 | 3790.5 ms ± 24.7 | 3917.5 ms ± 27.6 | +126.9 ms (+3.3 %) |
+| 5 | 3988.0 ms ± 24.8 | 4123.6 ms ± 20.7 | +135.6 ms (+3.4 %) |
+
+Least-squares over each column, on the same basis as the scaling section
+below:
+
+| | **fixed cost** | **marginal cost per Verifier** |
+|---|:--:|:--:|
+| `qualify` | 3033.5 ms | 190.4 ms |
+| `tee` | 3050.9 ms | 214.2 ms |
+
+**The fixed cost is unchanged; the per-Verifier cost carries the whole
+difference** — about 24 ms each. The fixed columns differ by 17 ms, well
+inside the ± 15-25 ms band these tables agree to, so TEE mode adds nothing
+measurable once per cycle. This is the expected shape rather than a surprise:
+per-cycle work was removed and per-Verifier work added.
+
+Where those 24 ms go, measured directly:
+
+| **Operation** | **Time** |
+|---|:--:|
+| Verifier: check one Attestation Document (5 checks) | 2.25 ms ± 0.71 |
+| RP: measure 3 source files, RSA-PSS sign, per Verifier | remainder, ≈ 22 ms |
+
+The Verifier's side is cheap because all five of its checks are public-key
+maths and hashing over a few hundred bytes — the same reason its `/appraise`
+work is dominated by the `log_r` replay rather than by signatures. The RP's
+side is the costly half: an RSA-2048 PSS signature plus three file reads and a
+hash, repeated for every Verifier because each contributes its own nonce.
+
+AK_r's certification of the TEE public key does **not** appear per Verifier.
+The TEE keypair is generated once per process, so the certification is too,
+and it is cached — without that, every Verifier thread would re-derive AK_r
+from the TPM to sign a value that never changes, which would have put a
+33 ms key load (see *getEvidence*, above) on the per-Verifier path.
+
+For a five-Verifier deployment the choice costs 3.4 %. At one Verifier it is
+1.8 %, and the two modes are within about one standard deviation of each
+other.
 
 ---
 
@@ -580,10 +646,10 @@ passes the full unit-test suite, all of it running without a TPM or network:
 | `test_marshaling_bounds` | 18 | | `test_key_mgr` | 13 |
 | `test_trusted_keys` | 9 | | `test_crypto_util` | 22 |
 | `test_qualified_rps` | 21 | | `test_parser_util` | 24 |
-| `test_get_verifiers_marshaling` | 17 | | | |
-| `test_rp_evidence_marshaling` | 22 | | **Total** | **358** |
+| `test_get_verifiers_marshaling` | 17 | | `test_tee` | 32 |
+| `test_rp_evidence_marshaling` | 39 | | **Total** | **407** |
 
-**16 suites, 358 assertions, 0 failures.**
+**17 suites, 407 assertions, 0 failures.**
 
 End-to-end behaviour was checked in the same run: all 55 cycles reached a
 unanimous verdict (11 each at 1/1, 2/2, 3/3, 4/4 and 5/5 Verifiers passing),

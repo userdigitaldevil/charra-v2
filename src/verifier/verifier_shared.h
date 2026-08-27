@@ -51,4 +51,10 @@ extern char* qualified_rps_file_path;
 /** Private key /appraise signs its verdict with. See charra_verdict.h. */
 extern char* verdict_signing_key_path;
 
+/** Which proof of RP integrity this Verifier requires: the /qualify grant
+ * (the default) or a TEE Attestation Document. Must match how the RP is
+ * configured -- the RP states its own mode in every /appraise request, so a
+ * mismatch is reported as one rather than presenting as an unexplained NO. */
+extern charra_trust_mode verifier_trust_mode;
+
 #endif /* CHARRA_VERIFIER_SHARED_H */

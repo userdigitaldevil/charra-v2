@@ -19,6 +19,7 @@
 #include "../core/charra_event_log.h"
 #include "../core/charra_marshaling.h"
 #include "../core/charra_sdk.h"
+#include "../core/TEE.h"
 #include "../util/charra_util.h"
 #include "../util/io_util.h"
 #include "rp_signing_key.h"
@@ -37,10 +38,37 @@ static double charra_now_s(void) {
 
 double rp_last_appraise_a_seconds = 0.0;
 
+/** Source files the RP passes to the simulated TEE to measure into the
+ * Attestation Document's file_hash: the appraisal gate (this file) plus the
+ * redaction and replay logic it gates. The TEE itself has no opinion on this
+ * list -- see TEE.h -- so it lives here, as the RP's own declaration of what
+ * code it is vouching for. The Verifier holds its own, independent copy of
+ * this same list (see verifier_appraise.c) rather than reading it from here
+ * or from the TEE; keep the two in sync by hand if this ever changes.
+ * Order is part of the measurement. */
+static const char* const rp_appraisal_code_files[] = {
+        "src/rp/rp_evidence.c",
+        "src/core/charra_sdk.c",
+        "src/core/charra_event_log.c",
+};
+#define RP_APPRAISAL_CODE_FILES_COUNT \
+    (sizeof(rp_appraisal_code_files) / sizeof(rp_appraisal_code_files[0]))
+
+/** pcrdigest_a: the TPM-signed PCR digest from the Attester's own quote,
+ * captured during appraisal (check 5 below) so the exact value that gated
+ * appraisal is also the one bound into the TEE's REPORT_DATA in
+ * charra_rp_build_evidence_message() -- not a second, independent read that
+ * could drift from the one actually checked. Zeroed at the start of every
+ * appraisal, so a cycle that never got as far as unmarshaling the quote
+ * cannot leave the previous cycle's value behind. */
+static uint8_t rp_pcrdigest_a[TPM2_SHA256_DIGEST_SIZE] = {0};
+static uint32_t rp_pcrdigest_a_len = 0;
+
 bool charra_rp_appraise_evidence(
         const msg_attestation_response_dto* res) {
     const double appraise_a_start = charra_now_s();
     double step_start = 0.0;
+    rp_pcrdigest_a_len = 0;
     charra_log_info("[" LOG_NAME
             "]  +------------ RP Appraisal of the Evidence --------------+");
 
@@ -128,6 +156,20 @@ bool charra_rp_appraise_evidence(
 
     charra_log_info("[" LOG_NAME "] Timing: RP unmarshal Quote_a took %f "
                     "second(s).", charra_now_s() - step_start);
+
+    /* pcrdigest_a, captured for the TEE's REPORT_DATA -- see the file-level
+     * comment on rp_pcrdigest_a. A failed appraisal aborts the whole cycle
+     * before charra_rp_build_evidence_message() ever runs, so by the time
+     * anything reads this it is always a value that passed. */
+    if (attest_struct.attested.quote.pcrDigest.size <=
+            sizeof(rp_pcrdigest_a)) {
+        rp_pcrdigest_a_len = attest_struct.attested.quote.pcrDigest.size;
+        memcpy(rp_pcrdigest_a, attest_struct.attested.quote.pcrDigest.buffer,
+                rp_pcrdigest_a_len);
+    } else {
+        charra_log_error("[" LOG_NAME "] pcrdigest_a exceeds its expected "
+                         "size; it will not be available to the TEE.");
+    }
 
     /* --- 3. nonce: the quote must answer the challenge we just sent ------ */
     charra_log_info("[" LOG_NAME "] Verifying nonce ...");
@@ -288,6 +330,136 @@ void charra_free_attestation_response(
  * exchange fresh from that Verifier's point of view. Each therefore costs
  * its own reset/replay/quote against the RP's TPM.
  */
+/* AK_r's signature over the TEE's public key. The TEE keypair is generated
+ * once per process, so this certification is too -- but N Verifier threads
+ * reach it concurrently, hence the guard. Caching it also keeps a TPM round
+ * trip off the per-Verifier path: without it every thread would re-derive
+ * AK_r to sign a value that never changes. */
+static pthread_mutex_t rp_tee_cert_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool rp_tee_cert_ready = false;
+static uint8_t rp_tee_public_key[CHARRA_RSA_PUB_KEY_DER_MAX] = {0};
+static uint32_t rp_tee_public_key_len = 0;
+static uint8_t rp_tee_public_key_sig[CHARRA_RSA_SIGNATURE_LEN] = {0};
+
+/**
+ * @brief Export the TEE's public key and certify it with AK_r, once.
+ *
+ * This is what makes the TEE key believable to a Verifier: on its own it is
+ * an unanchored key that arrived beside its own signature. AK_r is in the
+ * trust anchor, so signing the key with it extends a chain the Verifier
+ * already checks.
+ */
+static CHARRA_RC rp_ensure_tee_key_certified(void) {
+    pthread_mutex_lock(&rp_tee_cert_mutex);
+    CHARRA_RC charra_r = CHARRA_RC_SUCCESS;
+    if (!rp_tee_cert_ready) {
+        charra_r = tee_public_key_der(rp_tee_public_key,
+                sizeof(rp_tee_public_key), &rp_tee_public_key_len);
+        if (charra_r != CHARRA_RC_SUCCESS) {
+            charra_log_error("[" LOG_NAME "] Could not export the TEE's "
+                             "public key.");
+        } else {
+            /* Signed over the DER bytes exactly as they travel, so the
+             * Verifier can check the signature against what it received
+             * without re-encoding anything. */
+            TPM2B_PUBLIC ak_public_key = {0};
+            charra_r = rp_sign_with_ak(rp_tee_public_key,
+                    rp_tee_public_key_len, rp_tee_public_key_sig,
+                    &ak_public_key);
+            if (charra_r != CHARRA_RC_SUCCESS) {
+                charra_log_error("[" LOG_NAME "] AK_r could not certify the "
+                                 "TEE's public key.");
+            } else {
+                rp_tee_cert_ready = true;
+            }
+        }
+    }
+    pthread_mutex_unlock(&rp_tee_cert_mutex);
+    return charra_r;
+}
+
+/**
+ * @brief Fill in ev's TEE fields: measure the appraisal code, bind the
+ * document to this Verifier's challenge and this evidence, sign it.
+ *
+ * REPORT_DATA is hash(verifier_nonce || pcrdigest_a || log_r): this
+ * Verifier's own challenge, the exact TPM-signed digest appraisal checked
+ * log_a's replay against, and the exact log_r this message carries -- so the
+ * document cannot be replayed against a different nonce, a different
+ * Attester evidence, or a different redacted log.
+ */
+static CHARRA_RC rp_attach_tee_attestation(
+        msg_rp_evidence_dto* ev, int verifier_index, uint32_t nonce_len) {
+    if (rp_pcrdigest_a_len == 0) {
+        charra_log_error("[" LOG_NAME "] No pcrdigest_a captured; refusing to "
+                         "build a TEE Attestation Document.");
+        return CHARRA_RC_ERROR;
+    }
+
+    charra_log_info("[" LOG_NAME
+            "]  +------------ RP TEE Attestation --------------+");
+
+    size_t report_data_input_len =
+            (size_t)nonce_len + rp_pcrdigest_a_len + rp_log_r_len;
+    uint8_t* report_data_input = malloc(report_data_input_len);
+    if (report_data_input == NULL) {
+        charra_log_error("[" LOG_NAME "] Out of memory building TEE "
+                         "REPORT_DATA.");
+        return CHARRA_RC_ERROR;
+    }
+    memcpy(report_data_input, verifier_nonces[verifier_index], nonce_len);
+    memcpy(report_data_input + nonce_len, rp_pcrdigest_a, rp_pcrdigest_a_len);
+    memcpy(report_data_input + nonce_len + rp_pcrdigest_a_len, rp_log_r,
+            rp_log_r_len);
+
+    uint8_t report_data[TPM2_SHA256_DIGEST_SIZE] = {0};
+    CHARRA_RC charra_r =
+            hash_sha256(report_data_input_len, report_data_input, report_data);
+    free(report_data_input);
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not compute TEE REPORT_DATA.");
+        return charra_r;
+    }
+
+    tee_attestation_document doc = {0};
+    charra_r = tee_attestation(rp_appraisal_code_files,
+            RP_APPRAISAL_CODE_FILES_COUNT, report_data, &doc);
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] TEE attestation failed.");
+        return charra_r;
+    }
+    memcpy(ev->tee_file_hash, doc.file_hash, sizeof(ev->tee_file_hash));
+    memcpy(ev->tee_report_data, doc.report_data, sizeof(ev->tee_report_data));
+
+    charra_r = tee_sign(&doc, ev->tee_signature);
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not sign the TEE Attestation "
+                         "Document.");
+        return charra_r;
+    }
+    ev->tee_signature_len = CHARRA_RSA_SIGNATURE_LEN;
+
+    charra_r = rp_ensure_tee_key_certified();
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        return charra_r;
+    }
+    memcpy(ev->tee_public_key, rp_tee_public_key, rp_tee_public_key_len);
+    ev->tee_public_key_len = rp_tee_public_key_len;
+    memcpy(ev->tee_public_key_sig, rp_tee_public_key_sig,
+            sizeof(rp_tee_public_key_sig));
+    ev->tee_public_key_sig_len = sizeof(rp_tee_public_key_sig);
+
+    charra_print_hex(CHARRA_LOG_DEBUG, sizeof(doc.file_hash), doc.file_hash,
+            "[" LOG_NAME "]     file_hash (measures rp_appraisal_code_files): "
+            "0x", "\n", false);
+    charra_print_hex(CHARRA_LOG_DEBUG, sizeof(report_data), report_data,
+            "[" LOG_NAME "]     REPORT_DATA = hash(nonce || pcrdigest_a || "
+            "log_r): 0x", "\n", false);
+    charra_log_info("[" LOG_NAME "]     => TEE Attestation Document signed, "
+                    "and its key certified by AK_r.");
+    return CHARRA_RC_SUCCESS;
+}
+
 CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
         uint32_t* marshaled_len, uint8_t** marshaled) {
 
@@ -339,6 +511,16 @@ CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
 
     ev.log_r = rp_log_r;
     ev.log_r_len = rp_log_r_len;
+
+    /* Always stated, so a Verifier configured for the other mode can say so
+     * rather than just voting NO. The TEE fields stay zero in QUALIFY mode. */
+    ev.trust_mode = (uint32_t)rp_trust_mode;
+    if (rp_trust_mode == CHARRA_TRUST_MODE_TEE) {
+        charra_r = rp_attach_tee_attestation(&ev, verifier_index, nonce_len);
+        if (charra_r != CHARRA_RC_SUCCESS) {
+            return charra_r;
+        }
+    }
 
     return charra_marshal_rp_evidence(&ev, marshaled_len, marshaled);
 }

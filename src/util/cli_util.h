@@ -19,6 +19,7 @@
  */
 
 #include "../common/charra_log.h"
+#include "../core/charra_dto.h"
 #include <coap3/coap.h>
 #include <stdbool.h>
 #include <time.h>
@@ -78,6 +79,9 @@ typedef struct {
      * Every VERIFIER caller must set this: the help text prints its
      * value. */
     time_t* qualification_validity_seconds;
+    /** Which proof of RP integrity this Verifier requires. Must match the
+     * RP's --trust-mode; see charra_trust_mode in charra_dto.h. */
+    charra_trust_mode* trust_mode;
 } cli_config_verifier;
 
 /**

@@ -36,6 +36,14 @@
 #   DTLS_MODE=rpk ./run_daemon.sh     # mutual auth, keypairs from keys/
 #   DTLS_MODE=psk ./run_daemon.sh     # one shared secret, no peer identity
 #
+# TRUST_MODE picks how the RP proves it runs the expected appraisal code, and
+# likewise sets the RP and every Verifier at once. Unlike DTLS a mismatch here
+# does NOT time out: the RP states its mode on the wire, so a Verifier set the
+# other way votes NO and says MODE MISMATCH.
+#
+#   TRUST_MODE=qualify ./run_daemon.sh   # /qualify handshake (default)
+#   TRUST_MODE=tee ./run_daemon.sh       # simulated TEE Attestation Document
+#
 # Options:
 #   --keep-state   keep each TPM NVChip instead of wiping it, so both AKs --
 #                  and therefore keys/trusted_keys.txt -- survive the run.
@@ -106,6 +114,15 @@ VERIFIER_HOST="${VERIFIER_HOST:-127.0.0.1}"          # address written into veri
 # Default off, so every timing figure in the docs stays comparable.
 DTLS_MODE="${DTLS_MODE:-off}"
 
+# --- Trust mode: how the RP proves it runs the expected appraisal code -------
+# qualify = the /qualify + /qualify_submit handshake (the default; proves the
+#           redaction OUTPUT matches, not which code produced it)
+# tee     = a simulated TEE Attestation Document per Verifier, naming the code
+#           that ran and binding it to that Verifier's challenge
+# Set here for BOTH roles at once, because they must agree. Unlike DTLS a
+# mismatch does not time out -- the Verifier names it and votes NO.
+TRUST_MODE="${TRUST_MODE:-qualify}"
+
 # --- Logging ----------------------------------------------------------------
 LOG_LEVEL="${LOG_LEVEL:-INFO}"                   # TRACE DEBUG INFO WARN ERROR FATAL
 LOG_LEVEL_COAP="${LOG_LEVEL_COAP:-}"             # empty = leave libcoap at its default
@@ -134,7 +151,14 @@ RESET_TPM="${RESET_TPM:-1}"
 #  end of tunables
 # =============================================================================
 
-usage() { sed -n '3,34p' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit "${1:-0}"; }
+# Prints the whole comment header, however long it grows. It used to be
+# `sed -n '3,34p'`, a hard-coded range that silently stopped covering the
+# header as it gained sections -- --help ended mid-sentence, omitting the
+# DTLS examples and the Options block below.
+usage() {
+    sed -n '3,/^[^#]/p' "$0" | sed '/^[^#]/d; s/^#\{1,\} \{0,1\}//'
+    exit "${1:-0}"
+}
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -198,6 +222,20 @@ case "$DTLS_MODE" in
         ;;
     *)
         echo "ERROR: DTLS_MODE must be off, psk or rpk (got '$DTLS_MODE')." >&2
+        exit 1
+        ;;
+esac
+
+# --- trust mode -> the flags the two roles get ------------------------------
+# Same reasoning as DTLS above: built once so the RP and every Verifier cannot
+# be launched requiring different proofs of each other.
+case "$TRUST_MODE" in
+    qualify|tee)
+        TRUST_RP="--trust-mode=$TRUST_MODE"
+        TRUST_VER="--trust-mode=$TRUST_MODE"
+        ;;
+    *)
+        echo "ERROR: TRUST_MODE must be qualify or tee (got '$TRUST_MODE')." >&2
         exit 1
         ;;
 esac
@@ -313,6 +351,9 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
   -e DTLS_ATT="$DTLS_ATT" \
   -e DTLS_VER="$DTLS_VER" \
   -e DTLS_RP="$DTLS_RP" \
+  -e TRUST_MODE="$TRUST_MODE" \
+  -e TRUST_RP="$TRUST_RP" \
+  -e TRUST_VER="$TRUST_VER" \
   "$IMAGE" \
   bash -lc '
     set -e
@@ -446,7 +487,7 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
         --host "$VERIFIER_HOST" \
         --logdir logs \
         --qualification-validity "$VERIFIER_QUALIFICATION_VALIDITY" \
-        $DTLS_VER $VERIFIER_EXTRA_ARGS
+        $DTLS_VER $TRUST_VER $VERIFIER_EXTRA_ARGS
     sleep 2
 
     rp_args="--verifiers $RP_VERIFIERS \
@@ -455,7 +496,7 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
              --attester-timeout $RP_ATTESTER_TIMEOUT"
     [ "$RP_DURATION" -gt 0 ] && rp_args="$rp_args --duration $RP_DURATION"
     [ "$RP_CYCLES"   -gt 0 ] && rp_args="$rp_args --cycles $RP_CYCLES"
-    rp_args="$rp_args $DTLS_RP"
+    rp_args="$rp_args $DTLS_RP $TRUST_RP"
 
     echo "--- relying_party $rp_args $RP_EXTRA_ARGS"
     echo

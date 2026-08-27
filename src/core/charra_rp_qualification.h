@@ -2,11 +2,10 @@
  * @file charra_rp_qualification.h
  * @brief Verifier-side state and checks for the RP qualification handshake.
  *
- * Implements the Verifier's half of the "RP Access Check Process" (see
- * CHARRA_V2_NOTES.md, "RP access/qualification check"): before an RP is
- * trusted to redact real Attester evidence, the Verifier fabricates a log,
- * redacts it itself to get the "golden answer", sends the raw log to the RP,
- * and checks whether the RP's own redaction matches.
+ * Implements the Verifier's half of the "RP Access Check Process": before
+ * an RP is trusted to redact real Attester evidence, the Verifier fabricates
+ * a log, redacts it itself to get the "golden answer", sends the raw log to
+ * the RP, and checks whether the RP's own redaction matches.
  *
  * This module only covers the parts that need no TSS2/libcoap: generating
  * the challenge + golden answer, and comparing the RP's submission against

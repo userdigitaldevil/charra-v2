@@ -321,7 +321,7 @@ longer all-zero, so the quote's composite `pcrDigest` changes and
 `reference-pcrs.txt` no longer describes this Attester. That is inherent to
 the request, not a defect in it: the point of extending the PCRs is that PCR
 10 must be *derived* by replaying the log, which is the Verifier-side work
-described in Part 2 of `CHARRA_V2_NOTES.md` and not yet built. Appraisal was
+described in Part 2 of the redaction design and not yet built. Appraisal was
 already failing for an unrelated reason (see the note below on the nine-way
 AND in `verifier.c`).
 
@@ -592,7 +592,7 @@ still refers to it and that file is off-limits.
 **Quote_r is not a TPM quote.** PCR_r is computed in software and signed
 with a software keypair, so it proves "whoever holds rp_public_key produced
 this PCR_r for this nonce" and nothing about the RP's own platform state.
-The design in `CHARRA_V2_NOTES.md` Part 2 calls for a real `TPM2_Quote`
+The redaction design calls for a real `TPM2_Quote`
 under a certified AK; this is the software stand-in.
 
 #### 10e — `relying_party.c`
@@ -679,7 +679,7 @@ against an unchanged replayed value.
 - No fix was applied to the known inverted-`strcmp` bug at
   `src/relying_party.c:366`, which makes the Relying Party report the
   opposite of each Verifier's actual verdict. It is documented in
-  `CHARRA_V2_NOTES.md` (bug #7) and was only flagged verbally, not patched.
+  bug #7, and was only flagged verbally, not patched.
 - Five concurrently-running verifiers all `fopen("durations_verifier.txt",
   "w")` in the same working directory (`src/verifier.c:296`) and clobber each
   other. Not changed.
