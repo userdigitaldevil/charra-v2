@@ -257,7 +257,11 @@ def emit_full(w, tamper=None):
         print("the circuit is EXPECTED to reject this")
         return
     print(f"wrote {PROVER} for all {len(entries)} entries")
-    print(f"  pcr10_final   {w['pcr10_final']}")
+    # pcr10_final is a diagnostic dump_witness emits and the RP does not --
+    # the circuit derives it anyway. Optional, so a witness written by the RP
+    # is not rejected over a missing debug field.
+    if "pcr10_final" in w:
+        print(f"  pcr10_final   {w['pcr10_final']}")
     print(f"  pcrdigest_a   {w['pcrdigest_a']}")
     print()
     print("now run:  cd zk/circuit && nargo execute")
