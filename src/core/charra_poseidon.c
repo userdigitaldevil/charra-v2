@@ -21,6 +21,7 @@
 
 #include "charra_poseidon.h"
 
+#include <stdbool.h>
 #include <string.h>
 
 #include <mbedtls/bignum.h>
