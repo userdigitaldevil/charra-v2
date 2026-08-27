@@ -130,7 +130,7 @@ SOURCES = $(shell find $(SRCDIR) -name '*.c')
 INCLUDE = -I$(INCDIR)
 
 OBJECTS =  $(addsuffix .o, $(addprefix $(OBJDIR)/common/, charra_log))
-OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log charra_synthetic_log charra_sdk charra_trusted_keys))
+OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log charra_synthetic_log charra_sdk charra_trusted_keys charra_poseidon charra_zk charra_zk_job))
 OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/util/, cbor_util charra_util coap_util crypto_util hex_util io_util tpm2_util cli_util parser_util))
 
 # Relying-Party-only modules (src/rp/). Kept out of $(OBJECTS) on purpose:
@@ -154,6 +154,7 @@ TARGETS = $(addprefix $(BINDIR)/, attester verifier verifier_old relying_party t
         test_marshaling_bounds \
         test_get_verifiers_marshaling \
         test_rp_evidence_marshaling \
+        test_poseidon \
         clean
 
 all: $(TARGETS)
@@ -169,16 +170,19 @@ test_synthetic_log: $(BINDIR)/test_synthetic_log
 test_sdk: $(BINDIR)/test_sdk
 test_marshaling_bounds: $(BINDIR)/test_marshaling_bounds
 test_rp_evidence_marshaling: $(BINDIR)/test_rp_evidence_marshaling
+
+test_poseidon: $(BINDIR)/test_poseidon
 test_get_verifiers_marshaling: $(BINDIR)/test_get_verifiers_marshaling
 
 ## run the test suite
-test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log $(BINDIR)/test_sdk $(BINDIR)/test_marshaling_bounds $(BINDIR)/test_get_verifiers_marshaling $(BINDIR)/test_rp_evidence_marshaling
+test: $(BINDIR)/test_event_log $(BINDIR)/test_synthetic_log $(BINDIR)/test_sdk $(BINDIR)/test_marshaling_bounds $(BINDIR)/test_get_verifiers_marshaling $(BINDIR)/test_rp_evidence_marshaling $(BINDIR)/test_poseidon
 	./$(BINDIR)/test_event_log
 	./$(BINDIR)/test_synthetic_log
 	./$(BINDIR)/test_sdk
 	./$(BINDIR)/test_marshaling_bounds
 	./$(BINDIR)/test_get_verifiers_marshaling
 	./$(BINDIR)/test_rp_evidence_marshaling
+	./$(BINDIR)/test_poseidon
 
 
 # ------------------------------------------------------------------------------
@@ -248,6 +252,10 @@ $(BINDIR)/test_sdk: tests/test_sdk.c $(OBJECTS)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 
 $(BINDIR)/test_marshaling_bounds: tests/test_marshaling_bounds.c $(OBJECTS)
+	@mkdir -p $(@D)
+	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
+
+$(BINDIR)/test_poseidon: tests/test_poseidon.c $(OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $^ $(CFLAGS) $(INCLUDE) $(LIBINCLUDE) $(LDPATH) $(LDFLAGS) -g -o $@ $(link_mode)
 

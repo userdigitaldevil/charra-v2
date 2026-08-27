@@ -168,9 +168,16 @@ typedef struct {
 
     /* A zero-knowledge proof that log_r's cleaned paths are commitments to
      * the very paths whose measurements produced the Attester's TPM-signed
-     * pcrDigest goes here -- see ZK_REDACTION.md. Not implemented yet; the
-     * simulated-TEE fields this replaces were removed in the same commit
-     * that added that document. */
+     * pcrDigest. This is what replaced the simulated TEE's Attestation
+     * Document -- see ZK_REDACTION.md.
+     *
+     * Only the proof travels. Its public inputs do NOT: the Verifier
+     * reconstructs them from log_r and from the pcrDigest inside the quote
+     * it has already checked the signature on. Accepting them from the RP
+     * would let a genuine proof of a fabricated log verify, which is the
+     * whole property this is here to provide. ~14.6 KB with UltraHonk. */
+    uint32_t zk_proof_len;
+    uint8_t* zk_proof;
 } msg_rp_evidence_dto;
 
 /**

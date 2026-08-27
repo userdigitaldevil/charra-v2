@@ -81,8 +81,25 @@
  * CHARRA_RC_ERROR on allocation failure, CHARRA_RC_CRYPTO_ERROR if hashing or
  * random generation fails.
  */
+struct charra_zk_witness;
+
 CHARRA_RC charra_sdk_redact_ima_log(const uint8_t* raw_log,
         uint32_t raw_log_len, uint8_t** redacted_log_out,
         uint32_t* redacted_log_len_out);
+
+/**
+ * @brief As charra_sdk_redact_ima_log(), but also collects the ZK witness.
+ *
+ * Redaction destroys precisely what the proof needs -- the real paths and
+ * the salts they were committed under -- so they are captured here rather
+ * than recovered later, which is impossible by construction.
+ *
+ * @param witness  filled in if non-NULL. Contains secrets: the caller must
+ *                 not marshal it into any message, and should erase it once
+ *                 the proof has been produced.
+ */
+CHARRA_RC charra_sdk_redact_ima_log_with_witness(const uint8_t* raw_log,
+        uint32_t raw_log_len, uint8_t** redacted_log_out,
+        uint32_t* redacted_log_len_out, struct charra_zk_witness* witness);
 
 #endif /* CHARRA_SDK_H */

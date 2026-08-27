@@ -546,6 +546,9 @@ static CHARRA_RC charra_marshal_rp_evidence_internal(
     if (rp_evidence->log_r_len != 0) {
         assert(rp_evidence->log_r != NULL);
     }
+    if (rp_evidence->zk_proof_len != 0) {
+        assert(rp_evidence->zk_proof != NULL);
+    }
 
     QCBOREncodeContext ec = {0};
     QCBOREncode_Init(&ec, buf_in);
@@ -584,6 +587,11 @@ static CHARRA_RC charra_marshal_rp_evidence_internal(
     QCBOREncode_AddBytes(&ec,
             (UsefulBufC){.ptr = rp_evidence->log_r,
                     .len = rp_evidence->log_r_len});
+
+    /* the ZK proof; empty if proving was not run */
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->zk_proof,
+                    .len = rp_evidence->zk_proof_len});
 
     QCBOREncode_CloseArray(&ec);
 
@@ -726,6 +734,12 @@ CHARRA_RC charra_unmarshal_rp_evidence(const uint32_t marshaled_data_len,
         goto cbor_parse_error;
     res.log_r_len = item.val.string.len;
     res.log_r = (uint8_t*)item.val.string.ptr;
+
+    /* zk_proof -- borrowed from the caller's buffer, as log_r is */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.zk_proof_len = item.val.string.len;
+    res.zk_proof = (uint8_t*)item.val.string.ptr;
 
     if ((cborerr = QCBORDecode_Finish(&dc))) {
         goto cbor_parse_error;

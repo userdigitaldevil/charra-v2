@@ -47,6 +47,7 @@ run_case path  "a substituted file path" || bad=$((bad + 1))
 run_case hash  "a falsified file hash"   || bad=$((bad + 1))
 run_case order "reordered entries"       || bad=$((bad + 1))
 run_case drop  "a removed entry"         || bad=$((bad + 1))
+run_case commit "a commitment that does not match its path" || bad=$((bad + 1))
 
 # Leave the honest witness in place so a later run is not surprised by a
 # tampered Prover.toml sitting on disk.

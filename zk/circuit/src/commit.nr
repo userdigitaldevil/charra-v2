@@ -1,18 +1,23 @@
 //! Poseidon commitment to a file path -- the "cleaned" value that replaces
 //! the real path in log_r.
 //!
-//! The circuit *returns* these rather than checking them against an input.
-//! That is deliberate: the RP is what produces log_r, so the proof should
-//! be the thing that decides what the cleaned paths are. It also keeps any
-//! second Poseidon implementation out of the surrounding C and Python --
-//! matching Noir's exact parameters (rate, rounds, MDS matrix, round
-//! constants) from another language is a genuine multi-day trap, and
-//! nothing here needs to.
+//! The RP computes these itself, in C, and puts them in log_r; the circuit
+//! checks them. That requires a C Poseidon that agrees with this one
+//! exactly, which is why the hash here is **Poseidon1 over BN254**, not
+//! Poseidon2.
 //!
-//! The Verifier's check is therefore: the commitments in log_r are exactly
-//! the proof's public outputs, in order.
+//! The difference matters. Poseidon2::hash delegates its permutation to
+//! std::hash::poseidon2_permutation, a *blackbox* -- the round constants
+//! live in barretenberg's C++, not in any Noir source we can read. Poseidon1
+//! for BN254 is ordinary Noir: constants and MDS matrix sit in
+//! poseidon/bn254/consts.nr, and its header states it is consistent with
+//! iden3/circomlib, which is the most widely reimplemented and
+//! cross-checked Poseidon there is.
+//!
+//! x5_8 config: t = 8, 8 full rounds, 64 partial rounds, alpha = 5.
+//! hash_7 is exactly our arity: 5 path limbs, path_len, salt.
 
-use poseidon::poseidon2::Poseidon2;
+use poseidon::poseidon::bn254::hash_7;
 
 /// A BN254 field element holds 254 bits, so 31 bytes always fit with room
 /// to spare. 5 limbs cover MAX_PATH's 136 bytes (155 capacity).
@@ -29,7 +34,7 @@ global PATH_BYTES: u32 = 136;
 /// true length, so this is not closing an attack so much as making the
 /// commitment mean exactly one thing on its own.
 pub fn commit(path: [u8; PATH_BYTES], path_len: u32, salt: Field) -> Field {
-    let mut input: [Field; LIMBS + 2] = [0; LIMBS + 2];
+    let mut input: [Field; 7] = [0; 7];  // LIMBS + 2, spelled out for hash_7
 
     for l in 0..LIMBS {
         let mut acc: Field = 0;
@@ -46,5 +51,5 @@ pub fn commit(path: [u8; PATH_BYTES], path_len: u32, salt: Field) -> Field {
     input[LIMBS] = path_len as Field;
     input[LIMBS + 1] = salt;
 
-    Poseidon2::hash(input, LIMBS + 2)
+    hash_7(input)
 }

@@ -12,9 +12,10 @@
 //! That assertion is what makes the redaction trustworthy. A prover that
 //! substitutes a path, reorders entries, drops or adds one, or lies about
 //! a file hash cannot satisfy it, because every one of those changes the
-//! chain. And because the commitments are computed from the same private
-//! `paths` array the chain consumes, the published values cannot describe
-//! a different set of files than the ones that were actually measured.
+//! chain. And because `cleaned` is checked against a commitment recomputed
+//! from the same private `paths` array the chain consumes, the redacted log
+//! the Verifier holds cannot describe a different set of files than the ones
+//! that were actually measured.
 //!
 //! Verified against real TPM output: 33 entries from a live Attester
 //! reproduce pcrdigest_a = 2b24614b17f7ac48f5081665fbc1bdc6091887c4f327
@@ -51,11 +52,14 @@ fn main(
     // IMA log, so all-zero in this setup -- but taken as input rather than
     // assumed, so the circuit is not silently specific to that.
     other_pcrs: pub [[u8; 32]; 8],
+    // Public: the redacted paths as they appear in log_r. The RP computes
+    // these in C (charra_poseidon.c) and the circuit checks them, so the two
+    // implementations must agree exactly -- see tests/test_poseidon.c.
+    cleaned: pub [Field; N],
     // Public: straight out of the Attester's TPM-signed quote.
     pcrdigest_a: pub [u8; 32],
-) -> pub [Field; N] {
+) {
     let mut pcr: [u8; 32] = [0; 32];
-    let mut cleaned: [Field; N] = [0; N];
 
     for i in 0..N {
         // --- rebuild and replay -------------------------------------------
@@ -73,10 +77,13 @@ fn main(
         pcr = sha256::digest(ext);
 
         // --- commit -------------------------------------------------------
-        // Same `paths[i]` the chain just consumed, which is the whole point:
-        // the published commitment and the replayed measurement cannot
-        // disagree about what the path was.
-        cleaned[i] = commit::commit(paths[i], path_lens[i], salts[i]);
+        // Recomputed from the same `paths[i]` the chain just consumed, which
+        // is the whole point: what log_r publishes and what was replayed
+        // cannot disagree about the path.
+        assert(
+            commit::commit(paths[i], path_lens[i], salts[i]) == cleaned[i],
+            "commitment does not match the redacted path in log_r",
+        );
     }
 
     // --- composite over the quoted selection ------------------------------
@@ -94,6 +101,4 @@ fn main(
     }
 
     assert(sha256::digest(composite) == pcrdigest_a, "pcrdigest_a mismatch");
-
-    cleaned
 }

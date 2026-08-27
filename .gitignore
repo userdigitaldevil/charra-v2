@@ -79,3 +79,10 @@ rp-ak-private.bin
 rp-ak-public.bin
 rp-ak-certificate.der
 rp-ek-certificate.der
+
+# Proof-watcher job queue (runtime handoff between container and host).
+zk/jobs/
+
+# Python bytecode from the ZK harness scripts.
+__pycache__/
+*.pyc

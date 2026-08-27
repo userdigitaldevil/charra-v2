@@ -337,24 +337,60 @@ byte-array input. In ABI order:
 |---|---|---|
 | 0..1055 | 0..33791 | `file_hashes`, 33 x 32 |
 | 1056..1311 | 33792..41983 | `other_pcrs`, 8 x 32 |
-| 1312..1343 | 41984..43007 | `pcrdigest_a`, 32 |
-| 1344..1376 | 43008..44063 | the returned commitments, 33 |
+| 1312..1344 | 41984..43039 | `cleaned` -- the commitments, 33 |
+| 1345..1376 | 43040..44063 | `pcrdigest_a`, 32 |
 
-The commitments are the last 33 fields. Each is a full 32-byte big-endian
+Order follows `main()`'s parameter list. The commitments were *last* while
+the circuit returned them; making them a public input moved them ahead of
+`pcrdigest_a`. Nothing warns about getting this wrong -- verification simply
+fails -- so it was confirmed against a real `bb prove` rather than reasoned
+about. Each is a full 32-byte big-endian
 field element -- `nargo` *prints* them as minimal hex, so one that happens
 to fall below 2^248 shows 62 hex digits rather than 64 (index 8 does), but
 in this file every one occupies exactly 32 bytes.
 
-**The Verifier can derive all of this itself.** File hashes and commitments
-come from `log_r`, `pcrdigest_a` from the quote it already validates, and
-`other_pcrs` are zeros. So only the 14.6 KB proof has to cross the wire,
-not the 44 KB of public inputs -- and having the Verifier rebuild them
+**The Verifier derives all of this itself**, in charra_zk_job.c. File hashes
+and commitments come from `log_r`, `pcrdigest_a` from the quote it already
+validates, and `other_pcrs` are zeros. So only the 14.6 KB proof crosses the
+wire (`msg_rp_evidence_dto.zk_proof`), not the 44 KB of public inputs -- and having the Verifier rebuild them
 rather than accept them is also what forces the proof to be about the log
 it was actually sent.
 
 `bb verify` takes public inputs via `-i/--public_inputs_path`. It defaults
 to the proof's directory, which works interactively; pass it explicitly
 from C.
+
+### The one thing phase 5 must get right
+
+The witness JSON the RP hands the prover contains `pcrdigest_a`, and the RP
+writes that file. So an RP that substitutes a path *and* recomputes
+`pcrdigest_a` to match gets a perfectly valid proof -- of a log it invented.
+The proof is not lying: those paths really do replay to that digest.
+
+The security therefore rests entirely on **where the Verifier gets
+`pcrdigest_a`**. The right source already exists in the code and costs
+nothing to use:
+
+    verifier_appraise.c step 3b
+      :419  charra_trusted_keys_check()  -- is AK_a trusted?
+      :444  verify_quote_signature()     -- is Quote_a genuine?
+      :456  charra_unmarshal_tpm2_quote() -> attest_struct
+            attest_struct.attested.quote.pcrDigest   <-- USE THIS
+
+Never `public_inputs` from the proof job, and never a field the RP could
+set independently of the signed quote. Likewise the commitments must come
+from `log_r`, and the file hashes with them.
+
+(What makes this a PoC rather than a deployment is the trust anchor itself
+-- keys written offline into `trusted_keys.txt`, no PKI, no revocation --
+not this step. The signature check and the anchor lookup are real.)
+
+This is why the Verifier assembles its own public-inputs file rather than
+accepting the RP's. That is not a bandwidth optimisation -- it is the step
+that makes verification mean anything. zk/test_watcher.sh case 3 shows the
+mechanism works: alter one byte of the public inputs and the verdict flips
+to rejected. What phase 5 has to get right is populating them from the
+quote rather than from the prover's output.
 
 ### The verification is bound
 
