@@ -269,7 +269,103 @@ that treats these as variable-length hex will silently produce a 31-byte
 value and mismatch on roughly one entry in 256. Always big-endian, always
 padded to 32.
 
-### Still open: the proving backend
+### The proving backend cannot run in the dev container
+
+Settled, after chasing it through three layers. Recorded so none of these
+are retried.
+
+1. `bbup` cannot resolve a bb version for Noir 1.0.0-beta.26: its
+   `bb-versions.json` map stops at beta.22. Not environmental.
+2. Every bb release needs a newer glibc than Focal's 2.31 -- the newest
+   (5.0.0-nightly.20260522) wants 2.34, and every *older* release wants
+   2.38+, so there is no version to fall back to. zk/setup_bb.sh solves
+   this with a private jammy sysroot and an explicit loader; it works, and
+   it is not enough.
+3. **The real blocker.** The container is x86_64 under Rosetta on Apple
+   Silicon, and Rosetta does not emulate ADX. `/proc/cpuinfo` shows avx,
+   avx2, bmi1, bmi2 -- and no adx. Barretenberg's BN254 field arithmetic
+   uses ADCX/ADOX carry chains, so bb dies with SIGILL on startup.
+
+No bb version, and no amount of library work, fixes (3). The x86_64
+barretenberg binaries cannot run here at all.
+
+Ways out, none free:
+
+| Option | Cost |
+|---|---|
+| Run bb natively on the arm64 macOS host | works today; RP-in-container cannot invoke it |
+| Build bb from source without the ASM backend | long C++ build, and much slower proving |
+| arm64 Linux sidecar container | native bb, but needs a job protocol over the shared volume |
+| Move charra itself to arm64 | cleanest; depends on the TPM simulator building there |
+
+For circuit development the host is the answer: nargo and bb both run
+native arm64, and the repo is bind-mounted, so the circuit can be compiled
+and proved from macOS while the C and TPM work stays in the container.
+
+Phase 5 is what actually has to choose, since it assumed the RP could shell
+out to `bb prove`. That assumption is now known to be false in this
+environment.
+
+### Measured, on the arm64 host
+
+bb 5.0.0-nightly.20260522 runs natively on arm64 macOS, and accepts Noir
+1.0.0-beta.26's ACIR despite the version map not pairing them. Full
+prove/verify round trip, UltraHonk, 8 threads:
+
+| | |
+|---|---|
+| Circuit size | 790,495 gates (82,243 ACIR opcodes) |
+| Proving key | ~1.6 s |
+| Prove | **9.9 s** wall, 55 s CPU |
+| Peak memory | ~1.26 GB |
+| Proof | 14.6 KB |
+| Public inputs | 44 KB |
+| Verification key | 3.7 KB |
+| Verify | under a second |
+
+Proving is cheap enough that the RP can do it live, per attestation. The
+earlier worry that proving time might force a reduced-coverage circuit was
+unfounded -- and the only remaining obstacle is *where* bb can execute, not
+how long it takes.
+
+### Public-input layout, for the C integration
+
+44064 bytes / 32 = 1377 field elements, one field per **byte** of each
+byte-array input. In ABI order:
+
+| Fields | Bytes | Contents |
+|---|---|---|
+| 0..1055 | 0..33791 | `file_hashes`, 33 x 32 |
+| 1056..1311 | 33792..41983 | `other_pcrs`, 8 x 32 |
+| 1312..1343 | 41984..43007 | `pcrdigest_a`, 32 |
+| 1344..1376 | 43008..44063 | the returned commitments, 33 |
+
+The commitments are the last 33 fields. Each is a full 32-byte big-endian
+field element -- `nargo` *prints* them as minimal hex, so one that happens
+to fall below 2^248 shows 62 hex digits rather than 64 (index 8 does), but
+in this file every one occupies exactly 32 bytes.
+
+**The Verifier can derive all of this itself.** File hashes and commitments
+come from `log_r`, `pcrdigest_a` from the quote it already validates, and
+`other_pcrs` are zeros. So only the 14.6 KB proof has to cross the wire,
+not the 44 KB of public inputs -- and having the Verifier rebuild them
+rather than accept them is also what forces the proof to be about the log
+it was actually sent.
+
+`bb verify` takes public inputs via `-i/--public_inputs_path`. It defaults
+to the proof's directory, which works interactively; pass it explicitly
+from C.
+
+### The verification is bound
+
+`zk/verify_binding_test.sh` checks the thing that would otherwise be
+assumed: that verification actually depends on the public inputs, rather
+than merely confirming some valid proof exists. Flipping one bit of
+`pcrdigest_a`, and one bit of a commitment, each break verification, with
+an untouched control that still verifies.
+
+Without this, a Verifier could be handed a genuine proof of a *different*
+log and accept it.
 
 Everything above is `nargo execute`, which solves the witness and checks
 every assertion but produces no proof. `bbup` cannot resolve a `bb` version
@@ -339,3 +435,86 @@ The lesson worth keeping: deleting a *file* because most of it is obsolete
 is not the same as deleting the symbols that are obsolete. Grepping each
 exported symbol for callers before removing the file would have caught the
 second one immediately.
+
+---
+
+## 7. Generalising beyond this configuration
+
+Deferred, not dismissed. The circuit as written is specific to *this* log
+and *this* quote, and the reasons are worth stating so the cost of changing
+that is known in advance rather than discovered.
+
+The constraint underneath all of it: **a circuit has no runtime loop
+bound.** Every array size and iteration count is fixed at compile time.
+That is not an artefact of this implementation, it is what a circuit is. So
+"general" can only ever mean "compiled for a worst case and paying for it
+on every proof."
+
+### What breaks if the deployment changes
+
+| Change | Breaks | Severity |
+|---|---|---|
+| Different entry count | `N = 33` | recompile |
+| Paths longer than 136 B | `MAX_PATH`, `MAX_BLOCKS = 3` | recompile, and see cost below |
+| Different number of quoted PCRs | composite hardcoded 288 B = 9x32 | recompile |
+| A quoted PCR above index 10 | PCR 10 is no longer last in the composite | wrong shape |
+| Log extends more than one PCR | single `pcr` accumulator | redesign |
+| `ima-sig` / `ima-buf` instead of `ima-ng` | `template.nr` layout | rewrite that module |
+| SHA-1 or SHA-512 template hash | `d_len = 39`, digest primitive | rewrite |
+
+### How each would be done, cheapest first
+
+**Variable entry count** (~1 h). Compile for `MAX_N`, take `n_real`, derive
+`is_real[i] = i < n_real`, and make the extend conditional.
+
+> `n_real` **must be a public input.** If the prover controls how many
+> entries count, it can drop any entry it likes -- which is exactly the
+> `drop` case in zk/negative_test.sh, reintroduced through the front door.
+> Public, and tied by the Verifier to `log_r`'s length, keeps it sound.
+
+Cost: the full `MAX_N` is paid on every proof.
+
+**Variable PCR selection** (~half a day). Take `pcr_values`, `num_pcrs` and
+`ima_slot` (the replayed PCR's position in the ascending selection); build
+the composite over the first `num_pcrs` values with the computed PCR
+substituted at `ima_slot`; hash with `sha256_var`, which already handles
+variable lengths and needs only `MAX_BLOCKS` raised to 13 to span 24 PCRs.
+
+**Multi-PCR logs** (expensive). A 24-entry PCR bank with a conditional
+extend per entry -- a 24-way select on every entry, so roughly 24x the
+chain cost. Avoid unless actually needed.
+
+### The cost warning on path length
+
+`MAX_PATH = 136` covers this log's 77-byte worst case. Linux `PATH_MAX` is
+4096, which needs `MAX_BLOCKS` around 65 rather than 3: a **~20x increase
+per entry**, paid on every entry regardless of its real length. With
+`MAX_N = 128` on top, ~80x the current circuit. That is where proving time
+stops being incidental, and it is the reason to size these bounds to the
+deployment rather than to the theoretical maximum.
+
+Shipping a small set of fixed circuit sizes, rather than one dynamic
+circuit, is also what production ZK systems generally do.
+
+### Consequence for deployment
+
+**Every circuit change produces a different verification key.** The
+Verifier must hold the vk matching the RP's circuit, so a configuration
+change is a coordinated redeployment, not a config-file edit. If the PCR
+selection is expected to vary, that argues for generalising before
+deploying rather than after.
+
+### Known issue: the PCR selection is declared twice
+
+`tpm_pcr_selection` in relying_party.c is the selection actually quoted.
+`QUOTED_PCRS` in dump_witness.c restates it. They agree today.
+
+If the real selection changes, dump_witness keeps using the stale one and
+emits a `pcrdigest_a` consistent with *itself*; the generator feeds that to
+the circuit, and the harness passes green while the real system is broken
+-- because the circuit is checked against this duplicate assumption, never
+against the actual quote. Every other failure mode here is loud; this one
+is silent, which is what makes it worth fixing.
+
+Fix: have dump_witness read the selection from the same declaration instead
+of restating it.
