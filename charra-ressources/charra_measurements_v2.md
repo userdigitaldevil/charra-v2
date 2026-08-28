@@ -72,7 +72,7 @@ of work in v2; and *discoverVerifiers* has no v1 counterpart at all.
 |---|---|
 | Toolchain | gcc 9.4.0, Ubuntu 20.04.6 LTS (container) |
 | TPM | Two IBM TPM 2.0 simulators, one per role (Attester `:2321`, RP `:2325`), both `TPM2_Startup(CLEAR)`ed |
-| Samples (steady state) | 10 measured cycles per sweep step, plus 1 discarded warm-up; 55 attestation cycles in total |
+| Samples (steady state) | 10 measured cycles per sweep step, plus 1 discarded warm-up; 55 attestation cycles in total. This describes the main sweep, taken with `NUM_RUNS = 10`; the trust-mode comparison sections were run later at `NUM_RUNS = 5` and say so. |
 | Samples (one-off costs) | 10 independent cold starts, each wiping both NVChips, restarting both simulators, regenerating the trust anchor and clearing the qualification grant |
 | Verifiers | Sweep of 1 to 5 |
 | IMA log under test | **33 entries**, 4728 bytes raw → `log_r` 4257 bytes after redaction |
@@ -135,7 +135,7 @@ Two things this decomposition makes visible that a three-way split cannot:
   rebuilding `PCR_r` in its own TPM, and it dominates everything else combined.
 - **Operation 5 is charged per Verifier, the rest per cycle.** That single
   structural fact is why cost scales with Verifier count, and it is the whole
-  content of the scaling section below.
+  content of *Scaling with the number of Verifiers*, near the end.
 
 ### The intermittent sixth: /qualify
 
@@ -435,10 +435,11 @@ grant. `rp_perform_qualification_handshake_once()` runs at the top of every
 attestation run, but performs the `/qualify` + `/qualify_submit` exchange only
 when the previous grant has lapsed — otherwise it returns immediately.
 
-**In `TRUST_MODE=tee` there is no handshake at all**: the RP is not asked to
-qualify, no grant is looked up, and the costs below do not arise. It proves
-itself per message instead, with the TEE Attestation Document measured in the
-next section.
+**In `TRUST_MODE=tee` and `TRUST_MODE=zk` there is no handshake at all**: the
+RP is not asked to qualify, no grant is looked up, and the costs below do not
+arise. It proves itself another way instead — a TEE Attestation Document per
+Verifier, or one zero-knowledge proof per cycle — both measured in the sections
+that follow.
 
 Both cases, sampled over 10 cold starts (grant cleared by removing
 `qualified_rps.txt`, then a second cycle run with the fresh grant still valid):
@@ -513,10 +514,10 @@ synthetic.
 
 ---
 
-## The alternative to /qualify: TEE mode
+## The alternatives to /qualify: TEE mode
 
-The handshake above is one of two ways the RP can prove it is running the
-expected appraisal code. The other, selected with `TRUST_MODE=tee`, replaces
+The handshake above is one of three ways the RP can prove it is running the
+expected appraisal code. The second, selected with `TRUST_MODE=tee`, replaces
 it with a simulated TEE Attestation Document — a measurement of the RP's
 appraisal sources bound to `hash(verifier_nonce || pcrdigest_a || log_r)` and
 signed under a key certified by AK_r. See the manual for what each mechanism
@@ -524,8 +525,8 @@ does and does not establish; what matters here is what each costs.
 
 The two are not interchangeable in cadence, and that is the whole result:
 **the handshake is once per cycle and usually a no-op, while a TEE document is
-built and signed once per Verifier.** Full 1..5 sweep, ten runs at each step,
-same image, same TPM configuration:
+built and signed once per Verifier.** Full 1..5 sweep, **five** measured cycles
+at each step, same image, same TPM configuration:
 
 | **Verifiers** | **`qualify`** | **`tee`** | **difference** |
 |:--:|:--:|:--:|:--:|
@@ -535,8 +536,15 @@ same image, same TPM configuration:
 | 4 | 3790.5 ms ± 24.7 | 3917.5 ms ± 27.6 | +126.9 ms (+3.3 %) |
 | 5 | 3988.0 ms ± 24.8 | 4123.6 ms ± 20.7 | +135.6 ms (+3.4 %) |
 
-Least-squares over each column, on the same basis as the scaling section
-below:
+**These are a separate run from the main sweep**, taken later and with
+`NUM_RUNS` at 5 rather than the 10 the earlier tables were measured under. That
+is why the `qualify` column here reads 3225.4 → 3988.0 ms where *Scaling with
+the number of Verifiers* reports 3251.2 → 4097.2 ms for the same mode: 1-3 %
+apart, consistent with the standard deviations, but not the same samples. Compare
+columns within this table, not across to the earlier ones.
+
+Least-squares over each column, on the same basis as the per-Verifier scaling
+section near the end of this document:
 
 | | **fixed cost** | **marginal cost per Verifier** |
 |---|:--:|:--:|
@@ -568,15 +576,16 @@ and it is cached — without that, every Verifier thread would re-derive AK_r
 from the TPM to sign a value that never changes, which would have put a
 33 ms key load (see *getEvidence*, above) on the per-Verifier path.
 
-For a five-Verifier deployment the choice costs 3.4 %. At one Verifier it is
-1.8 %, and the two modes are within about one standard deviation of each
-other.
+For a five-Verifier deployment choosing `tee` over `qualify` costs 3.4 %. At one
+Verifier it is 1.8 %, and those two are within about one standard deviation of
+each other. The third mode is a different order of magnitude, and is measured
+next.
 
 ### The third mode: `zk`
 
 `TRUST_MODE=zk` replaces the handshake with a zero-knowledge proof that
 `log_r`'s cleaned paths commit to paths the Attester really measured. Full
-1..5 sweep, ten runs at each step, alongside the other two modes:
+1..5 sweep, five measured cycles at each step, alongside the other two modes:
 
 | **Verifiers** | **`qualify`** | **`tee`** | **`zk`** |
 |:--:|:--:|:--:|:--:|
@@ -776,7 +785,9 @@ Least-squares fit over the five steps:
 - **marginal cost: 210.2 ms per additional Verifier**
 
 Both are the intercept and slope of the totals column above, so they can be
-recomputed from the five printed rows.
+recomputed from the five printed rows. They differ slightly from the `qualify`
+fit given in the trust-mode sections (3033.5 ms and 190.4 ms) because those come
+from a separate, later run at `NUM_RUNS = 5`; see the note there.
 
 The five-operation split localises that marginal cost precisely: it is entirely
 `submitAndCollect`, the only per-Verifier operation, which grows 216.6 → 420.7 →
