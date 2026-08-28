@@ -3,15 +3,22 @@
  * @file charra_zk_job.h
  * @brief Ask the proof watcher to prove or verify, and wait for the answer.
  *
- * bb cannot run in this container -- it is x86_64 under Rosetta, and Rosetta
- * does not emulate the ADX instructions barretenberg needs, so bb dies with
- * SIGILL regardless of version. zk/proof_watcher.sh runs on the arm64 host
- * and does the work; this is the client side of that handoff.
+ * bb cannot run in the charra container: that image is linux/amd64, and under
+ * Rosetta on an Apple-silicon host it dies with SIGILL because Rosetta does
+ * not emulate the ADX instructions barretenberg needs -- reproducibly, exit
+ * 132. It runs fine in a NATIVE linux/arm64 container, where nothing is
+ * emulated, so the prover is a sibling container (docker/zk, built by
+ * docker/build-zk.sh) that run_daemon.sh starts and stops alongside the TPM
+ * simulators.
+ *
+ * The two containers share this checkout, and that shared mount IS the
+ * channel: the RP writes a job directory here and the prover writes the
+ * answer back. This file is the client side of that handoff.
  *
  * The scaffolding is not part of the design: in a real deployment the RP and
  * Verifier would each invoke a local bb. Nothing here is load-bearing for
  * security -- the Verifier supplies its own verification key and builds its
- * own public inputs, so a compromised watcher can cause a failure but cannot
+ * own public inputs, so a compromised prover can cause a failure but cannot
  * cause a false accept.
  *
  * See ZK_REDACTION.md section 5.

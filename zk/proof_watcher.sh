@@ -4,9 +4,10 @@
 # Why this exists: the charra container is x86_64 under Rosetta, and Rosetta
 # does not emulate ADX, which barretenberg requires -- so bb dies with SIGILL
 # in there no matter which version or libraries are used (ZK_REDACTION.md §5).
-# On the arm64 host it runs natively. This process sits on the host, watches a
-# bind-mounted job directory, and does the proving and verifying that the
-# containerised RP and Verifier ask for.
+# In a native linux/arm64 container it runs without emulation, so that is where
+# this lives -- a sibling of the charra container, started by run_daemon.sh.
+# It watches a bind-mounted job directory and does the proving and verifying
+# the containerised RP and Verifier ask for.
 #
 # It is a scaffold for a real deployment's local `bb`, not a component of the
 # design. The seam is honest and documented; nothing about the protocol below

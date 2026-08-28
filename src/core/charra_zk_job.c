@@ -194,7 +194,8 @@ static CHARRA_RC await_job(const char* job, char* status, size_t status_len) {
     }
 
     charra_log_error("[" LOG_NAME "] No answer from the proof watcher after "
-                     "%u s. Is zk/proof_watcher.sh running on the host?",
+                     "%u s. Is the prover container running? "
+                     "run_daemon.sh starts it for TRUST_MODE=zk.",
             timeout);
     return CHARRA_RC_TIMEOUT;
 }

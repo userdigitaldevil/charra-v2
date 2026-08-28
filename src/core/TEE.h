@@ -35,10 +35,16 @@
  * run the genuine code and then lie about the result before it is signed.
  *
  * The point is narrower than "the RP is honest". It closes the specific
- * gap the rest of the codebase leaves open, where nothing stops the RP
- * from redacting a fabricated log instead of the Attester's genuine,
- * TPM-signed one, or from running different cleaning logic than the
- * Verifier expects, and having that go undetected.
+ * gap the /qualify handshake leaves open, where nothing stops the RP from
+ * redacting a fabricated log instead of the Attester's genuine, TPM-signed
+ * one, or from running different cleaning logic than the Verifier expects,
+ * and having that go undetected.
+ *
+ * CHARRA_TRUST_MODE_ZK closes the same gap differently, and more strongly:
+ * this file NAMES the code that ran, while the proof shows the redaction was
+ * actually done correctly -- see src/core/charra_zk.h. The two are exclusive
+ * alternatives, chosen by --trust-mode, and neither runs in the other's
+ * mode.
  *
  * The Verifier never calls into this file at all -- see rp_evidence.c and
  * verifier_appraise.c for why.

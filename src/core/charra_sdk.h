@@ -24,15 +24,23 @@
  * possible at all.
  *
  * So the d-ng field is copied through **byte for byte**, and only the n-ng
- * field's contents are replaced:
+ * field's contents are replaced by a 32-byte commitment to the path:
  *
- *     redacted_path = SHA256(original_path || salt)
+ *     redacted_path = SHA256(original_path || salt)      -- qualify, tee
+ *     redacted_path = Poseidon(original_path, salt)      -- zk
  *
- * with, by default, a fresh 32-byte random salt per entry that is never
+ * The hash differs by which entry point is called, not by a flag:
+ * charra_sdk_redact_ima_log() always uses SHA-256, and
+ * charra_sdk_redact_ima_log_with_witness() always uses Poseidon, because a
+ * commitment the ZK circuit has to re-check is orders of magnitude cheaper
+ * there in Poseidon than in SHA-256. Both are 32 bytes, so log_r's format is
+ * identical either way, and the properties below hold for both.
+ *
+ * Either way, by default a fresh 32-byte random salt per entry that is never
  * transmitted. That has two consequences, both deliberate:
  *
  *  - the mapping is irreversible even against a dictionary of guessed paths,
- *    which an unsalted SHA256(path) would not be; and
+ *    which an unsalted hash of the path would not be; and
  *  - two entries with the same path redact to *different* values, so the
  *    Verifier cannot count or correlate repeated paths.
  *
