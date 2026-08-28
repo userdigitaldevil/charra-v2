@@ -560,13 +560,43 @@ other.
 ### The third mode: `zk`
 
 `TRUST_MODE=zk` replaces the handshake with a zero-knowledge proof that
-`log_r`'s cleaned paths commit to paths the Attester really measured. Its cost
-sits in a different place from either of the others:
+`log_r`'s cleaned paths commit to paths the Attester really measured. Full
+1..5 sweep, ten runs at each step, alongside the other two modes:
+
+| **Verifiers** | **`qualify`** | **`tee`** | **`zk`** |
+|:--:|:--:|:--:|:--:|
+| 1 | 3225.4 ms ± 19.2 | 3283.4 ms ± 17.8 | 7758.5 ms ± 162.7 |
+| 2 | 3411.4 ms ± 33.9 | 3456.2 ms ± 17.9 | 7937.6 ms ± 122.9 |
+| 3 | 3608.7 ms ± 19.8 | 3686.2 ms ± 10.0 | 8052.7 ms ± 134.6 |
+| 4 | 3790.5 ms ± 24.7 | 3917.5 ms ± 27.6 | 8340.1 ms ± 66.9 |
+| 5 | 3988.0 ms ± 24.8 | 4123.6 ms ± 20.7 | 8548.5 ms ± 151.0 |
+
+Least-squares over each column:
+
+| | **fixed cost** | **marginal, per Verifier** |
+|---|:--:|:--:|
+| `qualify` | 3033.5 ms | 190.4 ms |
+| `tee` | 3050.9 ms | 214.2 ms |
+| `zk` | **7532.7 ms** | **198.2 ms** |
+
+**`zk` adds 4499 ms to the fixed cost and 7.8 ms to the marginal** — that is
+the whole result. The proof is produced once per cycle, because every
+Verifier receives the same `log_r` and the same `Quote_a`, so its cost does
+not scale with Verifier count. `tee` is the mirror image: nothing fixed, and
+~24 ms on every Verifier.
+
+Where the 4.5 s goes, measured over the 30 proofs of the sweep:
 
 | **Operation** | **Time** | **Cadence** |
 |---|:--:|:--:|
-| RP: produce the proof | **7.6 s** | **per cycle** |
-| Verifier: check it | **0.32 s** | per Verifier |
+| RP: produce the proof, first of a run | 8.03 s | once |
+| RP: produce the proof, thereafter | **4.13 s ± 0.11** | per cycle |
+| Verifier: check it | **0.224 s** | per Verifier |
+
+The first proof costs nearly twice the rest because the prover container
+fetches and compiles the circuit's dependencies on first use; every later
+proof reuses them. That one-off is why a single-cycle daemon run reports ~7.6 s
+where the sweep settles at 4.1 s.
 
 | | |
 |---|---:|
@@ -575,15 +605,9 @@ sits in a different place from either of the others:
 | Public inputs (rebuilt by the Verifier, never sent) | 44 KB |
 | Verification key | 3.7 KB |
 
-**The proof is per cycle, not per Verifier**, because every Verifier receives
-the same `log_r` and the same `Quote_a`. So `zk` adds ~7.6 s to the *fixed*
-cost and nothing to the marginal — the opposite shape from `tee`, which adds
-~24 ms per Verifier and nothing fixed. At one Verifier `zk` roughly triples
-the cycle; at fifty it would still add the same 7.6 s.
-
 Two figures bound what this can be used for. The circuit is compiled for at
 most 33 entries and the gate count grows with that ceiling, so a real IMA log
-of thousands of entries is out of reach. And proving is measured in a native
+of thousands of entries is out of reach. And proving runs in a native
 `linux/arm64` container: under x86 emulation Barretenberg does not run at
 all.
 

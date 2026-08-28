@@ -86,6 +86,9 @@ mine=${PWD%/}
 others=""
 for cid in $(docker ps -q); do
     cname=$(docker inspect -f "{{.Name}}" "$cid" 2>/dev/null | sed "s#^/##")
+    # Our own prover mounts this checkout on purpose -- that shared mount is
+    # how it and the RP exchange jobs -- so it is not a stray.
+    [ "$cname" = "${ZK_CONTAINER_NAME:-charra-zk-prover}" ] && continue
     for src in $(docker inspect -f "{{range .Mounts}}{{.Source}}{{println}}{{end}}" "$cid" 2>/dev/null); do
         if [ "${src%/}" = "$mine" ]; then
             others="$others $cname"
@@ -141,6 +144,36 @@ case "$TRUST_MODE" in
         exit 1 ;;
 esac
 
+# Same prover lifecycle as run_daemon.sh: its own linux/arm64 container next
+# to this one, sharing the checkout, which is also the job queue. Started here
+# rather than left to the user because it lasts exactly as long as the sweep.
+ZK_IMAGE="${ZK_IMAGE:-charra-zk:arm64}"
+ZK_PLATFORM="${ZK_PLATFORM:-linux/arm64}"
+ZK_CONTAINER_NAME="${ZK_CONTAINER_NAME:-charra-zk-prover}"
+if [ "$TRUST_MODE" = "zk" ]; then
+    if ! docker image inspect "$ZK_IMAGE" >/dev/null 2>&1; then
+        echo "ERROR: TRUST_MODE=zk needs the prover image '$ZK_IMAGE'." >&2
+        echo "       Build it once (about two minutes):" >&2
+        echo "           ./docker/build-zk.sh" >&2
+        exit 1
+    fi
+    docker rm -f "$ZK_CONTAINER_NAME" >/dev/null 2>&1 || true
+    rm -rf zk/jobs
+    echo "--- starting the ZK prover ($ZK_IMAGE, $ZK_PLATFORM)"
+    docker run -d --rm --name "$ZK_CONTAINER_NAME" \
+        --platform "$ZK_PLATFORM" \
+        -v "$PWD/:/home/bob/charra" -w /home/bob/charra \
+        "$ZK_IMAGE" ./zk/proof_watcher.sh >/dev/null
+    trap 'docker rm -f "$ZK_CONTAINER_NAME" >/dev/null 2>&1 || true' EXIT
+    sleep 1
+    if ! docker ps --filter "name=$ZK_CONTAINER_NAME" --format '{{.Names}}' \
+            | grep -q .; then
+        echo "ERROR: the prover container exited immediately." >&2
+        exit 1
+    fi
+    echo "    prover ready; proving adds about 8 s to every cycle of the sweep"
+fi
+
 DTLS_MODE="${DTLS_MODE:-off}"
 case "$DTLS_MODE" in
     off) DTLS_TM= ; DTLS_ATT= ; DTLS_VER= ; DTLS_RP= ;;
@@ -171,6 +204,7 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
   -e DTLS_VER="$DTLS_VER" -e DTLS_RP="$DTLS_RP" \
   -e TRUST_MODE="$TRUST_MODE" \
   -e TRUST_RP="$TRUST_RP" -e TRUST_VER="$TRUST_VER" \
+  -e CHARRA_ZK_JOBS="zk/jobs" \
   --name charra --group-add tss \
   "$IMAGE" \
   bash -lc '

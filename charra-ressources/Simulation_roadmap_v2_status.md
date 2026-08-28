@@ -322,8 +322,11 @@ breaks one or the other. No path is revealed.
 
 Unlike the TEE document the proof is **once per cycle**, not once per
 Verifier: every Verifier receives the same `log_r` and the same `Quote_a`, so
-one proof serves all of them. Measured at **7.6 s** to produce and **0.32 s**
-to check, against a 839,117-gate circuit and a 14.6 KB proof.
+one proof serves all of them. Over the full 1..5 sweep it adds **4499 ms to
+the fixed cost and 7.8 ms to the marginal** — `tee` is the mirror image,
+nothing fixed and ~24 ms per Verifier. Producing a proof costs 4.13 s ± 0.11
+once warm, checking one 0.224 s, against a 839,117-gate circuit and a 14.6 KB
+proof.
 
 Three things make it sound rather than decorative. The Verifier rebuilds every
 public input itself — commitments and file hashes from the `log_r` it is
