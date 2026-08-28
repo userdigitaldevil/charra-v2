@@ -11,6 +11,7 @@
 #include <string.h>
 #include <time.h>
 
+#include <mbedtls/platform_util.h>
 #include <mbedtls/rsa.h>
 
 #include "../common/charra_log.h"
@@ -20,6 +21,8 @@
 #include "../core/charra_marshaling.h"
 #include "../core/charra_sdk.h"
 #include "../core/TEE.h"
+#include "../core/charra_zk.h"
+#include "../core/charra_zk_job.h"
 #include "../util/charra_util.h"
 #include "../util/io_util.h"
 #include "rp_signing_key.h"
@@ -63,6 +66,17 @@ static const char* const rp_appraisal_code_files[] = {
  * cannot leave the previous cycle's value behind. */
 static uint8_t rp_pcrdigest_a[TPM2_SHA256_DIGEST_SIZE] = {0};
 static uint32_t rp_pcrdigest_a_len = 0;
+
+/** The ZK proof over log_r, produced once per cycle alongside it.
+ *
+ * Held here rather than regenerated per Verifier: every Verifier gets the
+ * same log_r and the same Quote_a, so the proof is the same for all of them,
+ * and proving costs seconds where everything else in the cycle costs
+ * milliseconds. Unlike the TEE document, nothing in it is per-Verifier --
+ * the nonce is not bound into the circuit, because Quote_r already binds
+ * log_r to the nonce and the proof binds log_r to pcrdigest_a. */
+static uint8_t* rp_zk_proof = NULL;
+static uint32_t rp_zk_proof_len = 0;
 
 bool charra_rp_appraise_evidence(
         const msg_attestation_response_dto* res) {
@@ -245,12 +259,26 @@ CHARRA_RC charra_rp_prepare_evidence(void) {
     /* --- redact: only the path of each entry is replaced --------------- */
     struct timespec redact_start, redact_end;
     clock_gettime(CLOCK_MONOTONIC, &redact_start);
-    CHARRA_RC charra_r = charra_sdk_redact_ima_log(last_response.event_log,
-            last_response.event_log_len, NULL, &rp_log_r, &rp_log_r_len);
+    /* The witness is only collected in ZK mode, and collecting it is also
+     * what selects Poseidon commitments -- see charra_sdk.h. It holds the
+     * real paths and their salts, so it is wiped before this function
+     * returns on every path out. */
+    charra_zk_witness zk_witness = {0};
+    const bool want_zk = (rp_trust_mode == CHARRA_TRUST_MODE_ZK);
+
+    CHARRA_RC charra_r;
+    if (want_zk) {
+        charra_r = charra_sdk_redact_ima_log_with_witness(
+                last_response.event_log, last_response.event_log_len,
+                &rp_log_r, &rp_log_r_len, &zk_witness);
+    } else {
+        charra_r = charra_sdk_redact_ima_log(last_response.event_log,
+                last_response.event_log_len, NULL, &rp_log_r, &rp_log_r_len);
+    }
     clock_gettime(CLOCK_MONOTONIC, &redact_end);
     if (charra_r != CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Redaction of the event log failed.");
-        return charra_r;
+        goto wipe_witness;
     }
     double redact_duration = (redact_end.tv_sec - redact_start.tv_sec) +
                               (redact_end.tv_nsec - redact_start.tv_nsec) / 1e9;
@@ -291,13 +319,57 @@ CHARRA_RC charra_rp_prepare_evidence(void) {
             (replay_end.tv_sec - replay_start.tv_sec) +
                     (replay_end.tv_nsec - replay_start.tv_nsec) / 1e9);
 
-    return CHARRA_RC_SUCCESS;
+    if (!want_zk) {
+        return CHARRA_RC_SUCCESS;
+    }
+
+    /* --- prove the redaction, once for the whole cycle ------------------ */
+    charra_log_info("[" LOG_NAME
+            "]  +------------ RP ZK Redaction Proof --------------+");
+    if (rp_pcrdigest_a_len == 0) {
+        charra_log_error("[" LOG_NAME "] No pcrdigest_a captured during "
+                         "appraisal; the proof would have nothing to bind "
+                         "log_r to. Abandoning the cycle.");
+        charra_r = CHARRA_RC_ERROR;
+        goto wipe_witness;
+    }
+    memcpy(zk_witness.pcrdigest_a, rp_pcrdigest_a, sizeof(zk_witness.pcrdigest_a));
+
+    charra_log_info("[" LOG_NAME "] Proving %u redacted entries against the "
+                    "Attester's signed pcrdigest_a ...",
+            zk_witness.num_entries);
+    struct timespec prove_start, prove_end;
+    clock_gettime(CLOCK_MONOTONIC, &prove_start);
+    charra_r = charra_zk_prove(&zk_witness, &rp_zk_proof, &rp_zk_proof_len);
+    clock_gettime(CLOCK_MONOTONIC, &prove_end);
+    if (charra_r != CHARRA_RC_SUCCESS) {
+        charra_log_error("[" LOG_NAME "] Could not prove the redaction; no "
+                         "Verifier can be answered this cycle. Is the prover "
+                         "container running? (./docker/build-zk.sh, then "
+                         "TRUST_MODE=zk ./run_daemon.sh starts it)");
+        goto wipe_witness;
+    }
+    charra_log_info("[" LOG_NAME "] Proof is %u bytes, took %.3fs. One proof "
+                    "serves every Verifier this cycle.",
+            rp_zk_proof_len,
+            (prove_end.tv_sec - prove_start.tv_sec) +
+                    (prove_end.tv_nsec - prove_start.tv_nsec) / 1e9);
+
+wipe_witness:
+    /* Paths and salts: secret, and of no further use once the proof exists.
+     * mbedtls_platform_zeroize rather than memset, which a compiler is free
+     * to elide on a buffer that is never read again. */
+    mbedtls_platform_zeroize(&zk_witness, sizeof(zk_witness));
+    return charra_r;
 }
 
 void charra_rp_release_evidence(void) {
     charra_free_if_not_null(rp_log_r);
     rp_log_r = NULL;
     rp_log_r_len = 0;
+    charra_free_if_not_null(rp_zk_proof);
+    rp_zk_proof = NULL;
+    rp_zk_proof_len = 0;
     /* Nothing key-related to release: the signing key is derived and
      * discarded inside each signature, never held here. */
 }
@@ -520,6 +592,18 @@ CHARRA_RC charra_rp_build_evidence_message(int verifier_index,
         if (charra_r != CHARRA_RC_SUCCESS) {
             return charra_r;
         }
+    } else if (rp_trust_mode == CHARRA_TRUST_MODE_ZK) {
+        /* The same proof for every Verifier -- see rp_zk_proof. Built once in
+         * charra_rp_prepare_evidence(); its absence here means that failed,
+         * which already abandoned the cycle. */
+        if (rp_zk_proof == NULL || rp_zk_proof_len == 0) {
+            charra_log_error("[" LOG_NAME "] No redaction proof for this "
+                             "cycle; refusing to send evidence a Verifier "
+                             "cannot check.");
+            return CHARRA_RC_ERROR;
+        }
+        ev.zk_proof = rp_zk_proof;
+        ev.zk_proof_len = rp_zk_proof_len;
     }
 
     return charra_marshal_rp_evidence(&ev, marshaled_len, marshaled);

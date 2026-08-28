@@ -133,9 +133,9 @@ fi
 # BOTH roles at once -- they must agree, and a mismatch is a named NO vote.
 TRUST_MODE="${TRUST_MODE:-qualify}"
 case "$TRUST_MODE" in
-    qualify|tee) TRUST_RP="--trust-mode=$TRUST_MODE"
-                 TRUST_VER="--trust-mode=$TRUST_MODE" ;;
-    *)  echo "ERROR: TRUST_MODE must be qualify or tee (got '$TRUST_MODE')." >&2
+    qualify|tee|zk) TRUST_RP="--trust-mode=$TRUST_MODE"
+                    TRUST_VER="--trust-mode=$TRUST_MODE" ;;
+    *)  echo "ERROR: TRUST_MODE must be qualify, tee or zk (got '$TRUST_MODE')." >&2
         exit 1 ;;
 esac
 

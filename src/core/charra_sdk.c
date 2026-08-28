@@ -154,9 +154,20 @@ static CHARRA_RC redact_one_entry(const charra_event_log_entry* entry,
         memcpy(witness_out->salt, entry_salt, CHARRA_SDK_PATH_SALT_LEN);
         memcpy(witness_out->commitment, redacted_path,
                 CHARRA_SDK_REDACTED_PATH_LEN);
-        /* d-ng is "sha256\0" then the digest; the circuit wants the digest. */
-        if (d_field_len >= 7 + 32) {
-            memcpy(witness_out->file_hash, d_field + 7, 32);
+        /* d_field spans its own u32 length prefix too, so the layout is
+         *   0..3  d_len | 4..10 "sha256\0" | 11..42 the digest
+         * and the circuit wants those last 32 bytes. Reading from 7 lands in
+         * the middle of the algorithm name -- which is exactly what happened
+         * the first time, and it surfaces only as "pcrdigest_a mismatch"
+         * inside the circuit, so it is worth being explicit here. */
+        if (d_field_len == sizeof(uint32_t) + 7 + 32) {
+            memcpy(witness_out->file_hash, d_field + sizeof(uint32_t) + 7, 32);
+        } else {
+            charra_log_error("[" LOG_NAME "] Entry %u's d-ng field is %u bytes, "
+                             "not the %zu a sha256 ima-ng entry has. The ZK "
+                             "circuit cannot describe it.",
+                    entry_num, d_field_len, sizeof(uint32_t) + 7 + 32);
+            return CHARRA_RC_MARSHALING_ERROR;
         }
     }
 

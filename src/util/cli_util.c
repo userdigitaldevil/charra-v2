@@ -22,6 +22,7 @@
 
 #include "../common/charra_log.h"
 #include "../core/charra_rp_qualification.h"
+#include "../core/charra_zk_job.h"
 #include "coap_util.h"
 #include "io_util.h"
 #include <errno.h>
@@ -45,7 +46,8 @@ static const struct option verifier_options[] = {
         {"verify-peer", required_argument, 0, '4'},
         {"port", required_argument, 0, 'b'},
         {"qualification-validity", required_argument, 0, '5'},
-        {"trust-mode", required_argument, 0, '6'}, {0}};
+        {"trust-mode", required_argument, 0, '6'},
+        {"zk-verification-key", required_argument, 0, '7'}, {0}};
 
 static const struct option attester_options[] = {
         {"verbose", no_argument, 0, 'v'},
@@ -176,12 +178,23 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
                                                   .qualification_validity_seconds)
                                 : (long)CHARRA_RP_QUALIFICATION_VALIDITY_SECONDS);
                 printf("     --trust-mode=MODE:          How the RP must "
-                       "prove it runs the expected appraisal code: "
-                       "'qualify' (the /qualify handshake; default) or "
-                       "'tee' (a TEE Attestation Document). The RP must "
-                       "use the SAME mode -- unlike DTLS, a mismatch is "
+                       "prove it runs the expected appraisal code. "
+                       "'qualify' (the /qualify handshake; default), "
+                       "'tee' (a TEE Attestation Document), or 'zk' (a "
+                       "zero-knowledge proof over the redacted log). The RP "
+                       "must use the SAME mode -- unlike DTLS, a mismatch is "
                        "reported rather than timing out. run_daemon.sh's "
                        "TRUST_MODE sets both at once.\n");
+                printf("     --zk-verification-key=PATH: Key the redaction "
+                       "proof is checked against, for --trust-mode=zk. "
+                       "Default '%s'. It must be the key for the exact "
+                       "circuit the RP proves with: recompiling the circuit "
+                       "changes it.\n",
+                        (variables->verifier_config.zk_verification_key_path !=
+                                NULL)
+                                ? *(variables->verifier_config
+                                                .zk_verification_key_path)
+                                : CHARRA_ZK_VK_DEFAULT);
                 printf("                                 EVERY role must "
                        "use the SAME DTLS mode. A mismatch does not error: "
                        "the request times out, which counts as a NO vote, so "
@@ -372,7 +385,20 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
             continue;
         }
 
-        if (caller == VERIFIER && identifier == '6') {
+        if (caller == VERIFIER && identifier == '7') {
+            if (variables->verifier_config.zk_verification_key_path == NULL) {
+                charra_log_error("[%s] --zk-verification-key is not wired up "
+                                 "in this binary.",
+                        log_name);
+                return -1;
+            }
+            char* p = charra_cli_dup_arg(
+                    log_name, "--zk-verification-key", optarg);
+            if (p == NULL) {
+                return -1;
+            }
+            *(variables->verifier_config.zk_verification_key_path) = p;
+        } else if (caller == VERIFIER && identifier == '6') {
             /* Spelled out rather than numeric: a Verifier silently requiring
              * the wrong proof rejects every attestation, so the flag should
              * be readable in a process list. */
@@ -388,9 +414,12 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
             } else if (strcmp(optarg, "tee") == 0) {
                 *(variables->verifier_config.trust_mode) =
                         CHARRA_TRUST_MODE_TEE;
+            } else if (strcmp(optarg, "zk") == 0) {
+                *(variables->verifier_config.trust_mode) =
+                        CHARRA_TRUST_MODE_ZK;
             } else {
-                charra_log_error("[%s] --trust-mode must be 'qualify' or "
-                                 "'tee', not '%s'.",
+                charra_log_error("[%s] --trust-mode must be 'qualify', 'tee' "
+                                 "or 'zk', not '%s'.",
                         log_name, optarg);
                 return -1;
             }

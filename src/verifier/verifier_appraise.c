@@ -18,6 +18,8 @@
 #include "../common/charra_log.h"
 #include "../core/charra_trusted_keys.h"
 #include "../core/charra_verdict.h"
+#include "../core/charra_zk.h"
+#include "../core/charra_zk_job.h"
 #include "../core/charra_dto.h"
 #include "../core/charra_event_log.h"
 #include "../core/charra_helper.h"
@@ -378,13 +380,18 @@ void coap_appraise_handler(struct coap_resource_t* resource,
             verifier_trust_mode == CHARRA_TRUST_MODE_QUALIFY;
     const bool require_tee =
             trust_mode_agreed && verifier_trust_mode == CHARRA_TRUST_MODE_TEE;
+    const bool require_zk =
+            trust_mode_agreed && verifier_trust_mode == CHARRA_TRUST_MODE_ZK;
     if (!trust_mode_agreed) {
         charra_log_error("[" LOG_NAME "]     => trust mode MISMATCH: this "
                          "Verifier requires %s, the RP sent %s. Both roles "
                          "must be configured alike.",
-                verifier_trust_mode == CHARRA_TRUST_MODE_TEE ? "tee"
-                                                            : "qualify",
-                res.trust_mode == CHARRA_TRUST_MODE_TEE ? "tee" : "qualify");
+                verifier_trust_mode == CHARRA_TRUST_MODE_ZK    ? "zk"
+                        : verifier_trust_mode == CHARRA_TRUST_MODE_TEE ? "tee"
+                                                                       : "qualify",
+                res.trust_mode == CHARRA_TRUST_MODE_ZK    ? "zk"
+                        : res.trust_mode == CHARRA_TRUST_MODE_TEE ? "tee"
+                                                                  : "qualify");
     }
 
     /* Each mechanism is neutral -- true -- when it is not the one in force,
@@ -591,6 +598,13 @@ void coap_appraise_handler(struct coap_resource_t* resource,
      * which. */
     bool attestation_result_tee = trust_mode_agreed && !require_tee;
     const char* tee_why = "not verified";
+
+    /* The ZK arm, on the same pattern: neutral when it is not the mechanism
+     * in force, false when the two sides disagree about which is. Evaluated
+     * inside Step 3b for the same reason as the TEE arm -- it needs Quote_a's
+     * pcrDigest, which is what Step 3b parses. */
+    bool attestation_result_zk = trust_mode_agreed && !require_zk;
+    const char* zk_why = "not verified";
 
     bool attestation_result_ekak = false;
     /* Why Step 3b item 1 failed, for the reason list at the verdict. */
@@ -898,11 +912,79 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                             "Document took %f second(s).",
                     charra_now_s() - tee_start);
         }
+
+        /* --- the RP's zero-knowledge redaction proof --------------------
+         * What it establishes: log_r's cleaned paths are commitments to
+         * paths that really were measured -- the same paths whose replay
+         * reproduces pcrdigest_a. Without it the RP could redact a log it
+         * invented, and nothing here would notice.
+         *
+         * Every public input is rebuilt HERE, from things already checked:
+         * commitments and file hashes out of the log_r being appraised, and
+         * pcrdigest_a out of the Quote_a whose signature item 2 verified. A
+         * proof is only ever a proof about its public inputs -- take the
+         * RP's copy of them and a genuine proof of a fabricated log verifies
+         * perfectly. */
+        if (require_zk) {
+            charra_log_info("[" LOG_NAME "] Verifying the RP's redaction "
+                            "proof (%u bytes) ...", res.zk_proof_len);
+            const double zk_start = charra_now_s();
+
+            charra_zk_public_inputs zk_inputs = {0};
+            CHARRA_RC zk_r = CHARRA_RC_ERROR;
+            if (res.zk_proof_len == 0) {
+                zk_why = "MISSING -- this Verifier requires a redaction proof "
+                         "and the RP sent none";
+                charra_log_error("[" LOG_NAME "]     => no proof in the "
+                                 "message. Rejecting.");
+            } else if (charra_zk_public_inputs_from_log_r(res.log_r,
+                               res.log_r_len,
+                               attest_struct.attested.quote.pcrDigest.buffer,
+                               &zk_inputs) != CHARRA_RC_SUCCESS) {
+                zk_why = "MALFORMED -- could not rebuild the proof's public "
+                         "inputs from log_r";
+                charra_log_error("[" LOG_NAME "]     => could not rebuild the "
+                                 "public inputs from log_r. Rejecting.");
+            } else {
+                charra_log_info("[" LOG_NAME "]     rebuilt %u entries' "
+                                "commitments and file hashes from log_r; "
+                                "pcrdigest_a taken from the verified Quote_a.",
+                        zk_inputs.n_real);
+                /* A rejected proof and an unrunnable check are different
+                 * outcomes: zk_r says whether the check could be performed,
+                 * attestation_result_zk says what it concluded. Both lead to
+                 * a NO vote, but only one of them means the RP cheated. */
+                zk_r = charra_zk_verify(res.zk_proof, res.zk_proof_len,
+                        &zk_inputs, &attestation_result_zk);
+                if (zk_r != CHARRA_RC_SUCCESS) {
+                    attestation_result_zk = false;
+                    zk_why = "the proof could not be CHECKED -- is the prover "
+                             "container running?";
+                    charra_log_error("[" LOG_NAME "]     => the proof could "
+                                     "not be checked. This is a tooling "
+                                     "failure, not evidence against the RP. "
+                                     "Rejecting anyway, fail-closed.");
+                } else if (!attestation_result_zk) {
+                    zk_why = "INVALID -- log_r's cleaned paths are not "
+                             "commitments to the measured files";
+                    charra_log_error("[" LOG_NAME "]     => the redaction "
+                                     "proof is NOT valid. Rejecting.");
+                } else {
+                    charra_log_info("[" LOG_NAME "]     => redaction proof is "
+                                    "valid: every cleaned path in log_r "
+                                    "commits to a file the Attester really "
+                                    "measured.");
+                }
+            }
+            charra_log_info("[" LOG_NAME "] Timing: verify redaction proof "
+                            "took %f second(s).", charra_now_s() - zk_start);
+        }
     }
 
     /* --- output result --- */
     /* Order matches Step 3a then Step 3b, RP's evidence before Attester's. */
     bool attestation_result = step_3a_passed && attestation_result_tee &&
+                              attestation_result_zk &&
                               attestation_result_ekak &&
                               attestation_result_signature &&
                               attestation_result_nonce;
@@ -936,6 +1018,13 @@ void coap_appraise_handler(struct coap_resource_t* resource,
                               "it by"
                             : "MISSING or EXPIRED -- this RP must re-run "
                               "/qualify");
+        }
+        if (!attestation_result_zk) {
+            LOG_REASON("RP redaction proof: %s",
+                    !trust_mode_agreed
+                            ? "MODE MISMATCH -- this Verifier and the RP "
+                              "require different proofs of RP integrity"
+                            : zk_why);
         }
         if (!attestation_result_tee) {
             LOG_REASON("RP TEE Attestation Document: %s",

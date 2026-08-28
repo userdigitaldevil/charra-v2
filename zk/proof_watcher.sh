@@ -118,7 +118,13 @@ do_verify() {
     # -i is passed explicitly. bb defaults it to the proof's directory, which
     # happens to work, but relying on a default for the input that decides
     # WHAT is being proved is not something to leave implicit.
-    if bb verify -k "$VK" -p "$job/proof" -i "$job/public_inputs" \
+    # The Verifier names the key it trusts, in the job. Falls back to the
+    # repository's own only when the job does not say -- a Verifier that has
+    # been pointed at a different key must be checked against that one, or
+    # the flag would be decorative.
+    job_vk="$VK"
+    [ -s "$job/vk" ] && job_vk="$job/vk"
+    if bb verify -k "$job_vk" -p "$job/proof" -i "$job/public_inputs" \
             >"$job/log" 2>&1; then
         echo verified > "$job/result"
     else

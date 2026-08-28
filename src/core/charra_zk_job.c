@@ -33,6 +33,13 @@
  * Note the commitments sit BEFORE pcrdigest_a. They were last while the
  * circuit returned them; making them a parameter moved them. Nothing warns
  * about getting this wrong -- verification simply fails. */
+/* Set by the Verifier from --zk-verification-key. NULL means the default. */
+static const char* zk_vk_path = NULL;
+
+void charra_zk_set_verification_key_path(const char* path) {
+    zk_vk_path = (path != NULL && path[0] != '\0') ? path : NULL;
+}
+
 #define PI_FIELDS 1378
 #define PI_FIELD_BYTES 32
 #define PI_TOTAL (PI_FIELDS * PI_FIELD_BYTES)
@@ -294,6 +301,39 @@ static CHARRA_RC populate_verify(const char* dir, const void* vctx) {
 
     snprintf(p, sizeof(p), "%s/public_inputs", dir);
     charra_r = write_file(p, pi, PI_TOTAL);
+    if (charra_r == CHARRA_RC_SUCCESS) {
+        /* Copy the key we trust into the job. Without this the prover would
+         * check against whatever key sits in the repository, and
+         * --zk-verification-key would be decorative. */
+        const char* vk = (zk_vk_path != NULL) ? zk_vk_path
+                                              : CHARRA_ZK_VK_DEFAULT;
+        FILE* src = fopen(vk, "rb");
+        if (src == NULL) {
+            charra_log_error("[" LOG_NAME "] Could not read the verification "
+                             "key '%s'. A proof cannot be checked without it.",
+                    vk);
+            free(pi);
+            return CHARRA_RC_ERROR;
+        }
+        char vkdst[512];
+        snprintf(vkdst, sizeof(vkdst), "%s/vk", dir);
+        FILE* dst = fopen(vkdst, "wb");
+        if (dst == NULL) {
+            fclose(src);
+            free(pi);
+            return CHARRA_RC_ERROR;
+        }
+        uint8_t chunk[4096];
+        size_t n;
+        while ((n = fread(chunk, 1, sizeof(chunk), src)) > 0) {
+            if (fwrite(chunk, 1, n, dst) != n) {
+                charra_r = CHARRA_RC_ERROR;
+                break;
+            }
+        }
+        fclose(src);
+        fclose(dst);
+    }
     free(pi);
     return charra_r;
 }

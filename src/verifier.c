@@ -16,6 +16,7 @@
 #include "verifier/verifier_nonce.h"
 #include "verifier/verifier_qualified_rps.h"
 #include "verifier/verifier_qualify.h"
+#include "core/charra_zk_job.h"
 #include "verifier/verifier_shared.h"
 
 /* --- config ------------------------------------------------------------- */
@@ -62,6 +63,9 @@ char* qualified_rps_file_path = VERIFIER_QUALIFIED_RPS_DEFAULT_PATH;
 /* Default matches the RP's: the /qualify handshake, so an unflagged
  * run behaves exactly as it always has. */
 charra_trust_mode verifier_trust_mode = CHARRA_TRUST_MODE_QUALIFY;
+
+/* Key the ZK redaction proof is checked against; --zk-verification-key. */
+char* zk_verification_key_path = CHARRA_ZK_VK_DEFAULT;
 
 /* Key this Verifier signs its /appraise verdicts with (see
  * charra_verdict.h). Distinct from the DTLS RPK paths above even though it
@@ -125,6 +129,7 @@ int main(int argc, char** argv) {
             .qualification_validity_seconds =
                     &qualification_validity_seconds,
             .trust_mode = &verifier_trust_mode,
+            .zk_verification_key_path = &zk_verification_key_path,
         },
     };
 
@@ -137,6 +142,7 @@ int main(int argc, char** argv) {
 
     /* set CHARRA and libcoap log levels */
     charra_log_set_level(charra_log_level);
+    charra_zk_set_verification_key_path(zk_verification_key_path);
     coap_set_log_level(coap_log_level);
 
     /* The shared module is what stamps the qualification challenge's own

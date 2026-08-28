@@ -123,6 +123,14 @@ DTLS_MODE="${DTLS_MODE:-off}"
 # mismatch does not time out -- the Verifier names it and votes NO.
 TRUST_MODE="${TRUST_MODE:-qualify}"
 
+# Image holding Noir + Barretenberg, used only by TRUST_MODE=zk. Separate
+# from IMAGE because it is a different architecture: bb needs x86 ADX
+# instructions Rosetta does not emulate, so it cannot run in the linux/amd64
+# charra image on Apple silicon. Build once with ./docker/build-zk.sh.
+ZK_IMAGE="${ZK_IMAGE:-charra-zk:arm64}"
+ZK_PLATFORM="${ZK_PLATFORM:-linux/arm64}"
+ZK_CONTAINER_NAME="${ZK_CONTAINER_NAME:-charra-zk-prover}"
+
 # --- Logging ----------------------------------------------------------------
 LOG_LEVEL="${LOG_LEVEL:-INFO}"                   # TRACE DEBUG INFO WARN ERROR FATAL
 LOG_LEVEL_COAP="${LOG_LEVEL_COAP:-}"             # empty = leave libcoap at its default
@@ -230,15 +238,35 @@ esac
 # Same reasoning as DTLS above: built once so the RP and every Verifier cannot
 # be launched requiring different proofs of each other.
 case "$TRUST_MODE" in
-    qualify|tee)
+    qualify|tee|zk)
         TRUST_RP="--trust-mode=$TRUST_MODE"
         TRUST_VER="--trust-mode=$TRUST_MODE"
         ;;
     *)
-        echo "ERROR: TRUST_MODE must be qualify or tee (got '$TRUST_MODE')." >&2
+        echo "ERROR: TRUST_MODE must be qualify, tee or zk (got '$TRUST_MODE')." >&2
         exit 1
         ;;
 esac
+
+# The prover runs in its own container, alongside the charra one, sharing this
+# checkout: that shared mount IS the job queue (src/core/charra_zk_job.h). It
+# is started here rather than left to the user because it has the same
+# lifetime as the run, like the TPM simulators.
+if [ "$TRUST_MODE" = "zk" ]; then
+    if ! docker image inspect "$ZK_IMAGE" >/dev/null 2>&1; then
+        echo "ERROR: TRUST_MODE=zk needs the prover image '$ZK_IMAGE'." >&2
+        echo "       It carries Noir and Barretenberg, which cannot run in" >&2
+        echo "       the charra image. Build it once (about two minutes):" >&2
+        echo >&2
+        echo "           ./docker/build-zk.sh" >&2
+        exit 1
+    fi
+    if [ ! -s zk/vk ]; then
+        echo "ERROR: zk/vk is missing. Verifiers check every proof against" >&2
+        echo "       it, and it must match the compiled circuit." >&2
+        exit 1
+    fi
+fi
 
 # --- sanity checks that span two processes ----------------------------------
 # None of these are fatal on their own; the run still works, it just stops
@@ -283,10 +311,14 @@ fi
 # Two containers on one checkout fight over the same ports, logs/ and
 # keys/trusted_keys.txt, which surfaces only as unexplained failures much later.
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+docker rm -f "$ZK_CONTAINER_NAME" >/dev/null 2>&1 || true
 mine=${PWD%/}
 others=""
 for cid in $(docker ps -q); do
     cname=$(docker inspect -f "{{.Name}}" "$cid" 2>/dev/null | sed "s#^/##")
+    # Our own prover mounts this checkout on purpose -- the shared mount is
+    # how it and the RP exchange jobs -- so it must not count as a stray.
+    [ "$cname" = "$ZK_CONTAINER_NAME" ] && continue
     for src in $(docker inspect -f "{{range .Mounts}}{{.Source}}{{println}}{{end}}" "$cid" 2>/dev/null); do
         if [ "${src%/}" = "$mine" ]; then others="$others $cname"; break; fi
     done
@@ -324,6 +356,26 @@ EOF
 tty_flags=""
 [ -t 0 ] && tty_flags="-it"
 
+if [ "$TRUST_MODE" = "zk" ]; then
+    echo "--- starting the ZK prover ($ZK_IMAGE, $ZK_PLATFORM)"
+    rm -rf zk/jobs
+    docker run -d --rm --name "$ZK_CONTAINER_NAME" \
+        --platform "$ZK_PLATFORM" \
+        -v "$PWD/:/home/bob/charra" -w /home/bob/charra \
+        "$ZK_IMAGE" ./zk/proof_watcher.sh
+    # Removed however this script exits, so a killed run does not leave a
+    # watcher behind holding the checkout and blocking the next one.
+    trap 'docker rm -f "$ZK_CONTAINER_NAME" >/dev/null 2>&1 || true' EXIT
+    sleep 1
+    if ! docker ps --filter "name=$ZK_CONTAINER_NAME" --format '{{.Names}}' \
+            | grep -q .; then
+        echo "ERROR: the prover container exited immediately. Its output:" >&2
+        docker logs "$ZK_CONTAINER_NAME" 2>&1 | tail -20 >&2
+        exit 1
+    fi
+    echo "    prover ready; one proof per cycle, shared by every Verifier"
+fi
+
 docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
   --name "$CONTAINER_NAME" --group-add tss \
   -e RP_INTERVAL="$RP_INTERVAL" \
@@ -354,6 +406,7 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
   -e TRUST_MODE="$TRUST_MODE" \
   -e TRUST_RP="$TRUST_RP" \
   -e TRUST_VER="$TRUST_VER" \
+  -e CHARRA_ZK_JOBS="zk/jobs" \
   "$IMAGE" \
   bash -lc '
     set -e

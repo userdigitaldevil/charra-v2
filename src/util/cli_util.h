@@ -82,6 +82,9 @@ typedef struct {
     /** Which proof of RP integrity this Verifier requires. Must match the
      * RP's --trust-mode; see charra_trust_mode in charra_dto.h. */
     charra_trust_mode* trust_mode;
+    /** Verification key for the ZK redaction proof. Must match the circuit
+     * the RP proves with; see --trust-mode=zk. */
+    char** zk_verification_key_path;
 } cli_config_verifier;
 
 /**

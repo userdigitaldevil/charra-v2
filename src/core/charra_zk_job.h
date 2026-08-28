@@ -29,6 +29,12 @@
 /** Job queue root; override with CHARRA_ZK_JOBS. */
 #define CHARRA_ZK_JOBS_DEFAULT "zk/jobs"
 
+/** Verification key proofs are checked against, unless
+ *  --zk-verification-key says otherwise. It must be the key for the exact
+ *  circuit the RP proves with: recompiling the circuit changes the key, and a
+ *  mismatched one rejects every proof. */
+#define CHARRA_ZK_VK_DEFAULT "zk/vk"
+
 /** How long to wait for the watcher before giving up. Proving takes about
  *  ten seconds; this is generous enough to absorb a queue but short enough
  *  that a watcher which is not running fails the attestation rather than
@@ -83,5 +89,14 @@ CHARRA_RC charra_zk_prove(const charra_zk_witness* witness, uint8_t** proof,
  */
 CHARRA_RC charra_zk_verify(const uint8_t* proof, uint32_t proof_len,
         const charra_zk_public_inputs* inputs, bool* verified);
+
+/**
+ * @brief Point verification at a specific verification key.
+ *
+ * Copied into every verify job, so the proof is checked against the key this
+ * Verifier trusts rather than whichever one happens to sit in the
+ * repository. NULL or unset means CHARRA_ZK_VK_DEFAULT.
+ */
+void charra_zk_set_verification_key_path(const char* path);
 
 #endif /* CHARRA_ZK_JOB_H */

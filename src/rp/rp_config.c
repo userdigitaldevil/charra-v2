@@ -178,12 +178,14 @@ int parse_rp_command_line(int argc, char** argv) {
                    "because the RP is a client to three kinds of peer, "
                    "unlike the Attester and Verifier which each face one.\n");
             printf("     --trust-mode=MODE:        How this RP proves it "
-                   "runs the expected appraisal code: 'qualify' (the "
-                   "/qualify handshake; default) or 'tee' (a TEE "
-                   "Attestation Document, one per Verifier). EVERY Verifier "
-                   "must use the SAME mode -- unlike DTLS, a mismatch is "
-                   "reported rather than timing out. run_daemon.sh's "
-                   "TRUST_MODE sets both at once.\n");
+                   "runs the expected appraisal code. 'qualify' (the "
+                   "/qualify handshake; default), 'tee' (a TEE Attestation "
+                   "Document, one per Verifier), or 'zk' (a zero-knowledge "
+                   "proof over the redacted log, one per CYCLE -- it needs "
+                   "the prover container, which run_daemon.sh starts). "
+                   "EVERY Verifier must use the SAME mode -- unlike DTLS, a "
+                   "mismatch is reported rather than timing out. "
+                   "run_daemon.sh's TRUST_MODE sets both at once.\n");
             return 1;
         case 'v':
             charra_log_level = CHARRA_LOG_DEBUG;
@@ -287,9 +289,11 @@ int parse_rp_command_line(int argc, char** argv) {
                 rp_trust_mode = CHARRA_TRUST_MODE_QUALIFY;
             } else if (strcmp(optarg, "tee") == 0) {
                 rp_trust_mode = CHARRA_TRUST_MODE_TEE;
+            } else if (strcmp(optarg, "zk") == 0) {
+                rp_trust_mode = CHARRA_TRUST_MODE_ZK;
             } else {
                 charra_log_error("[" LOG_NAME "] --trust-mode must be "
-                                 "'qualify' or 'tee', not '%s'.",
+                                 "'qualify', 'tee' or 'zk', not '%s'.",
                         optarg);
                 return -1;
             }
@@ -350,11 +354,17 @@ void rp_log_effective_configuration(void) {
                         "timing sweep).");
     }
     charra_log_info("[" LOG_NAME "] TRUST MODE: %s -- %s.",
-            rp_trust_mode == CHARRA_TRUST_MODE_TEE ? "TEE" : "QUALIFY",
-            rp_trust_mode == CHARRA_TRUST_MODE_TEE
+            rp_trust_mode == CHARRA_TRUST_MODE_ZK      ? "ZK"
+                    : rp_trust_mode == CHARRA_TRUST_MODE_TEE ? "TEE"
+                                                             : "QUALIFY",
+            rp_trust_mode == CHARRA_TRUST_MODE_ZK
+                    ? "one zero-knowledge proof over log_r per cycle, shared "
+                      "by every Verifier; the /qualify handshake is skipped"
+            : rp_trust_mode == CHARRA_TRUST_MODE_TEE
                     ? "a TEE Attestation Document per Verifier; the /qualify "
                       "handshake is skipped"
-                    : "the /qualify handshake; no TEE document is sent");
+                    : "the /qualify handshake; no TEE document or proof is "
+                      "sent");
     charra_log_info("[" LOG_NAME
                     "] ============================================================");
     charra_log_info("[" LOG_NAME "] Settings for this run -- \"(default)\" "
