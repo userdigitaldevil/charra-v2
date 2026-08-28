@@ -754,10 +754,14 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
         goto done;
     }
 
-    /* Qualification is the only readiness left to report: the signing key
-     * is derived on demand inside each signature, so there is no "ready"
-     * state for it to be in. */
-    if (rp_qualified_until <= time(NULL)) {
+    /* Only in QUALIFY mode is a grant what makes a Verifier accept. In the
+     * other two the grant is never sought and rp_qualified_until stays at
+     * zero, so testing it there predicted a NO vote on every cycle -- and was
+     * wrong every time, since those modes prove the RP another way. The
+     * signing key needs no equivalent report: it is derived on demand inside
+     * each signature, so there is no "ready" state for it to be in. */
+    if (rp_trust_mode == CHARRA_TRUST_MODE_QUALIFY &&
+            rp_qualified_until <= time(NULL)) {
         charra_log_info("[" LOG_NAME "] RP is not currently qualified; every "
                         "vote below will be a NO.");
     }

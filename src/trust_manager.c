@@ -60,6 +60,10 @@ static charra_dtls_config dtls_config = {
  * gives the same kind of easy-to-scan boundary in a multi-cycle log. */
 static unsigned int get_verifiers_request_counter = 0;
 
+/* Seeded from LOG_LEVEL_CHARRA before parsing, so the environment works the
+ * same way here as for every other role, and --log-level still wins. */
+charra_log_t charra_log_level = CHARRA_LOG_INFO;
+
 static void coap_handler(struct coap_resource_t* resource,
                                 struct coap_session_t* session,
                                 const struct coap_pdu_t* request,
@@ -68,6 +72,9 @@ static void coap_handler(struct coap_resource_t* resource,
 
 int main(int argc, char** argv) {
     int result = EXIT_SUCCESS;
+
+    charra_log_level_from_str(
+            (const char*)getenv("LOG_LEVEL_CHARRA"), &charra_log_level);
 
     /* Hand-rolled rather than routed through cli_util.c, for the same
      * reason rp_config.c is: that parser is built around a binary
@@ -89,6 +96,8 @@ int main(int argc, char** argv) {
                    "./verifiers_config.txt\n"
                    "and serves them on /get_verifiers. Opens no TPM.\n"
                    "\n"
+                   "     --log-level=LEVEL         TRACE DEBUG INFO WARN "
+                   "ERROR FATAL. Default INFO.\n"
                    "     --port=PORT               Listen on PORT instead of "
                    "%d.\n"
                    "\n"
@@ -121,6 +130,17 @@ int main(int argc, char** argv) {
                             "unrecognised. Try --help.\n",
                     arg);
             return EXIT_FAILURE;
+        } else if (TM_OPT("--log-level")) {
+            /* Without this the Trust Manager ignored the log level entirely
+             * and emitted DEBUG and TRACE while every other role honoured it
+             * -- so quietening a run quietened everything except this one. */
+            if (charra_log_level_from_str(val, &charra_log_level) != 0) {
+                fprintf(stderr,
+                        "\ntrust_manager: --log-level must be one of "
+                        "TRACE DEBUG INFO WARN ERROR FATAL (got '%s').\n",
+                        val);
+                return EXIT_FAILURE;
+            }
         } else if (TM_OPT("--port")) {
             char* end = NULL;
             long p = strtol(val, &end, 10);
@@ -158,6 +178,8 @@ int main(int argc, char** argv) {
         }
 #undef TM_OPT
     }
+
+    charra_log_set_level(charra_log_level);
 
     /* Refused at startup rather than left to charra_coap_server_start(),
      * which would also reject it -- but after the log line below has

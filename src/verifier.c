@@ -175,11 +175,30 @@ int main(int argc, char** argv) {
     charra_log_info("[" LOG_NAME "] Settings for this run -- \"(default)\" "
                     "means the flag was not given; pass it to change the "
                     "value.");
+    /* Stated first and in full, because a trust-mode mismatch is the one
+     * misconfiguration this design goes out of its way to report, and
+     * diagnosing it means comparing what THIS Verifier requires against what
+     * the RP sends. The RP announces its own mode the same way. */
+    charra_log_info("[" LOG_NAME "] TRUST MODE: %s -- %s.",
+            verifier_trust_mode == CHARRA_TRUST_MODE_ZK      ? "ZK"
+                    : verifier_trust_mode == CHARRA_TRUST_MODE_TEE ? "TEE"
+                                                                   : "QUALIFY",
+            verifier_trust_mode == CHARRA_TRUST_MODE_ZK
+                    ? "the RP must send a zero-knowledge proof that log_r's "
+                      "cleaned paths commit to paths the Attester measured"
+            : verifier_trust_mode == CHARRA_TRUST_MODE_TEE
+                    ? "the RP must send a TEE Attestation Document naming the "
+                      "appraisal code it ran"
+                    : "the RP must hold a /qualify grant");
+    charra_log_info("[" LOG_NAME
+                    "] ============================================================");
     charra_log_info("[" LOG_NAME "]   %-26s %u%s", "--port", port,
             charra_cli_default_tag('b'));
-    charra_log_info("[" LOG_NAME "]   %-26s %lds%s",
-            "--qualification-validity", (long)qualification_validity_seconds,
-            charra_cli_default_tag('5'));
+    charra_log_info("[" LOG_NAME "]   %-26s %s%s", "--trust-mode",
+            verifier_trust_mode == CHARRA_TRUST_MODE_ZK      ? "zk"
+                    : verifier_trust_mode == CHARRA_TRUST_MODE_TEE ? "tee"
+                                                                   : "qualify",
+            charra_cli_default_tag('6'));
     charra_log_info("[" LOG_NAME "]   %-26s %s%s", "--log-level",
             charra_log_level_to_str(charra_log_level),
             (charra_cli_flag_was_given('l') || charra_cli_flag_was_given('v'))
@@ -191,8 +210,21 @@ int main(int argc, char** argv) {
 
     charra_log_info("[" LOG_NAME "]   %-26s '%s'", "trust anchor",
             CHARRA_TRUSTED_KEYS_DEFAULT_PATH);
-    charra_log_info("[" LOG_NAME "]   %-26s '%s' (shared)", "qualified RPs",
-            qualified_rps_file_path);
+    /* Only the settings the mode in force actually consults. Printing the
+     * qualification window and grant file under --trust-mode=tee or zk
+     * invited the reader to think a grant was in play when none is sought. */
+    if (verifier_trust_mode == CHARRA_TRUST_MODE_QUALIFY) {
+        charra_log_info("[" LOG_NAME "]   %-26s %lds%s",
+                "--qualification-validity",
+                (long)qualification_validity_seconds,
+                charra_cli_default_tag('5'));
+        charra_log_info("[" LOG_NAME "]   %-26s '%s' (shared)", "qualified RPs",
+                qualified_rps_file_path);
+    } else if (verifier_trust_mode == CHARRA_TRUST_MODE_ZK) {
+        charra_log_info("[" LOG_NAME "]   %-26s '%s'%s",
+                "--zk-verification-key", zk_verification_key_path,
+                charra_cli_default_tag('7'));
+    }
     charra_log_info("[" LOG_NAME "]   %-26s '%s'", "timings",
             durations_file_path);
     charra_log_info("[" LOG_NAME "] Run with --help for every flag and its "

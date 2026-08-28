@@ -250,6 +250,13 @@ case "$TRUST_MODE" in
     qualify|tee|zk)
         TRUST_RP="--trust-mode=$TRUST_MODE"
         TRUST_VER="--trust-mode=$TRUST_MODE"
+        # One line for the run summary. Built here rather than inside the
+        # summary heredoc, where a case statement does not survive.
+        case "$TRUST_MODE" in
+            qualify) TRUST_DESC="the RP must hold a /qualify grant" ;;
+            tee)     TRUST_DESC="a TEE Attestation Document per Verifier" ;;
+            zk)      TRUST_DESC="one zero-knowledge proof per cycle, proved in a second container" ;;
+        esac
         ;;
     *)
         echo "ERROR: TRUST_MODE must be qualify, tee or zk (got '$TRUST_MODE')." >&2
@@ -354,9 +361,13 @@ cat <<EOF
                         && echo "each AK read from its own role's TPM" \
                         || echo "both AKs read from the one shared TPM")
                      no certificates, no expiry, no renewal
+  Trust mode         $TRUST_MODE -- $TRUST_DESC
+$(if [ "$TRUST_MODE" = "qualify" ]; then cat <<QUAL
   Qualification      granted for ${VERIFIER_QUALIFICATION_VALIDITY}s, recorded with its deadline in
                      qualified_rps.txt (shared by every Verifier); the RP
                      re-qualifies on the first cycle after it lapses
+QUAL
+fi)
   Fresh TPM          $([ "$RESET_TPM" -eq 1 ] && echo "yes (trust anchor regenerated)" || echo "no (--keep-state)")
   Log level          $LOG_LEVEL
 ---------------------------------------------------------------------------
@@ -538,7 +549,8 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
 
     # Only these two open a TPM. The Verifiers never do -- every check they
     # run is public-key math in mbedTLS -- and neither does trust_manager.
-    bin/trust_manager $DTLS_TM > logs/trust_manager.log 2>&1 &
+    bin/trust_manager --log-level=$LOG_LEVEL $DTLS_TM \
+        > logs/trust_manager.log 2>&1 &
     CHARRA_TCTI="$ATTESTER_TCTI" bin/attester $DTLS_ATT $ATTESTER_EXTRA_ARGS \
         > logs/attester.log 2>&1 &
 
