@@ -60,3 +60,15 @@ durations_verifier*.txt
 .vs/
 
 .DS_Store
+
+# --- ZK redaction proof -----------------------------------------------------
+# Compiled circuit and its witness: rebuilt by `nargo compile` / `nargo
+# execute`, and large. zk/vk IS committed, because the Verifier needs the key
+# for the exact circuit the RP proves against.
+zk/circuit/target/
+# Generated from a witness by zk/gen_prover_toml.py, and it contains the
+# secret paths and salts.
+zk/circuit/Prover.toml
+# The RP<->prover job queue: transient, and jobs carry the witness.
+zk/jobs/
+__pycache__/
