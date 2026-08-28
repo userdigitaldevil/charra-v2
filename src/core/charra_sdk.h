@@ -69,6 +69,8 @@
 #ifndef CHARRA_SDK_H
 #define CHARRA_SDK_H
 
+struct charra_zk_witness;
+
 #include <inttypes.h>
 
 #include "../common/charra_error.h"
@@ -107,5 +109,25 @@
 CHARRA_RC charra_sdk_redact_ima_log(const uint8_t* raw_log,
         uint32_t raw_log_len, const uint8_t salt[CHARRA_SDK_PATH_SALT_LEN],
         uint8_t** redacted_log_out, uint32_t* redacted_log_len_out);
+
+/**
+ * @brief As charra_sdk_redact_ima_log(), but commits with Poseidon and
+ * collects the ZK witness.
+ *
+ * The two go together: the circuit can only check a Poseidon commitment, and
+ * nothing but the prover wants the witness. Calling the plain function above
+ * therefore still produces exactly the SHA-256 output it always did, which is
+ * what keeps the /qualify handshake and the TEE measurement unchanged.
+ *
+ * Salts are always freshly drawn per entry here -- the shared-salt variant
+ * exists for the qualification handshake, which does not run in ZK mode.
+ *
+ * @param witness  filled in on success; zeroed on failure. CONTAINS SECRETS:
+ *                 the real paths and the salts they were committed under.
+ *                 The caller must wipe it and must never marshal it.
+ */
+CHARRA_RC charra_sdk_redact_ima_log_with_witness(const uint8_t* raw_log,
+        uint32_t raw_log_len, uint8_t** redacted_log_out,
+        uint32_t* redacted_log_len_out, struct charra_zk_witness* witness);
 
 #endif /* CHARRA_SDK_H */

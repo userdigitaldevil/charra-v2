@@ -5,6 +5,9 @@
 
 #include "charra_sdk.h"
 
+#include "charra_poseidon.h"
+#include "charra_zk.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -95,10 +98,20 @@ static CHARRA_RC hash_path_with_salt(const uint8_t* path, uint32_t path_len,
  * redaction functions below -- they differ only in where entry_salt comes
  * from for each entry (a fresh one every call, or always the same one).
  */
+/**
+ * @brief Redact one entry, optionally collecting the ZK witness for it.
+ *
+ * `witness_out` does double duty: non-NULL means "ZK mode", which selects
+ * Poseidon over SHA-256 for the commitment as well as capturing the path and
+ * salt. The two go together and only together -- the circuit can only check a
+ * Poseidon commitment, and nothing but the prover ever wants the witness --
+ * so coupling them is what keeps qualify and TEE producing byte-identical
+ * output to what they produced before ZK mode existed.
+ */
 static CHARRA_RC redact_one_entry(const charra_event_log_entry* entry,
         uint32_t entry_num,
         const uint8_t entry_salt[CHARRA_SDK_PATH_SALT_LEN], uint8_t* buf,
-        uint32_t* out_offset) {
+        uint32_t* out_offset, charra_zk_entry* witness_out) {
     const uint8_t* d_field = NULL;
     uint32_t d_field_len = 0;
     const uint8_t* path = NULL;
@@ -112,10 +125,39 @@ static CHARRA_RC redact_one_entry(const charra_event_log_entry* entry,
     }
 
     uint8_t redacted_path[CHARRA_SDK_REDACTED_PATH_LEN] = {0};
-    CHARRA_RC charra_r =
-            hash_path_with_salt(path, path_len, entry_salt, redacted_path);
+    CHARRA_RC charra_r;
+    if (witness_out != NULL) {
+        if (path_len > CHARRA_POSEIDON_MAX_PATH) {
+            charra_log_error("[" LOG_NAME "] Entry %u's path is %u bytes; the "
+                             "ZK circuit accepts at most %u. Raise MAX_PATH "
+                             "in the circuit, recompile, and redistribute "
+                             "zk/vk.",
+                    entry_num, path_len, (unsigned)CHARRA_POSEIDON_MAX_PATH);
+            return CHARRA_RC_BAD_ARGUMENT;
+        }
+        charra_r = charra_poseidon_commit(
+                path, path_len, entry_salt, redacted_path);
+    } else {
+        charra_r = hash_path_with_salt(
+                path, path_len, entry_salt, redacted_path);
+    }
     if (charra_r != CHARRA_RC_SUCCESS) {
         return charra_r;
+    }
+
+    if (witness_out != NULL) {
+        /* The proof needs exactly what redaction is about to throw away. All
+         * of this is secret except file_hash: it must never be marshaled. */
+        memset(witness_out, 0, sizeof(*witness_out));
+        memcpy(witness_out->path, path, path_len);
+        witness_out->path_len = path_len;
+        memcpy(witness_out->salt, entry_salt, CHARRA_SDK_PATH_SALT_LEN);
+        memcpy(witness_out->commitment, redacted_path,
+                CHARRA_SDK_REDACTED_PATH_LEN);
+        /* d-ng is "sha256\0" then the digest; the circuit wants the digest. */
+        if (d_field_len >= 7 + 32) {
+            memcpy(witness_out->file_hash, d_field + 7, 32);
+        }
     }
 
     /* new template_data = d-ng verbatim || u32(32) || redacted path */
@@ -155,9 +197,14 @@ static CHARRA_RC redact_one_entry(const charra_event_log_entry* entry,
     return CHARRA_RC_SUCCESS;
 }
 
-CHARRA_RC charra_sdk_redact_ima_log(const uint8_t* raw_log,
-        uint32_t raw_log_len, const uint8_t salt[CHARRA_SDK_PATH_SALT_LEN],
-        uint8_t** redacted_log_out, uint32_t* redacted_log_len_out) {
+/**
+ * @brief The whole redaction. `witness` non-NULL means ZK mode: Poseidon
+ * commitments, and every path and salt collected for the prover.
+ */
+static CHARRA_RC redact_log(const uint8_t* raw_log, uint32_t raw_log_len,
+        const uint8_t salt[CHARRA_SDK_PATH_SALT_LEN],
+        uint8_t** redacted_log_out, uint32_t* redacted_log_len_out,
+        charra_zk_witness* witness) {
     if (redacted_log_out == NULL || redacted_log_len_out == NULL) {
         return CHARRA_RC_BAD_ARGUMENT;
     }
@@ -228,21 +275,65 @@ CHARRA_RC charra_sdk_redact_ima_log(const uint8_t* raw_log,
             goto error;
         }
 
+        charra_zk_entry* slot = NULL;
+        if (witness != NULL) {
+            if (entry_num >= CHARRA_ZK_MAX_ENTRIES) {
+                charra_log_error("[" LOG_NAME "] Log has more than %u entries; "
+                                 "the ZK circuit cannot prove it. Raise N in "
+                                 "zk/circuit/src/main.nr, recompile, and "
+                                 "redistribute zk/vk.",
+                        (unsigned)CHARRA_ZK_MAX_ENTRIES);
+                charra_r = CHARRA_RC_BAD_ARGUMENT;
+                goto error;
+            }
+            slot = &witness->entries[entry_num];
+        }
+
         charra_r = redact_one_entry(
-                &entry, entry_num, entry_salt, buf, &out_offset);
+                &entry, entry_num, entry_salt, buf, &out_offset, slot);
         if (charra_r != CHARRA_RC_SUCCESS) {
             goto error;
         }
         entry_num++;
     }
+    if (witness != NULL) {
+        witness->num_entries = entry_num;
+    }
 
     *redacted_log_out = buf;
     *redacted_log_len_out = out_offset;
-    charra_log_info("[" LOG_NAME "] Redacted %u entries (%u bytes in, %u out).",
-            entry_num, raw_log_len, out_offset);
+    charra_log_info("[" LOG_NAME "] Redacted %u entries, %s commitments "
+                    "(%u bytes in, %u out).",
+            entry_num, (witness != NULL) ? "Poseidon" : "SHA-256", raw_log_len,
+            out_offset);
     return CHARRA_RC_SUCCESS;
 
 error:
     free(buf);
+    if (witness != NULL) {
+        /* Never leave half a witness behind: it holds real paths and salts,
+         * and a partial one would silently prove the wrong thing. */
+        memset(witness, 0, sizeof(*witness));
+    }
     return charra_r;
+}
+
+CHARRA_RC charra_sdk_redact_ima_log(const uint8_t* raw_log,
+        uint32_t raw_log_len, const uint8_t salt[CHARRA_SDK_PATH_SALT_LEN],
+        uint8_t** redacted_log_out, uint32_t* redacted_log_len_out) {
+    return redact_log(raw_log, raw_log_len, salt, redacted_log_out,
+            redacted_log_len_out, NULL);
+}
+
+CHARRA_RC charra_sdk_redact_ima_log_with_witness(const uint8_t* raw_log,
+        uint32_t raw_log_len, uint8_t** redacted_log_out,
+        uint32_t* redacted_log_len_out, charra_zk_witness* witness) {
+    if (witness == NULL) {
+        return CHARRA_RC_BAD_ARGUMENT;
+    }
+    memset(witness, 0, sizeof(*witness));
+    /* Always a fresh per-entry salt: the shared-salt path exists only for the
+     * qualification handshake, which does not run in ZK mode. */
+    return redact_log(raw_log, raw_log_len, NULL, redacted_log_out,
+            redacted_log_len_out, witness);
 }
