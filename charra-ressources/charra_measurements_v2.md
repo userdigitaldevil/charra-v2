@@ -41,9 +41,23 @@ used in v1 would hide both:
   operation 5. Over this run that is 55 RP appraisals against 165 Verifier
   Step 3b checks.
 
-A sixth operation, the **`/qualify` handshake**, is intermittent: the Relying
-Party must hold a qualification grant before any Verifier accepts a submission,
-but the exchange runs only when the previous grant has lapsed.
+A sixth operation establishes that the Relying Party is running the appraisal
+code the Verifiers expect. **Which one runs is a choice**, set identically on
+both roles by `TRUST_MODE`, and the three differ in cadence as much as in
+cost:
+
+| `TRUST_MODE` | what runs | cadence |
+|---|---|---|
+| `qualify` *(default)* | the `/qualify` + `/qualify_submit` handshake | once per cycle, and only when the previous grant has lapsed |
+| `tee` | a simulated TEE Attestation Document | **once per Verifier** |
+| `zk` | a zero-knowledge proof over the redacted log | once per cycle |
+
+The tables in the next sections measure `qualify`, since it is the default and
+the one the main sweep was taken under. The other two are measured separately
+further down — *The alternative to /qualify: TEE mode* and *The third mode:
+`zk`* — because their cadence is what makes them differ, not their size: `tee`
+adds nothing per cycle and ~24 ms per Verifier, `zk` adds ~4.5 s per cycle and
+nothing per Verifier.
 
 The tables follow that order. The mapping to v1 is only approximate: v1's
 *requestAttestation* and *tpmQuote* together correspond to **getEvidence** here;
@@ -64,6 +78,7 @@ of work in v2; and *discoverVerifiers* has no v1 counterpart at all.
 | IMA log under test | **33 entries**, 4728 bytes raw → `log_r` 4257 bytes after redaction |
 | Qualification challenge log | **40 entries**, 5210 bytes (synthetic, generated fresh per handshake) |
 | Evidence size | 6582 bytes on the wire |
+| Trust mode | `TRUST_MODE=qualify`, the default. `tee` and `zk` are measured in their own sections; no figure outside those was taken under either. |
 | Transport | Plain UDP — `DTLS_MODE=off`, the default. DTLS is now available (`psk`, `rpk`) but every figure below was taken without it; see the note under the caveats. |
 | Instrumentation | 42 timing points. Steady-state figures all come from one single sweep run; the cold-start and `/qualify` figures come from one separate 10-iteration cold run, since neither is reachable more than once per process. No figure is pooled across runs. |
 | Averaging | Every figure is a mean ± standard deviation over the stated `n`, with one clearly marked exception: the 1-Verifier first-cycle column below, which is a single measurement (`n = 1`). |
