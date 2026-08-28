@@ -606,6 +606,12 @@ static CHARRA_RC charra_marshal_rp_evidence_internal(
             (UsefulBufC){.ptr = rp_evidence->tee_public_key_sig,
                     .len = rp_evidence->tee_public_key_sig_len});
 
+    /* The ZK proof, last. Zero-length in the other two modes -- present
+     * either way, because the array is positional. */
+    QCBOREncode_AddBytes(&ec,
+            (UsefulBufC){.ptr = rp_evidence->zk_proof,
+                    .len = rp_evidence->zk_proof_len});
+
     QCBOREncode_CloseArray(&ec);
 
     return (QCBOREncode_Finish(&ec, buf_out) == QCBOR_SUCCESS)
@@ -754,7 +760,8 @@ CHARRA_RC charra_unmarshal_rp_evidence(const uint32_t marshaled_data_len,
         goto cbor_parse_error;
     res.trust_mode = (uint32_t)item.val.uint64;
     if (res.trust_mode != CHARRA_TRUST_MODE_QUALIFY &&
-            res.trust_mode != CHARRA_TRUST_MODE_TEE) {
+            res.trust_mode != CHARRA_TRUST_MODE_TEE &&
+            res.trust_mode != CHARRA_TRUST_MODE_ZK) {
         charra_log_error("CBOR parser: unknown trust mode %u.", res.trust_mode);
         goto cbor_parse_error;
     }
@@ -809,6 +816,15 @@ CHARRA_RC charra_unmarshal_rp_evidence(const uint32_t marshaled_data_len,
     }
     memcpy(res.tee_public_key_sig, item.val.string.ptr,
             res.tee_public_key_sig_len);
+
+    /* Borrowed from the caller's buffer, like log_r above, and never freed
+     * here. No fixed destination to bound it against, so the cap is the
+     * message itself: QCBOR has already refused anything longer than the
+     * buffer it was given. */
+    if ((cborerr = charra_cbor_get_next(&dc, &item, QCBOR_TYPE_BYTE_STRING)))
+        goto cbor_parse_error;
+    res.zk_proof_len = item.val.string.len;
+    res.zk_proof = (uint8_t*)item.val.string.ptr;
 
     if ((cborerr = QCBORDecode_Finish(&dc))) {
         goto cbor_parse_error;

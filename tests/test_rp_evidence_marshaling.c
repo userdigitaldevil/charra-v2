@@ -76,6 +76,13 @@ static void test_round_trips(void) {
     ev.tee_public_key_sig_len = sizeof(ev.tee_public_key_sig);
     memset(ev.tee_public_key_sig, 0xEE, ev.tee_public_key_sig_len);
 
+    /* Roughly the real size -- ~14.6 KB with UltraHonk -- so the round trip
+     * exercises a proof-sized field rather than a token one. */
+    uint8_t zk_proof[14656];
+    memset(zk_proof, 0x5A, sizeof(zk_proof));
+    ev.zk_proof = zk_proof;
+    ev.zk_proof_len = sizeof(zk_proof);
+
     uint32_t marshaled_len = 0;
     uint8_t* marshaled = NULL;
     CHARRA_RC rc = charra_marshal_rp_evidence(&ev, &marshaled_len, &marshaled);
@@ -141,6 +148,9 @@ static void test_round_trips(void) {
             res.tee_public_key_sig_len == ev.tee_public_key_sig_len &&
                     memcmp(res.tee_public_key_sig, ev.tee_public_key_sig,
                             ev.tee_public_key_sig_len) == 0);
+    check("zk_proof round-trips",
+            res.zk_proof_len == ev.zk_proof_len &&
+                    memcmp(res.zk_proof, ev.zk_proof, ev.zk_proof_len) == 0);
 
     free(marshaled);
 }
@@ -182,8 +192,8 @@ static void test_empty_log_accepted(void) {
  * rp_attestation_data, rp_signature, rp_public_key, attester_nonce,
  * attestation_data, tpm2_signature, tpm2_public_key, log_r, then -- after
  * the trust_mode integer -- tee_file_hash, tee_report_data, tee_signature,
- * tee_public_key, tee_public_key_sig. */
-#define RAW_FIELD_COUNT 13
+ * tee_public_key, tee_public_key_sig, zk_proof. */
+#define RAW_FIELD_COUNT 14
 /** Byte strings that precede the trust_mode integer on the wire. */
 #define RAW_FIELDS_BEFORE_TRUST_MODE 8
 /** The two TEE digests are fixed-width; the encoder must emit exactly this. */
@@ -376,14 +386,14 @@ static void test_unknown_trust_mode_rejected(void) {
     raw_field f[RAW_FIELD_COUNT];
 
     fill_valid(f, small, sizeof(small), pcr, sizeof(pcr));
-    expect_rejected_mode("trust_mode 2 is rejected", f, 2);
+    expect_rejected_mode("trust_mode 3 is rejected", f, 3);
     fill_valid(f, small, sizeof(small), pcr, sizeof(pcr));
     expect_rejected_mode("a huge trust_mode is rejected", f, 0xFFFFFFFFu);
 
     /* And both defined values are accepted, so the check above is rejecting
      * the right thing rather than everything. */
     for (uint64_t mode = CHARRA_TRUST_MODE_QUALIFY;
-            mode <= CHARRA_TRUST_MODE_TEE; mode++) {
+            mode <= CHARRA_TRUST_MODE_ZK; mode++) {
         fill_valid(f, small, sizeof(small), pcr, sizeof(pcr));
         uint8_t* raw = NULL;
         size_t raw_len = 0;
@@ -391,9 +401,9 @@ static void test_unknown_trust_mode_rejected(void) {
         msg_rp_evidence_dto res = {0};
         CHARRA_RC rc =
                 charra_unmarshal_rp_evidence((uint32_t)raw_len, raw, &res);
-        check(mode == CHARRA_TRUST_MODE_QUALIFY
-                        ? "trust_mode 'qualify' is accepted"
-                        : "trust_mode 'tee' is accepted",
+        check(mode == CHARRA_TRUST_MODE_QUALIFY ? "trust_mode 'qualify' is accepted"
+                : mode == CHARRA_TRUST_MODE_TEE    ? "trust_mode 'tee' is accepted"
+                                                   : "trust_mode 'zk' is accepted",
                 rc == CHARRA_RC_SUCCESS && res.trust_mode == mode);
         free(raw);
     }

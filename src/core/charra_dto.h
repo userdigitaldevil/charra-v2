@@ -140,6 +140,11 @@ typedef enum {
     /** A simulated TEE Attestation Document naming the code that ran and
      * binding it to this evidence. See src/core/TEE.h. */
     CHARRA_TRUST_MODE_TEE = 1,
+    /** A zero-knowledge proof that log_r's cleaned paths are commitments to
+     * paths that really were measured -- the same paths whose replay
+     * reproduces the Attester's signed pcrdigest_a. See src/core/charra_zk.h
+     * and ZK_REDACTION.md. */
+    CHARRA_TRUST_MODE_ZK = 2,
 } charra_trust_mode;
 
 typedef struct {
@@ -211,6 +216,19 @@ typedef struct {
      * accepting whatever arrived beside the signature. */
     uint32_t tee_public_key_sig_len;
     uint8_t tee_public_key_sig[CHARRA_RSA_SIGNATURE_LEN];
+
+    /* --- the ZK redaction proof (CHARRA_TRUST_MODE_ZK only) -------------
+     * Empty in the other two modes. Heap-allocated and variable length --
+     * about 14.6 KB with UltraHonk, which is why it is not a fixed array
+     * like the fields above.
+     *
+     * The proof travels; its public inputs do NOT. The Verifier rebuilds
+     * those itself -- commitments and file hashes out of log_r, pcrdigest_a
+     * out of the Quote_a whose signature it has already checked. Taking any
+     * of them from the RP would let a genuine proof of a fabricated log
+     * verify, which is the whole property this is here to provide. */
+    uint32_t zk_proof_len;
+    uint8_t* zk_proof;
 } msg_rp_evidence_dto;
 
 /**
