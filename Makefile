@@ -126,7 +126,7 @@ SOURCES = $(shell find $(SRCDIR) -name '*.c')
 INCLUDE = -I$(INCDIR)
 
 OBJECTS =  $(addsuffix .o, $(addprefix $(OBJDIR)/common/, charra_log))
-OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log charra_synthetic_log charra_sdk charra_rp_qualification charra_trusted_keys charra_verdict))
+OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/core/, charra_helper charra_key_mgr charra_rim_mgr charra_marshaling charra_event_log charra_synthetic_log charra_sdk charra_rp_qualification charra_trusted_keys charra_verdict charra_poseidon))
 OBJECTS += $(addsuffix .o, $(addprefix $(OBJDIR)/util/, cbor_util charra_util coap_util crypto_util hex_util io_util tpm2_util cli_util parser_util))
 
 # Relying-Party-only modules (src/rp/). Kept out of $(OBJECTS) on purpose:
@@ -167,7 +167,8 @@ TEST_SUITES = test_event_log \
               test_key_mgr \
               test_crypto_util \
               test_parser_util \
-              test_tee
+              test_tee \
+              test_poseidon
 
 .PHONY: all attester verifier verifier_old relying_party trust_manager \
         provision_trusted_keys test $(TEST_SUITES) clean
