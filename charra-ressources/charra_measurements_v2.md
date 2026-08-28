@@ -630,8 +630,9 @@ where the sweep settles at 4.1 s.
 | Verification key | 3.7 KB |
 
 Two figures bound what this can be used for. The circuit is compiled for at
-most 33 entries and the gate count grows with that ceiling, so a real IMA log
-of thousands of entries is out of reach. And proving runs in a native
+most 33 entries and the cost grows linearly with that ceiling — measured up to
+192 entries, where 7.75 GiB of RAM runs out — so a real IMA log of thousands of
+entries is out of reach. And proving runs in a native
 `linux/arm64` container: under x86 emulation Barretenberg does not run at
 all.
 
@@ -643,36 +644,65 @@ The section above prices one circuit, compiled for 33 entries. This one asks
 what happens as that ceiling moves — which is the question that decides
 whether the approach could ever meet a real IMA log.
 
-Six circuits were compiled, each proved and verified for real, with a witness
-of exactly that many entries:
+Nine circuits were compiled, each proved **five times**, so every row carries a
+variance rather than being a single shot. All in one container run, so the
+timings are comparable to each other:
 
-| **N** | **gates** | **ACIR opcodes** | **prove** | **peak RAM** | **proof** | **vk** | **verify** |
-|--:|--:|--:|--:|--:|--:|--:|--:|
-| 4 | 123,020 | 12,621 | 0.66 s | 213 MiB | 14,656 B | 3,680 B | 0.01 s |
-| 8 | 221,792 | 24,901 | 1.00 s | 366 MiB | 14,656 B | 3,680 B | 0.01 s |
-| 16 | 419,336 | 49,461 | 1.78 s | 643 MiB | 14,656 B | 3,680 B | 0.01 s |
-| 33 | 839,117 | 101,651 | 3.10 s | 1,249 MiB | 14,656 B | 3,680 B | 0.01 s |
-| 64 | 1,604,600 | 196,821 | 5.60 s | 2,326 MiB | 14,656 B | 3,680 B | 0.01 s |
-| 128 | 3,184,952 | 393,301 | 10.71 s | 4,548 MiB | 14,656 B | 3,680 B | 0.02 s |
+| **N** | **gates** | **prove (n = 5)** | **peak RAM (n = 5)** | **proof** | **vk** | **verify** |
+|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 123,020 | 0.646 s ± 0.011 | 212.0 MiB ± 0.7 | 14,656 B | 3,680 B | 0.01 s |
+| 8 | 221,792 | 1.002 s ± 0.012 | 367.4 MiB ± 1.7 | 14,656 B | 3,680 B | 0.01 s |
+| 16 | 419,336 | 1.688 s ± 0.039 | 643.0 MiB ± 0.7 | 14,656 B | 3,680 B | 0.01 s |
+| 33 | 839,117 | 3.101 s ± 0.056 | 1,249.2 MiB ± 1.1 | 14,656 B | 3,680 B | 0.01 s |
+| 64 | 1,604,600 | 5.500 s ± 0.027 | 2,324.8 MiB ± 0.4 | 14,656 B | 3,680 B | 0.01 s |
+| 96 | 2,394,776 | 8.036 s ± 0.082 | 3,476.6 MiB ± 1.3 | 14,656 B | 3,680 B | 0.01 s |
+| 128 | 3,184,952 | 10.456 s ± 0.128 | 4,546.6 MiB ± 0.9 | 14,656 B | 3,680 B | 0.02 s |
+| 160 | 3,975,128 | 13.008 s ± 0.264 | 5,592.4 MiB ± 2.6 | 14,656 B | 3,680 B | 0.02 s |
+| 192 | 4,765,304 | 16.468 s ± 0.616 | 6,838.6 MiB ± 4.4 | 14,656 B | 3,680 B | 0.02 s |
+
+**N = 256 could not be measured**: it needs about 9.1 GB and the OOM killer
+took it at 17 s, exit 137. On this host — Docker Desktop with 7.75 GiB — 192
+entries is the practical ceiling. That is the real limit, not an extrapolated
+one.
 
 ### Complexity: linear in N
 
-Every doubling of N roughly doubles gates, time and memory:
+Every doubling of N roughly doubles gates, time and memory. The 128 → 192 step
+is the cleanest, because by then the fixed overhead has amortised away:
 
-| | **gates** | **time** | **memory** |
+| | **N ratio** | **gates** | **time** | **memory** |
+|---|:--:|:--:|:--:|:--:|
+| 4 → 8 | ×2.00 | ×1.80 | ×1.55 | ×1.73 |
+| 64 → 128 | ×2.00 | ×1.98 | ×1.90 | ×1.96 |
+| **128 → 192** | **×1.50** | **×1.50** | **×1.58** | **×1.50** |
+
+Least squares over the nine points, each a mean of five:
+
+| | **per entry** | **intercept** | **R²** |
 |---|:--:|:--:|:--:|
-| 4 → 8 | ×1.80 | ×1.52 | ×1.72 |
-| 16 → 33 | ×2.00 | ×1.74 | ×1.94 |
-| 64 → 128 | ×1.98 | ×1.91 | ×1.95 |
+| gates | 24,693 | +24,248 | — |
+| time | **81.54 ms** | +0.305 s | 0.99813 |
+| peak RAM | **34.91 MiB** | +86.7 MiB | 0.99977 |
 
-Least squares gives **24,693 gates per entry** with a +24,248 intercept.
-Per-entry cost *falls* slightly as N grows (30,755 → 24,882) because that
-fixed intercept — the final composite hash — amortises away. Asymptotically it
-is about 24.7k gates and 83 ms per entry.
+Per-entry cost *falls* as N grows — 165 ms and 53 MiB per entry at N = 4,
+against 86 ms and 35.6 MiB at N = 192 — because that fixed intercept, the
+final composite hash, amortises away. The asymptotic constants are the
+per-entry figures above.
 
-UltraHonk proving is theoretically O(N log N). Across a 32× range the log
-factor is invisible against the noise, so linear is the right model at these
-sizes.
+**Memory is linear to a stricter standard than time.** Its residuals sit far
+outside the ±5 MiB measurement noise, while time's largest residual (0.507 s,
+at N = 192) is comparable to that point's own standard deviation. Proving
+allocates deterministically; its *timing* is subject to scheduling.
+
+Timing noise is 0.5-2.3 % of the mean at most sizes and **3.7 % at N = 192** —
+the largest circuit is the noisiest, plausibly memory pressure near the
+ceiling. Memory noise never exceeds 0.06 %.
+
+UltraHonk proving is theoretically O(N log N). Over 4 → 192, log₂N runs 2 →
+7.6, and its effect is smaller than the fixed overhead at the bottom and the
+timing noise at the top, so it cannot be separated here. Linear is the right
+model at these sizes; it would eventually bend upward at scales this hardware
+cannot reach.
 
 ### Three things that do not grow
 
@@ -683,23 +713,32 @@ computation proved. Every bit of the growth lands on the prover.
 
 ### What actually stops you: memory
 
-Peak RAM is **~35.5 MiB per entry**, and `bb`'s self-reported figure is
-honest — at N=33 it reports 1250.41 MiB against a measured maximum resident
-set of 1,280,416 kB, the same number.
+Peak RAM is **34.91 MiB per entry**, and `bb`'s self-reported figure is honest
+— at N=33 it reports 1250.41 MiB against a measured maximum resident set of
+1,280,416 kB, the same number.
 
-Extrapolating linearly from the measured range:
+**This is a measured wall, not a projected one.** N = 256 needs about 9.1 GB;
+the OOM killer took it after 17 seconds, exit 137. With 7.75 GiB available the
+largest provable log is 192 entries.
+
+Extrapolating beyond that:
 
 | **entries** | **est. gates** | **est. prove** | **est. peak RAM** |
 |--:|--:|--:|--:|
-| 256 | 6.3 M | ~21 s | ~9 GB |
-| 512 | 12.6 M | ~43 s | ~18 GB |
-| 1,000 | 24.7 M | ~84 s | ~35 GB |
-| 5,000 | 123 M | ~7 min | ~177 GB |
+| 256 | 6.3 M | ~21 s | ~9 GB — **OOM here on 7.75 GiB** |
+| 512 | 12.6 M | ~42 s | ~18 GB |
+| 1,000 | 24.7 M | ~82 s | ~35 GB |
+| 5,000 | 123 M | ~7 min | ~175 GB |
 
 A real IMA log of a few thousand entries would need tens to hundreds of GB to
 prove, held all at once, on the party doing the redaction, every cycle. Time
 can be waited out; that memory is not a laptop, and at 5,000 entries not an
 ordinary server either. It is the binding constraint, not proving time.
+
+**What is stored, though, never grows.** The proof is 14,656 bytes at every N,
+and that is the only artefact that travels. The gigabytes are transient working
+memory inside the prover, released as soon as the proof exists — there is no
+point at which anything of that size is written or transmitted.
 
 Standard techniques exist for this — proving in chunks and recursively
 aggregating, which is what production systems do for exactly this reason —
@@ -712,18 +751,17 @@ of exactly N real entries. Since the circuit pays for all N slots whatever
 `n_real` says, this is also the cost of a partly-padded log: the ceiling is
 what you pay for, not the fill.
 
-**The measured range is 4 → 128; everything past it is extrapolation.** The
-doubling ratios held tightly — ×1.95 on memory at the top end — so linear is
-well supported within that range. But 5,000 entries is **39× beyond anything
-actually run**, and a projection that far out should be read as an order of
-magnitude, not a figure.
+**The measured range is 4 → 192; everything past it is extrapolation.** Within
+it the ratios hold tightly and each point is a mean of five, so linear is well
+supported there. But 5,000 entries is **26× beyond anything actually run**, and
+a projection that far out should be read as an order of magnitude, not a
+figure.
 
-**Nothing here probed the ceiling.** The prover container was given whatever
-Docker Desktop allocates by default. At 128 entries it peaked at 4.5 GiB
-without trouble, and no attempt was made to find where the machine starts
-swapping or the prover is OOM-killed — those are the numbers that would
-actually decide feasibility on a given host. N = 256, at a projected ~9 GB, is
-where that would most likely start to show.
+**The ceiling was probed, and it is 192 on this host.** The prover container
+was given what Docker Desktop allocates by default, 7.75 GiB. N = 256 was
+OOM-killed. A host with more memory would move that line proportionally —
+34.91 MiB per entry is the number to divide by — but the shape of the limit
+does not change.
 
 ---
 
