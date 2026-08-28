@@ -100,6 +100,11 @@ charra one and the two share this checkout, which is how the RP hands it work.
 
 You need none of this for the default `qualify` mode or for `tee`.
 
+`zk/README.md` covers what lives in that directory, how to regenerate `zk/vk`
+after changing the circuit — which you must, or every proof is rejected — and
+how to run the circuit's soundness check. `ZK_REDACTION.md` is the design
+record for the proof itself.
+
 ## The Manual Way
 
 Follow the steps in the `Dockerfile` to install the dependencies directly.

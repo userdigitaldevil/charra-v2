@@ -106,6 +106,9 @@ environment **without editing the file at all**:
 | `IMAGE`                             | `…charra-dev-env:1.9.0` | Which image the scripts run in. The default is what `./docker/build.sh` produces; any other name must already exist |
 | `DTLS_MODE`                         |     `off`    | `off` \| `psk` \| `rpk`. Sets all four roles at once — they must agree             |
 | `TRUST_MODE`                        |  `qualify`   | `qualify` \| `tee` \| `zk`. How the RP proves it runs the expected appraisal code   |
+| `ZK_IMAGE`                          | `charra-zk:arm64` | Prover image, `TRUST_MODE=zk` only; build it with `./docker/build-zk.sh`     |
+| `ZK_PLATFORM`                       | `linux/arm64` | Platform that image runs as — native, so `bb` is not emulated                  |
+| `ZK_CONTAINER_NAME`                 | `charra-zk-prover` | Name of the prover container the script starts and removes               |
 | `LOG_LEVEL`                         |     INFO     | `TRACE` `DEBUG` `INFO` `WARN` `ERROR` `FATAL`                                     |
 | `LOG_LEVEL_COAP`                    |  _(empty)_   | Empty leaves libcoap at its own default                                           |
 | `RECOMPILE`                         |      1       | `make clean && make -j` on the C code **inside** the container — not the image     |
@@ -375,6 +378,13 @@ inside the charra image:
 Two limits worth knowing: the circuit is compiled for **at most 33 log
 entries** — more needs a recompile and a new `zk/vk` — and it is built for
 `linux/arm64`, because `bb` needs x86 instructions Rosetta does not emulate.
+
+The RP and the prover container talk through a file queue under `zk/jobs/`,
+implemented in `src/core/charra_zk_job.{h,c}`. **`zk/README.md` covers the
+rest**: how to regenerate `zk/vk` after changing the circuit, how to run the
+soundness check (`zk/negative_test.sh`), how to raise the entry ceiling, and
+what each script in that directory is for. `ZK_REDACTION.md` is the design
+record.
 
 **A mismatch is reported, not guessed at.** Unlike `DTLS_MODE`, where
 disagreement shows up as a timeout, the RP states its mode in every
