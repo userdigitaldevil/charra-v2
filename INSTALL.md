@@ -84,6 +84,22 @@ The image name and the `user`/`uid`/`gid` build arguments are already in
     docker-compose build
     docker-compose run --rm charra-dev-env
 
+### The ZK prover image (only for `TRUST_MODE=zk`)
+
+`TRUST_MODE=zk` proves the redaction with a zero-knowledge proof, which needs
+Noir and Barretenberg. Those cannot run in the charra image: `bb` needs x86
+ADX instructions Rosetta does not emulate, so on an Apple-silicon host it dies
+with `Illegal instruction`. They get their own **`linux/arm64`** image, which
+runs natively:
+
+    ./docker/build-zk.sh
+
+About two minutes — it downloads prebuilt toolchains rather than compiling.
+`run_daemon.sh` starts and stops that container itself; it runs alongside the
+charra one and the two share this checkout, which is how the RP hands it work.
+
+You need none of this for the default `qualify` mode or for `tee`.
+
 ## The Manual Way
 
 Follow the steps in the `Dockerfile` to install the dependencies directly.
@@ -109,7 +125,7 @@ Two checks, cheapest first.
 
        make test
 
-   Expect `17 suites, 407 assertions, 0 failures`. Any single suite can be
+   Expect `18 suites, 418 assertions, 0 failures`. Any single suite can be
    run alone, e.g. `make test_tee && ./bin/test_tee`.
 
 2. **An end-to-end attestation.** From the **host**, not inside the
@@ -156,6 +172,11 @@ anchor", which reads as a rejected identity rather than a stale file.
 | `ENABLE_PIC` | `1` | `0`, `!= 0` | Position-independent code |
 | `ENABLE_STRIPPING` | `1` | `0`, `!= 0` | Strip symbols not needed for relocation |
 | `LINK_MODE` | `dynamic` | `dynamic`, `static` (*not working*) | Static or dynamic linking |
+
+The ZK circuit is not built by `make`. It is compiled inside the prover image
+by `nargo`, and `zk/vk` — the key every Verifier checks proofs against — is
+committed. Changing `zk/circuit/` means recompiling and regenerating that key,
+or every proof will be rejected.
 
 Example:
 

@@ -105,7 +105,7 @@ environment **without editing the file at all**:
 | `VERIFIER_HOST`                     |  127.0.0.1   | Address written into `verifiers_config.txt`                                       |
 | `IMAGE`                             | `…charra-dev-env:1.9.0` | Which image the scripts run in. The default is what `./docker/build.sh` produces; any other name must already exist |
 | `DTLS_MODE`                         |     `off`    | `off` \| `psk` \| `rpk`. Sets all four roles at once — they must agree             |
-| `TRUST_MODE`                        |  `qualify`   | `qualify` \| `tee`. How the RP proves it runs the expected appraisal code          |
+| `TRUST_MODE`                        |  `qualify`   | `qualify` \| `tee` \| `zk`. How the RP proves it runs the expected appraisal code   |
 | `LOG_LEVEL`                         |     INFO     | `TRACE` `DEBUG` `INFO` `WARN` `ERROR` `FATAL`                                     |
 | `LOG_LEVEL_COAP`                    |  _(empty)_   | Empty leaves libcoap at its own default                                           |
 | `RECOMPILE`                         |      1       | `make clean && make -j` on the C code **inside** the container — not the image     |
@@ -222,13 +222,15 @@ To complete a full round of remote attestation:
         bin/verifier                       # default port 31415
         bin/verifier --port=<port_number>
         bin/verifier --trust-mode=tee      # see "Trust modes" below
+        bin/verifier --trust-mode=zk       # needs the prover container
         ./start_verifiers.sh               # 5 Verifiers from port 5684 upward
         ./start_verifiers.sh <COUNT>       # COUNT Verifiers, consecutive ports
 
     Its full set, from `bin/verifier --help`:
 
         --port=PORT                     listen port (default 31415)
-        --trust-mode=qualify|tee        what it requires of the RP (default qualify)
+        --trust-mode=qualify|tee|zk     what it requires of the RP (default qualify)
+        --zk-verification-key=PATH      key for --trust-mode=zk (default zk/vk)
         --qualification-validity=SECONDS how long a passed /qualify lasts (default 180)
         -l, --log-level=LEVEL           TRACE..FATAL (default INFO)
         -c, --coap-log-level=LEVEL      libcoap's own level
@@ -270,7 +272,7 @@ To complete a full round of remote attestation:
         --duration=SECONDS         stop after roughly SECONDS (0 = until Ctrl-C)
         --verifier-timeout=SECONDS every Verifier round trip (default 6)
         --attester-timeout=SECONDS the Attester round trip (default 6)
-        --trust-mode=qualify|tee   must match the Verifiers, see step 3
+        --trust-mode=qualify|tee|zk  must match the Verifiers, see step 3
         --log-level=LEVEL          TRACE..FATAL (default INFO)
 
     Plus the DTLS options. The RP needs **three** peer-key paths where the
@@ -352,6 +354,28 @@ The AK_r certification is what makes the TEE key believable. Without it the
 key would arrive inline, vouched for by nothing, and any RP could generate a
 keypair and sign whatever it liked.
 
+**`zk`** — a zero-knowledge proof, **one per cycle** rather than per Verifier.
+The RP proves that every cleaned path in `log_r` is a Poseidon commitment to a
+path that really was measured — the same paths whose replay reproduces the
+Attester's TPM-signed `pcrdigest_a`. The Verifier rebuilds every public input
+itself (commitments and file hashes from `log_r`, `pcrdigest_a` from the
+verified `Quote_a`, the entry count from `log_r`'s own length) and checks the
+proof against `--zk-verification-key`, default `zk/vk`.
+
+Where `tee` *names* the code that ran, `zk` proves the redaction was done
+correctly without revealing a single path. Measured: 7.6 s to produce, 0.32 s
+to check.
+
+`zk` needs one thing built first, because Noir and Barretenberg cannot run
+inside the charra image:
+
+    ./docker/build-zk.sh          # about two minutes, once
+    TRUST_MODE=zk ./run_daemon.sh # starts and stops the prover itself
+
+Two limits worth knowing: the circuit is compiled for **at most 33 log
+entries** — more needs a recompile and a new `zk/vk` — and it is built for
+`linux/arm64`, because `bb` needs x86 instructions Rosetta does not emulate.
+
 **A mismatch is reported, not guessed at.** Unlike `DTLS_MODE`, where
 disagreement shows up as a timeout, the RP states its mode in every
 `/appraise` request. A Verifier set the other way votes NO and logs
@@ -369,7 +393,7 @@ attestation.
 
     make test
 
-17 suites, 407 assertions. They need **neither a TPM nor a network** — verified
+18 suites, 418 assertions. They need **neither a TPM nor a network** — verified
 by running them in a container with `--network none` and no `tpm_server`. The
 suite list lives once, in the Makefile's `TEST_SUITES` variable; the `.PHONY`
 list, the per-suite shortcuts and the `test` target are all derived from it, so

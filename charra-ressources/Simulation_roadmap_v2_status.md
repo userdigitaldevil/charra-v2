@@ -18,12 +18,12 @@ Measured across the two:
 
 | | starting point | now |
 |---|:--:|:--:|
-| Source files in `src/` (`.c` + `.h`) | 35 | 87 |
-| Lines of C in `src/` | 8 057 | 19 083 |
+| Source files in `src/` (`.c` + `.h`) | 35 | 94 |
+| Lines of C in `src/` | 8 057 | 21 918 |
 | Binaries built | 5 | 6 |
 | CoAP resources served | 4 | 7 |
 | Marshalled message types (`msg_*_dto`) | 2 | 10 |
-| Test suites | 0 | 17 (407 assertions) |
+| Test suites | 0 | 18 (418 assertions) |
 
 ---
 
@@ -183,14 +183,14 @@ ignored.
 
 **4.8 Restructuring and tests.** `src/` gained `attester/`, `rp/` and
 `verifier/` subdirectories; `verifier.c` shrank from 678 lines to 245 plus 11
-files under `src/verifier/`. Seven new modules appeared under `src/core/`:
+files under `src/verifier/`. Nine new modules appeared under `src/core/`:
 `charra_event_log`, `charra_rp_qualification`, `charra_sdk`,
-`charra_synthetic_log`, `charra_trusted_keys`, `charra_verdict` and `TEE`
-(the last introduced in 4.10 below). There were
-**no tests at all** before; there are now 17 suites and 407 assertions. That they need
+`charra_synthetic_log`, `charra_trusted_keys`, `charra_verdict`, `TEE`, plus
+`charra_poseidon` and `charra_zk` for the proof of 4.11. There were
+**no tests at all** before; there are now 18 suites and 418 assertions. That they need
 neither a TPM nor the network is not an assumption — the suite was re-run inside
 a container started with `--network none` and with `tpm_server` killed, and all
-17 suites still reported 407 assertions and 0 failures.
+18 suites still reported 418 assertions and 0 failures.
 
 **4.9 DTLS, which previously could not be switched on at all.** Roadmap v1
 recorded DTLS as "present in the code but not enabled". That was accurate but
@@ -310,10 +310,42 @@ a surprise, since the handshake is once per cycle and usually a no-op whereas
 a TEE document is built and signed per Verifier. The figures are in
 `charra_measurements_v2`, which is where they are maintained.
 
-Neither mechanism subsumes the other. Qualification proves the output and
-anchors to a key the trust anchor already holds; the TEE names the code and,
-with the certification above, anchors to the same place. Running both would be
-a third mode; it is not implemented.
+**4.11 A third way: proving the redaction rather than asserting it.** 4.10
+names the code that ran; it cannot show the code was not lied to. A third
+mode, `--trust-mode=zk`, closes that with a zero-knowledge proof.
+
+The circuit (`zk/circuit/`, Noir) proves one statement: every cleaned path in
+`log_r` is a Poseidon commitment to a path that really was measured — the same
+paths whose replay reproduces the Attester's TPM-signed `pcrdigest_a`. One
+variable feeds both the replay and the commitment, so a lie about a path
+breaks one or the other. No path is revealed.
+
+Unlike the TEE document the proof is **once per cycle**, not once per
+Verifier: every Verifier receives the same `log_r` and the same `Quote_a`, so
+one proof serves all of them. Measured at **7.6 s** to produce and **0.32 s**
+to check, against a 839,117-gate circuit and a 14.6 KB proof.
+
+Three things make it sound rather than decorative. The Verifier rebuilds every
+public input itself — commitments and file hashes from the `log_r` it is
+appraising, `pcrdigest_a` from the `Quote_a` it has already verified, and the
+entry count from `log_r`'s own length. A proof is only ever a proof *about its
+public inputs*, so accepting the RP's copy would let a genuine proof of a
+fabricated log verify. The entry count is public for the same reason: if the
+prover chose it, it could mark entries as padding and drop them from the
+replay. And `zk/negative_test.sh` checks all of that empirically — six
+tampering cases, each rejected, against an honest witness that is accepted.
+
+Two boundaries are worth stating plainly. The circuit is compiled for **at
+most 33 entries**; a real IMA log has thousands, and the cost grows with the
+count, so this does not scale to one. And Barretenberg needs x86 instructions
+Rosetta does not emulate, so the prover runs in its own `linux/arm64`
+container alongside the charra one, sharing the checkout — which is also the
+job queue between them.
+
+Neither mechanism subsumes the other. Qualification proves the redaction OUTPUT, the
+TEE names the CODE that produced it, and the ZK proof shows the redaction was
+done correctly without revealing a path. All three are exclusive, selected by
+one CLI flag on both roles, and all three fail closed.
 
 ---
 

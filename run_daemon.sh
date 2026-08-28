@@ -41,8 +41,17 @@
 # does NOT time out: the RP states its mode on the wire, so a Verifier set the
 # other way votes NO and says MODE MISMATCH.
 #
+# The three differ in what they prove and what they cost: qualify proves the
+# redaction OUTPUT once per cycle, tee names the CODE once per Verifier, and
+# zk proves the redaction itself, once per cycle, in about 8 seconds.
+#
 #   TRUST_MODE=qualify ./run_daemon.sh   # /qualify handshake (default)
 #   TRUST_MODE=tee ./run_daemon.sh       # simulated TEE Attestation Document
+#   TRUST_MODE=zk ./run_daemon.sh        # zero-knowledge proof over log_r
+#
+# zk additionally needs the prover image, built once with ./docker/build-zk.sh.
+# This script starts and stops that container itself; it holds Noir and
+# Barretenberg, which cannot run inside the charra image.
 #
 # Options:
 #   --keep-state   keep each TPM NVChip instead of wiping it, so both AKs --

@@ -557,6 +557,36 @@ For a five-Verifier deployment the choice costs 3.4 %. At one Verifier it is
 1.8 %, and the two modes are within about one standard deviation of each
 other.
 
+### The third mode: `zk`
+
+`TRUST_MODE=zk` replaces the handshake with a zero-knowledge proof that
+`log_r`'s cleaned paths commit to paths the Attester really measured. Its cost
+sits in a different place from either of the others:
+
+| **Operation** | **Time** | **Cadence** |
+|---|:--:|:--:|
+| RP: produce the proof | **7.6 s** | **per cycle** |
+| Verifier: check it | **0.32 s** | per Verifier |
+
+| | |
+|---|---:|
+| Circuit size | 839,117 gates |
+| Proof on the wire | 14.6 KB |
+| Public inputs (rebuilt by the Verifier, never sent) | 44 KB |
+| Verification key | 3.7 KB |
+
+**The proof is per cycle, not per Verifier**, because every Verifier receives
+the same `log_r` and the same `Quote_a`. So `zk` adds ~7.6 s to the *fixed*
+cost and nothing to the marginal — the opposite shape from `tee`, which adds
+~24 ms per Verifier and nothing fixed. At one Verifier `zk` roughly triples
+the cycle; at fifty it would still add the same 7.6 s.
+
+Two figures bound what this can be used for. The circuit is compiled for at
+most 33 entries and the gate count grows with that ceiling, so a real IMA log
+of thousands of entries is out of reach. And proving is measured in a native
+`linux/arm64` container: under x86 emulation Barretenberg does not run at
+all.
+
 ---
 
 ## Trust Manager: splitting the round trip
@@ -647,9 +677,10 @@ passes the full unit-test suite, all of it running without a TPM or network:
 | `test_trusted_keys` | 9 | | `test_crypto_util` | 22 |
 | `test_qualified_rps` | 21 | | `test_parser_util` | 24 |
 | `test_get_verifiers_marshaling` | 17 | | `test_tee` | 32 |
-| `test_rp_evidence_marshaling` | 39 | | **Total** | **407** |
+| `test_rp_evidence_marshaling` | 41 | | `test_poseidon` | 9 |
+| | | | **Total** | **418** |
 
-**17 suites, 407 assertions, 0 failures.**
+**18 suites, 418 assertions, 0 failures.**
 
 End-to-end behaviour was checked in the same run: all 55 cycles reached a
 unanimous verdict (11 each at 1/1, 2/2, 3/3, 4/4 and 5/5 Verifiers passing),

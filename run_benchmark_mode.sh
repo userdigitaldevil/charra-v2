@@ -57,8 +57,10 @@
 #
 #   IMAGE=...            which container image to run in
 #   DTLS_MODE=off|psk|rpk    transport security, all four roles at once
-#   TRUST_MODE=qualify|tee   how the RP proves it runs the expected appraisal
-#                            code, the RP and every Verifier at once
+#   TRUST_MODE=qualify|tee|zk  how the RP proves it runs the expected appraisal
+#                            code, the RP and every Verifier at once. zk needs
+#                            the prover container (./docker/build-zk.sh) and
+#                            adds about 8 s to every cycle.
 #
 #   TRUST_MODE=tee ./run_benchmark_mode.sh
 #
