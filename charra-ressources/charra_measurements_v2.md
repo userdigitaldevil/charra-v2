@@ -613,6 +613,96 @@ all.
 
 ---
 
+## How the ZK proof scales with the log
+
+The section above prices one circuit, compiled for 33 entries. This one asks
+what happens as that ceiling moves — which is the question that decides
+whether the approach could ever meet a real IMA log.
+
+Six circuits were compiled, each proved and verified for real, with a witness
+of exactly that many entries:
+
+| **N** | **gates** | **ACIR opcodes** | **prove** | **peak RAM** | **proof** | **vk** | **verify** |
+|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 | 123,020 | 12,621 | 0.66 s | 213 MiB | 14,656 B | 3,680 B | 0.01 s |
+| 8 | 221,792 | 24,901 | 1.00 s | 366 MiB | 14,656 B | 3,680 B | 0.01 s |
+| 16 | 419,336 | 49,461 | 1.78 s | 643 MiB | 14,656 B | 3,680 B | 0.01 s |
+| 33 | 839,117 | 101,651 | 3.10 s | 1,249 MiB | 14,656 B | 3,680 B | 0.01 s |
+| 64 | 1,604,600 | 196,821 | 5.60 s | 2,326 MiB | 14,656 B | 3,680 B | 0.01 s |
+| 128 | 3,184,952 | 393,301 | 10.71 s | 4,548 MiB | 14,656 B | 3,680 B | 0.02 s |
+
+### Complexity: linear in N
+
+Every doubling of N roughly doubles gates, time and memory:
+
+| | **gates** | **time** | **memory** |
+|---|:--:|:--:|:--:|
+| 4 → 8 | ×1.80 | ×1.52 | ×1.72 |
+| 16 → 33 | ×2.00 | ×1.74 | ×1.94 |
+| 64 → 128 | ×1.98 | ×1.91 | ×1.95 |
+
+Least squares gives **24,693 gates per entry** with a +24,248 intercept.
+Per-entry cost *falls* slightly as N grows (30,755 → 24,882) because that
+fixed intercept — the final composite hash — amortises away. Asymptotically it
+is about 24.7k gates and 83 ms per entry.
+
+UltraHonk proving is theoretically O(N log N). Across a 32× range the log
+factor is invisible against the noise, so linear is the right model at these
+sizes.
+
+### Three things that do not grow
+
+**The proof is 14,656 bytes at every N.** So is the verification key, at
+3,680 B, and so is verification, at about 0.01 s and 7.7 MiB. That is the
+succinctness property: the verifier's cost does not depend on the size of the
+computation proved. Every bit of the growth lands on the prover.
+
+### What actually stops you: memory
+
+Peak RAM is **~35.5 MiB per entry**, and `bb`'s self-reported figure is
+honest — at N=33 it reports 1250.41 MiB against a measured maximum resident
+set of 1,280,416 kB, the same number.
+
+Extrapolating linearly from the measured range:
+
+| **entries** | **est. gates** | **est. prove** | **est. peak RAM** |
+|--:|--:|--:|--:|
+| 256 | 6.3 M | ~21 s | ~9 GB |
+| 512 | 12.6 M | ~43 s | ~18 GB |
+| 1,000 | 24.7 M | ~84 s | ~35 GB |
+| 5,000 | 123 M | ~7 min | ~177 GB |
+
+A real IMA log of a few thousand entries would need tens to hundreds of GB to
+prove, held all at once, on the party doing the redaction, every cycle. Time
+can be waited out; that memory is not a laptop, and at 5,000 entries not an
+ordinary server either. It is the binding constraint, not proving time.
+
+Standard techniques exist for this — proving in chunks and recursively
+aggregating, which is what production systems do for exactly this reason —
+but that is a different circuit, not a tuning knob.
+
+### Caveats on the method
+
+Each row is a **different circuit** compiled for that N, proved with a witness
+of exactly N real entries. Since the circuit pays for all N slots whatever
+`n_real` says, this is also the cost of a partly-padded log: the ceiling is
+what you pay for, not the fill.
+
+**The measured range is 4 → 128; everything past it is extrapolation.** The
+doubling ratios held tightly — ×1.95 on memory at the top end — so linear is
+well supported within that range. But 5,000 entries is **39× beyond anything
+actually run**, and a projection that far out should be read as an order of
+magnitude, not a figure.
+
+**Nothing here probed the ceiling.** The prover container was given whatever
+Docker Desktop allocates by default. At 128 entries it peaked at 4.5 GiB
+without trouble, and no attempt was made to find where the machine starts
+swapping or the prover is OOM-killed — those are the numbers that would
+actually decide feasibility on a given host. N = 256, at a projected ~9 GB, is
+where that would most likely start to show.
+
+---
+
 ## Trust Manager: splitting the round trip
 
 Two exchanges have both ends instrumented, so transport can be separated from
