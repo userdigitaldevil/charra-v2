@@ -697,11 +697,13 @@ CHARRA_RC get_attestation_results(int num_verifiers) {
             return CHARRA_RC_ERROR;
         }
     } else {
-        /* TEE mode: the RP proves itself per message instead, with an
-         * Attestation Document naming the code that produced this evidence
-         * (see rp_evidence.c). Nothing to do once per cycle. */
-        charra_log_info("[" LOG_NAME "] Trust mode is TEE: skipping the "
-                        "/qualify handshake.");
+        /* TEE and ZK both prove the RP another way and neither needs the
+         * handshake -- TEE with an Attestation Document per Verifier, ZK with
+         * one proof per cycle, both built in rp_evidence.c. Nothing to do
+         * once per cycle here. */
+        charra_log_info("[" LOG_NAME "] Trust mode is %s: skipping the "
+                        "/qualify handshake.",
+                (rp_trust_mode == CHARRA_TRUST_MODE_ZK) ? "ZK" : "TEE");
     }
     /* Last check before spawning threads: past this point a stop costs
      * however long the slowest thread's exchange takes. */
