@@ -22,6 +22,7 @@ from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.enum.shapes import MSO_SHAPE
 
 # ---------------------------------------------------------------- design system
 
@@ -189,9 +190,9 @@ def rawline(s, segments, top, height=0.78, ideal=17, label=None, tint=LIGHT):
     return size
 
 
-def note(s, runs, top=None, size=13.5):
+def note(s, runs, top=None, size=13.5, h=0.5):
     top = top if top is not None else BODY_BOTTOM - 0.05
-    tb = box(s, MARGIN, top, BODY_W, 0.5)
+    tb = box(s, MARGIN, top, BODY_W, h)
     tb.text_frame.word_wrap = True
     para(tb.text_frame, runs, size, first=True, space_after=0)
 
@@ -238,6 +239,95 @@ def wire(s, sender, receiver, endpoint, fields, left, top, width,
     return h
 
 
+def node(s, l, t, w, h, title, sub=None, fill=WHITE, edge=ACCENT, tsize=15):
+    """A labelled role box for an architecture or flow diagram."""
+    shp = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,
+                             Inches(l), Inches(t), Inches(w), Inches(h))
+    shp.fill.solid(); shp.fill.fore_color.rgb = fill
+    shp.line.color.rgb = edge; shp.line.width = Pt(1.75)
+    shp.shadow.inherit = False
+    tf = shp.text_frame
+    tf.word_wrap = True
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    para(tf, [(title, {"bold": True, "color": INK})], tsize, first=True,
+         align=PP_ALIGN.CENTER, space_after=0)
+    if sub:
+        para(tf, [(sub, {"color": MUTED})], 11, align=PP_ALIGN.CENTER, space_after=0)
+    return shp
+
+
+def blockarrow(s, y, x_from, x_to, colour=ACCENT, thick=True, both=False):
+    """A filled horizontal block arrow -- connectors were tried first and
+
+    silently render with no arrowhead (python-pptx has no <a:tailEnd> API),
+    so every message on the diagram becomes a plain rule. A filled autoshape
+    has no such gap and reads far better at projector scale.
+    """
+    lo, hi = min(x_from, x_to), max(x_from, x_to)
+    h = 0.30 if thick else 0.24
+    shape_type = MSO_SHAPE.LEFT_RIGHT_ARROW if both else (
+        MSO_SHAPE.RIGHT_ARROW if x_to > x_from else MSO_SHAPE.LEFT_ARROW)
+    shp = s.shapes.add_shape(shape_type, Inches(lo), Inches(y - h / 2.0),
+                             Inches(hi - lo), Inches(h))
+    shp.fill.solid(); shp.fill.fore_color.rgb = colour
+    shp.line.fill.background()
+    shp.shadow.inherit = False
+    try:
+        shp.adjustments[0] = 0.42
+        shp.adjustments[1] = 1.0 if not both else 0.5
+    except (IndexError, ValueError):
+        pass
+    return shp
+
+
+def vblockarrow(s, x, y_from, y_to, colour=ACCENT, thick=True, both=True):
+    """A filled vertical block arrow, for a lifeline drawn top to bottom."""
+    lo, hi = min(y_from, y_to), max(y_from, y_to)
+    w = 0.30 if thick else 0.24
+    shape_type = MSO_SHAPE.UP_DOWN_ARROW if both else (
+        MSO_SHAPE.DOWN_ARROW if y_to > y_from else MSO_SHAPE.UP_ARROW)
+    shp = s.shapes.add_shape(shape_type, Inches(x - w / 2.0), Inches(lo),
+                             Inches(w), Inches(hi - lo))
+    shp.fill.solid(); shp.fill.fore_color.rgb = colour
+    shp.line.fill.background()
+    shp.shadow.inherit = False
+    try:
+        shp.adjustments[0] = 0.42
+        shp.adjustments[1] = 1.0 if not both else 0.5
+    except (IndexError, ValueError):
+        pass
+    return shp
+
+
+def hexchange(s, y_c, x_from, x_to, top_runs=None, bot_runs=None, colour=ACCENT):
+    """A horizontal exchange: an arrow at vertical centre y_c, with an
+    optional label above and below it. Gaps are real box geometry -- a fixed
+    0.10in between the arrow's edge and the label's own box edge -- not an
+    estimate of how tall the text inside will render, so no font-metric
+    guess can make them touch.
+    """
+    lo, hi = min(x_from, x_to), max(x_from, x_to)
+    arrow_h, lab_h, gap = 0.30, 0.24, 0.10
+    if top_runs:
+        alabel(s, lo, y_c - arrow_h / 2.0 - gap - lab_h, hi - lo, top_runs,
+               size=12, h=lab_h)
+    blockarrow(s, y_c, x_from, x_to, colour=colour, thick=True)
+    if bot_runs:
+        alabel(s, lo, y_c + arrow_h / 2.0 + gap, hi - lo, bot_runs,
+               size=10.5, h=lab_h)
+
+
+def alabel(s, l, t, w, runs, size=12.5, align=PP_ALIGN.CENTER, h=0.5):
+    tb = box(s, l, t, w, h)
+    tf = tb.text_frame
+    tf.word_wrap = True
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    for m in ("margin_top", "margin_bottom", "margin_left", "margin_right"):
+        setattr(tf, m, 0)
+    para(tf, runs, size, first=True, align=align, space_after=0)
+    return tb
+
+
 def notes(s, text):
     s.notes_slide.notes_text_frame.text = text
 
@@ -269,6 +359,37 @@ table(s, [
     [[("Trust Manager", B)], "Tells the RP which Verifiers to use this cycle."],
 ], col_w=[3.1, 9.03], top=2.25, size=15, head_size=14, row_h=0.66, head_h=0.44)
 note(s, [("The RP is the privacy boundary. ", B), ("Everything sensitive stops there.", {})], top=5.55)
+
+# ------------------------------------------------------- 2b. architecture
+s = slide("System architecture",
+          "Four independent binaries, one per role, talking CoAP over UDP.")
+
+node(s, 5.17, 1.70, 3.0, 0.68, "Trust Manager", "resolves Verifier IDs -> {ip, port}")
+node(s, 0.60, 3.55, 2.85, 1.05, "Attester", "own TPM -- measures every file")
+node(s, 4.92, 3.42, 3.50, 1.32, "Relying Party", "own TPM -- redacts, then vouches",
+     fill=LIGHT, edge=RED, tsize=16)
+node(s, 9.88, 3.55, 2.85, 1.05, "Verifier  x N", "appraises log_r, votes YES/NO")
+
+vblockarrow(s, 6.67, 2.38, 3.42, colour=ACCENT)
+alabel(s, 6.90, 2.62, 3.6, [("discoverVerifiers", B)], size=12.5, align=PP_ALIGN.LEFT)
+
+hexchange(s, 4.07, 3.45, 4.92, [("getEvidence", B)],
+          [("Quote_a + log_a", {"font": MONO, "size": 9.5, "color": RED})], colour=RED)
+
+hexchange(s, 4.07, 8.42, 9.88, [("submitAndCollect", B)],
+          [("Quote_r + log_r", {"font": MONO, "size": 9.5, "color": GREEN})], colour=GREEN)
+
+note(s, [("log_a", {"font": MONO, "bold": True, "color": RED}),
+         (" stops at the Relying Party -- the privacy boundary. ", {"bold": True}),
+         ("log_r", {"font": MONO, "bold": True, "color": GREEN}),
+         (" replaces it going out.", {})], top=5.15, size=15)
+note(s, [("Transport: ", B), ("CoAP over UDP", {"font": MONO}),
+         (" between every pair. DTLS is optional and off by default -- ", {}),
+         ("DTLS_MODE=psk", {"font": MONO}), (" or ", {}), ("DTLS_MODE=rpk", {"font": MONO}),
+         (" turns it on for all four roles at once.", {})], top=5.75, size=13.5)
+note(s, [("Trust in the redaction itself is separate from transport trust: ", {}),
+         ("TRUST_MODE=qualify | tee | zk", {"font": MONO, "bold": True}),
+         (" picks how the RP proves it, covered later.", {})], top=6.30, size=13.5)
 
 # --------------------------------------------------------------- 3. problem
 s = slide("Classical remote attestation leaks")
@@ -375,46 +496,44 @@ rawline(s, [("SHA256( pathname ‖ salt )", ACCENT)], top=3.90, height=0.75, ide
 note(s, [("a fresh 32-byte random salt ", {}), ("per entry", B), (", never transmitted.", {})],
      top=4.95, size=17)
 
-# ------------------------------------------------- 9. log_a raw + breakdown
+# ------------------------------------------------- 9. one log entry, merged
 ELIDE = "…"
-s = slide("Example — one IMA log entry, as the Attester wrote it",
-          f"The whole line, unbroken. Long hex fields are elided in the middle ({ELIDE}) so it fits at this size.")
+s = slide("One IMA log entry, before and after",
+          f"Real output from a run. Long hex fields are elided in the middle ({ELIDE}) so each entry fits on one line.")
+
+alabel(s, MARGIN, 1.62, 4.0, [("log_a", {"font": MONO, "bold": True, "color": RED}),
+                              ("  — Attester → RP", {})], size=13, align=PP_ALIGN.LEFT, h=0.24)
 rawline(s, [("10  ", INK), (f"b82f9269{ELIDE}ad8bc104", INK), ("  ima-ng  ", INK),
             (f"sha256:61cee375{ELIDE}becfd541", INK), ("  ", INK),
             ("/usr/lib/systemd/systemd", RED)],
-        top=2.05, height=0.80, ideal=18)
-table(s, [
-    ["Field", "Value", "What it is"],
-    ["PCR", "10", "the register this entry extends"],
-    ["template_digest", f"b82f9269{ELIDE}ad8bc104", "SHA256 of the two fields below"],
-    ["template_name", "ima-ng", "the log format"],
-    ["file digest", f"sha256:61cee375{ELIDE}becfd541", "hash of the file's contents"],
-    [[("pathname", {"bold": True, "color": RED})],
-     [(f"/usr/lib/systemd/systemd", {"bold": True, "color": RED})],
-     [("where the file lives — sensitive", {"bold": True, "color": RED})]],
-], col_w=[2.7, 5.2, 4.23], top=3.25, size=13, head_size=13, row_h=0.52, mono_cols=(0, 1))
+        top=1.90, height=0.58, ideal=17)
 
-# ------------------------------------------------- 10. log_r raw + breakdown
-s = slide("The same entry, after redaction",
-          "One field changed on purpose; one changed as a consequence.")
+alabel(s, MARGIN, 2.58, 4.0, [("log_r", {"font": MONO, "bold": True, "color": GREEN}),
+                              ("  — RP → Verifier", {})], size=13, align=PP_ALIGN.LEFT, h=0.24)
 rawline(s, [("10  ", INK), (f"b0c30a6d{ELIDE}32fa7e6f", ACCENT), ("  ima-ng  ", INK),
             (f"sha256:61cee375{ELIDE}becfd541", INK), ("  ", INK),
             (f"4c28124b{ELIDE}0616dea8", GREEN)],
-        top=2.05, height=0.80, ideal=18)
-table(s, [
-    ["Field", "Value", "Versus log_a"],
-    ["PCR", "10", "identical"],
-    ["template_digest", f"b0c30a6d{ELIDE}32fa7e6f",
-     [("recomputed", {"bold": True, "color": ACCENT}), (" — it must equal SHA256(template_data)", {})]],
-    ["template_name", "ima-ng", "identical"],
-    ["file digest", f"sha256:61cee375{ELIDE}becfd541",
-     [("byte-identical", {"bold": True}), (" — kept on purpose", {})]],
-    [[("pathname", {"bold": True, "color": GREEN})],
-     [(f"4c28124b{ELIDE}0616dea8", {"bold": True, "color": GREEN})],
-     [("replaced", {"bold": True, "color": GREEN}), (" — always 32 bytes, whatever the path", {})]],
-], col_w=[2.7, 5.2, 4.23], top=3.25, size=13, head_size=13, row_h=0.52, mono_cols=(0, 1))
+        top=2.86, height=0.58, ideal=17)
 
-# ------------------------------------------------------ 11. why file digest
+table(s, [
+    ["Field", "log_a", "log_r", ""],
+    ["PCR", "10", "10", "unchanged"],
+    ["template_digest", f"b82f9269{ELIDE}ad8bc104", f"b0c30a6d{ELIDE}32fa7e6f",
+     [("recomputed", {"bold": True, "color": ACCENT})]],
+    ["file digest", f"sha256:61cee375{ELIDE}…", f"sha256:61cee375{ELIDE}…",
+     [("byte-identical", B), (" — kept on purpose", {})]],
+    [[("pathname", {"bold": True, "color": RED})],
+     [("/usr/lib/systemd/systemd", {"bold": True, "color": RED})],
+     [(f"4c28124b{ELIDE}0616dea8", {"bold": True, "color": GREEN})],
+     [("replaced", {"bold": True, "color": GREEN}), (" — SHA256(path ‖ salt), always 32 B", {})]],
+], col_w=[2.35, 3.35, 2.90, 3.53], top=3.68, size=13, head_size=13, row_h=0.46,
+   head_h=0.40, mono_cols=(1, 2))
+
+note(s, [("A fresh 32-byte salt per entry, never transmitted", B),
+         (" — so the same path redacts differently every time, and a Verifier can neither reverse it nor link repeated paths.", {})],
+     top=6.05, size=14)
+
+# ------------------------------------------------------ 11. why file digest# ------------------------------------------------------ 11. why file digest
 s = slide("Why the file digest is kept")
 bullets(s, [
     [("The content hash stays so the ", {}), ("Verifier's whitelist / blacklist check", B),
@@ -688,6 +807,83 @@ para(nb.text_frame, [("So the choice depends on Verifier count. ", {"bold": True
                      (" at one Verifier and 3.4 % at five, because it pays per Verifier. ", {}),
                      ("zk", {"font": MONO}), (" costs roughly 2× at any count, because it pays once per cycle.", {})],
      13, first=True, space_after=0)
+
+# ------------------------------------------ 21a. the /qualify action flow
+s = slide("The /qualify action flow",
+          "A redaction competence test. Time runs downward; the Verifier always moves first.")
+
+V_X, RP_X2 = 2.55, 10.15
+TOPQ, BOTQ = 2.02, 7.00
+for x, name, sub, edge in ((V_X, "Verifier", "sets the exam", ACCENT),
+                            (RP_X2, "Relying Party", "sits the exam", RED)):
+    node(s, x - 1.55, 1.44, 3.10, 0.50, name, sub, edge=edge, tsize=13)
+    vblockarrow(s, x, TOPQ, BOTQ, colour=RULE, thick=False, both=False)
+
+
+def qact(cursor_y, x, lines, edge=ACCENT, max_w=3.9, size=10.5):
+    """A self-action box, sized to however many explicit lines it is given.
+
+    Lines are authored short enough to fit rather than left to auto-wrap --
+    predictable height beats a clever fit() call here, since the box has to
+    be placed precisely against the arrows above and below it.
+    """
+    n = len(lines)
+    h = 0.34 if n == 1 else 0.20 + 0.30 * n
+    half_w = min(max_w / 2.0, x - MARGIN - 0.08, (MARGIN + BODY_W) - x - 0.08)
+    w = half_w * 2.0
+    bx = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x - half_w),
+                            Inches(cursor_y), Inches(w), Inches(h))
+    bx.fill.solid(); bx.fill.fore_color.rgb = WHITE
+    bx.line.color.rgb = edge; bx.line.width = Pt(1.25)
+    bx.shadow.inherit = False
+    tf = bx.text_frame; tf.word_wrap = True; tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    for m in ("margin_top", "margin_bottom", "margin_left", "margin_right"):
+        setattr(tf, m, Inches(0.04))
+    for i, line in enumerate(lines):
+        para(tf, line, size, first=(i == 0), align=PP_ALIGN.CENTER, space_after=1,
+             line=1.05)
+    return cursor_y + h
+
+
+def qmsg(cursor_y, x_from, x_to, runs, colour=ACCENT, dashed=False, size=10.5):
+    """Label, a real gap, then the arrow -- geometry is exact, not estimated:
+    the label sits in its own 0.24in box and the arrow starts a full 0.14in
+    below that box's bottom edge, so no line-height guess can make them
+    touch."""
+    lo, hi = min(x_from, x_to), max(x_from, x_to)
+    label_h, gap = 0.24, 0.14
+    alabel(s, lo, cursor_y, hi - lo, runs, size=size, h=label_h)
+    arrow_h = 0.24 if dashed else 0.30
+    arrow_cy = cursor_y + label_h + gap + arrow_h / 2.0
+    blockarrow(s, arrow_cy, x_from, x_to, colour=colour, thick=not dashed)
+    return arrow_cy + arrow_h / 2.0
+
+
+y = TOPQ
+y = qact(y, V_X, [[("generate a 40-entry synthetic log", {})],
+                  [("+  redact it — the golden answer", {"color": MUTED})]])
+y += 0.12
+y = qmsg(y, V_X, RP_X2, [("/qualify", B),
+                        ("   challenge_log (5210 B) + salt", {"font": MONO, "size": 9.5})])
+y += 0.10
+y = qact(y, RP_X2, [[("redact the same log, same salt", {})]], edge=RED)
+y += 0.12
+y = qact(y, RP_X2, [[("sign (redacted log ‖ salt) with AK_r", {})],
+                    [("— 210 ms, almost the whole cost", {"color": MUTED})]], edge=RED)
+y += 0.12
+y = qmsg(y, RP_X2, V_X, [("/qualify_submit", B),
+                        ("  redaction + rp_signature + rp_public_key",
+                         {"font": MONO, "size": 9.5})])
+y += 0.10
+y = qact(y, V_X, [[("verify the signature, then compare byte for byte", {})]])
+y += 0.12
+y = qmsg(y, V_X, RP_X2, [("qualified = 1", {"font": MONO}),
+                        ("   +   expires_at (+180 s)", {"color": MUTED})],
+        colour=GREEN, dashed=True)
+
+note(s, [("238 ms total", B), (" the first time; ", {}),
+         ("0.023 ms", B), (" to re-check a grant that still holds — three to four orders of magnitude cheaper.", {})],
+     top=y + 0.14, size=13, h=0.28)
 
 # ------------------------------------------- 21b. the /qualify handshake
 s = slide("The /qualify handshake",
