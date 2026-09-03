@@ -458,10 +458,11 @@ void coap_appraise_handler(struct coap_resource_t* resource,
             "second(s).",
             verify_signature_duration);
 
-    /* log_r content verification (self-consistency, PCR replay, file-hash
-     * policy) is NOT done here -- it is the RP App's own Step 2a
-     * local-verification gate, run against the log it receives from the
-     * Attester, before cleansing. See charra_event_log.h. */
+    /* Everything this Verifier checks about log_r's CONTENT is done further
+     * down, over the log actually submitted rather than on the RP's word:
+     * the PCR replay (item 4), entry self-consistency (item 5) and the
+     * file-hash policy (item 6). The RP runs its own equivalents in Step 2a,
+     * but against log_a before cleansing. See charra_event_log.h. */
 
     /* Unmarshal Quote_r's attestation data -- the nonce and the PCR digest
      * both live inside it, put there by the RP's TPM. */
@@ -584,11 +585,85 @@ void coap_appraise_handler(struct coap_resource_t* resource,
     charra_log_info("[" LOG_NAME "] Timing: replay log_r took %f second(s).",
             ((double)(clock() - start_replay)) / CLOCKS_PER_SEC);
 
+    /* Step 3a item 5: does each entry's template_digest actually hash its own
+     * template_data?
+     *
+     * Item 4 proves the template_digestS replay to the PCR Quote_r attests --
+     * but the replay EXTENDS those digests, it never recomputes them from
+     * template_data. So a replay that matches says nothing about whether the
+     * two halves of an entry agree, and without this check the file-content
+     * digests item 6 reads out of template_data are bound by nothing on this
+     * side: an RP could ship digests that replay correctly beside
+     * template_data naming files it never measured.
+     *
+     * With it, the chain closes -- Quote_r binds template_digest, and
+     * template_digest binds template_data, so the digests item 6 appraises
+     * are ones the RP's own TPM signed for.
+     *
+     * The RP runs the same check in its Step 2a, but against log_a before
+     * cleansing; this one reads the log actually submitted. */
+    clock_t start_selfcons = clock();
+    bool attestation_result_selfcons = false;
+    {
+        charra_log_info("[" LOG_NAME "] Verifying log_r entry "
+                        "self-consistency ...");
+        attestation_result_selfcons = charra_verify_log_entries_self_consistent(
+                res.log_r, res.log_r_len);
+        if (attestation_result_selfcons) {
+            charra_log_info("[" LOG_NAME "]     => every log_r entry hashes to "
+                            "its own template_digest!");
+        } else {
+            charra_log_error("[" LOG_NAME "]     => a log_r entry's "
+                             "template_digest does NOT hash its template_data!");
+        }
+    }
+    charra_log_info("[" LOG_NAME "] Timing: log_r self-consistency took %f "
+                    "second(s).",
+            ((double)(clock() - start_selfcons)) / CLOCKS_PER_SEC);
+
+    /* Step 3a item 6: is every file the Attester measured one this Verifier
+     * permits? The RP runs the same policy in its own Step 2a, but against
+     * log_a and before redacting -- so on its own that is the RP asserting
+     * it checked. This pass is independent: it reads the digests out of the
+     * log_r actually submitted, using this Verifier's own two files, and a
+     * dishonest RP therefore cannot admit evidence its own gate would have
+     * rejected.
+     *
+     * Redaction is what makes this possible without giving up privacy. The
+     * n-ng path field is replaced, but the d-ng file-content digest is
+     * copied through byte for byte (see charra_sdk.h), so a content-hash
+     * appraisal still works over log_r while the Verifier learns no path.
+     *
+     * Runs in every trust mode: the file-hash policy is about what the
+     * ATTESTER is running, which no proof of RP integrity speaks to. */
+    clock_t start_policy = clock();
+    bool attestation_result_policy = false;
+    {
+        charra_log_info("[" LOG_NAME "] Checking log_r's file hashes against "
+                        "the whitelist/blacklist policy ...");
+        attestation_result_policy = charra_verify_log_file_hashes_against_policy(
+                res.log_r, res.log_r_len, verifier_whitelist_hashes_path,
+                verifier_blacklist_hashes_path);
+        if (attestation_result_policy) {
+            charra_log_info("[" LOG_NAME "]     => every measured file is "
+                            "permitted by this Verifier's policy!");
+        } else {
+            charra_log_error("[" LOG_NAME "]     => log_r contains a file "
+                             "digest this Verifier does NOT permit!");
+        }
+    }
+    charra_log_info(
+            "[" LOG_NAME "] Timing: file-hash policy over log_r took %f "
+            "second(s).",
+            ((double)(clock() - start_policy)) / CLOCKS_PER_SEC);
+
     bool step_3a_passed = attestation_result_ekak_rp &&
                           attestation_result_qualified &&
                           attestation_result_signature_rp &&
                           attestation_result_nonce_rp &&
-                          attestation_result_pcr_rp;
+                          attestation_result_pcr_rp &&
+                          attestation_result_selfcons &&
+                          attestation_result_policy;
 
     /* The TEE arm of the RP-integrity gate. It cannot be evaluated with the
      * rest of Step 3a because REPORT_DATA binds to Quote_a's pcrDigest,
@@ -1045,6 +1120,16 @@ void coap_appraise_handler(struct coap_resource_t* resource,
             LOG_REASON("log_r vs Quote_r (Step 3a item 4): MISMATCH -- the "
                        "log sent does not replay to the PCR the quote "
                        "attests");
+        }
+        if (!attestation_result_selfcons) {
+            LOG_REASON("log_r self-consistency (Step 3a item 5): MISMATCH -- "
+                       "an entry's template_digest does not hash its own "
+                       "template_data, so its file digest is bound by nothing");
+        }
+        if (!attestation_result_policy) {
+            LOG_REASON("file-hash policy (Step 3a item 6): REJECTED -- log_r "
+                       "measures a file whose content digest this Verifier "
+                       "does not permit");
         }
         if (!attestation_result_ekak) {
             LOG_REASON("Attester signing key (Step 3b item 1): %s",

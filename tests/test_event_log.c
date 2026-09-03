@@ -456,6 +456,61 @@ static void test_unmatched_target_pcr(void) {
 
 /* --- main --------------------------------------------------------------- */
 
+/**
+ * @brief An entry is self-consistent when template_digest is exactly SHA256
+ * over its own template_data.
+ *
+ * This matters beyond well-formedness. The replay EXTENDS template_digest and
+ * never recomputes it, so a log can replay to the right PCR while its
+ * template_data says something else entirely -- and template_data is where
+ * both roles read the file-content digests they appraise against the
+ * whitelist/blacklist. Without this check those digests are bound by nothing.
+ */
+static void test_entry_self_consistency(void) {
+    printf("\nentry self-consistency\n");
+    test_log log;
+
+    const char* tdata = "sha256:deadbeef /usr/bin/bash";
+    uint8_t good[TPM2_SHA256_DIGEST_SIZE] = {0};
+    hash_sha256(strlen(tdata), (const uint8_t*)tdata, good);
+
+    log_reset(&log);
+    append_entry(&log, CHARRA_IMA_PCR_INDEX, good, sizeof(good), "ima-ng",
+            tdata);
+    check("a well-formed entry is self-consistent",
+            charra_verify_log_entries_self_consistent(
+                    log.buf, (uint32_t)log.len));
+
+    /* The case the check exists for: a digest that is not this entry's. */
+    uint8_t wrong[TPM2_SHA256_DIGEST_SIZE];
+    make_digest(0xff, wrong);
+    log_reset(&log);
+    append_entry(&log, CHARRA_IMA_PCR_INDEX, wrong, sizeof(wrong), "ima-ng",
+            tdata);
+    check("a template_digest that does not hash its template_data is rejected",
+            !charra_verify_log_entries_self_consistent(
+                    log.buf, (uint32_t)log.len));
+
+    /* Same template_digest, template_data altered underneath it -- the shape
+     * an RP would use to swap a blacklisted file's digest for a clean one. */
+    log_reset(&log);
+    append_entry(&log, CHARRA_IMA_PCR_INDEX, good, sizeof(good), "ima-ng",
+            "sha256:deadbeef /usr/bin/other");
+    check("template_data altered under a valid digest is rejected",
+            !charra_verify_log_entries_self_consistent(
+                    log.buf, (uint32_t)log.len));
+
+    /* Every entry must be checked, not just the first. */
+    log_reset(&log);
+    append_entry(&log, CHARRA_IMA_PCR_INDEX, good, sizeof(good), "ima-ng",
+            tdata);
+    append_entry(&log, CHARRA_IMA_PCR_INDEX, wrong, sizeof(wrong), "ima-ng",
+            tdata);
+    check("a bad entry after a good one is still caught",
+            !charra_verify_log_entries_self_consistent(
+                    log.buf, (uint32_t)log.len));
+}
+
 int main(void) {
     printf("IMA event log replay tests\n");
     printf("==========================\n");
@@ -474,6 +529,7 @@ int main(void) {
     test_legacy_ima_template_rejected();
     test_bad_arguments();
     test_unmatched_target_pcr();
+    test_entry_self_consistency();
 
     printf("\n==========================\n");
     printf("%u tests, %u failed\n", tests_run, tests_failed);

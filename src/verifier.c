@@ -67,6 +67,13 @@ charra_trust_mode verifier_trust_mode = CHARRA_TRUST_MODE_QUALIFY;
 /* Key the ZK redaction proof is checked against; --zk-verification-key. */
 char* zk_verification_key_path = CHARRA_ZK_VK_DEFAULT;
 
+/* File-hash policy for Step 3a item 5. Same defaults the RP uses, so an
+ * unflagged run appraises against the same two files both sides already
+ * ship -- the point is that the Verifier consults them ITSELF, over log_r,
+ * rather than trusting that the RP's own pass happened. */
+char* verifier_whitelist_hashes_path = "whitelist-hashes.txt";
+char* verifier_blacklist_hashes_path = "blacklist-hashes.txt";
+
 /* Key this Verifier signs its /appraise verdicts with (see
  * charra_verdict.h). Distinct from the DTLS RPK paths above even though it
  * is the same file today: DTLS is off, and conflating a transport key with
@@ -130,6 +137,8 @@ int main(int argc, char** argv) {
                     &qualification_validity_seconds,
             .trust_mode = &verifier_trust_mode,
             .zk_verification_key_path = &zk_verification_key_path,
+            .whitelist_hashes_path = &verifier_whitelist_hashes_path,
+            .blacklist_hashes_path = &verifier_blacklist_hashes_path,
         },
     };
 
@@ -225,6 +234,13 @@ int main(int argc, char** argv) {
                 "--zk-verification-key", zk_verification_key_path,
                 charra_cli_default_tag('7'));
     }
+    /* Printed in every mode: unlike the qualification and ZK settings
+     * above, the file-hash policy is consulted on every /appraise whatever
+     * the trust mode. */
+    charra_log_info("[" LOG_NAME "]   %-26s '%s'%s", "--whitelist-hashes",
+            verifier_whitelist_hashes_path, charra_cli_default_tag('8'));
+    charra_log_info("[" LOG_NAME "]   %-26s '%s'%s", "--blacklist-hashes",
+            verifier_blacklist_hashes_path, charra_cli_default_tag('9'));
     charra_log_info("[" LOG_NAME "]   %-26s '%s'", "timings",
             durations_file_path);
     charra_log_info("[" LOG_NAME "] Run with --help for every flag and its "

@@ -51,6 +51,17 @@ extern char* qualified_rps_file_path;
 /** Private key /appraise signs its verdict with. See charra_verdict.h. */
 extern char* verdict_signing_key_path;
 
+/** File-hash policy this Verifier appraises log_r against (Step 3a item 5).
+ * Shared by every Verifier instance, like qualified_rps above and unlike
+ * the per-port durations file: policy is a property of the deployment, not
+ * of one process. The RP runs the same check against log_a before
+ * redacting; this is an INDEPENDENT pass over the log actually sent, so a
+ * dishonest RP cannot pass an evidence set its own gate would have
+ * rejected. Possible only because redaction copies the d-ng file-content
+ * digest through byte for byte -- see charra_sdk.h. */
+extern char* verifier_whitelist_hashes_path;
+extern char* verifier_blacklist_hashes_path;
+
 /** Which proof of RP integrity this Verifier requires: the /qualify grant
  * (the default), a TEE Attestation Document, or a zero-knowledge proof that
  * log_r's cleaned paths commit to paths the Attester really measured. Must

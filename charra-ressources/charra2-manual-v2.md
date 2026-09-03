@@ -234,6 +234,10 @@ To complete a full round of remote attestation:
         --port=PORT                     listen port (default 31415)
         --trust-mode=qualify|tee|zk     what it requires of the RP (default qualify)
         --zk-verification-key=PATH      key for --trust-mode=zk (default zk/vk)
+        --whitelist-hashes=PATH         file digests it permits in log_r
+                                        (default whitelist-hashes.txt)
+        --blacklist-hashes=PATH         file digests it rejects in log_r
+                                        (default blacklist-hashes.txt)
         --qualification-validity=SECONDS how long a passed /qualify lasts (default 180)
         -l, --log-level=LEVEL           TRACE..FATAL (default INFO)
         -c, --coap-log-level=LEVEL      libcoap's own level

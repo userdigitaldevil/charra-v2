@@ -85,6 +85,13 @@ typedef struct {
     /** Verification key for the ZK redaction proof. Must match the circuit
      * the RP proves with; see --trust-mode=zk. */
     char** zk_verification_key_path;
+    /** File-hash policy the Verifier appraises log_r against. The RP runs
+     * the same check against log_a before redacting; this is the Verifier's
+     * own, independent pass over the log it was actually sent. Possible
+     * only because redaction preserves the d-ng file-content digest byte
+     * for byte -- see charra_sdk.h. */
+    char** whitelist_hashes_path;
+    char** blacklist_hashes_path;
 } cli_config_verifier;
 
 /**

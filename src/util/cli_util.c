@@ -47,7 +47,9 @@ static const struct option verifier_options[] = {
         {"port", required_argument, 0, 'b'},
         {"qualification-validity", required_argument, 0, '5'},
         {"trust-mode", required_argument, 0, '6'},
-        {"zk-verification-key", required_argument, 0, '7'}, {0}};
+        {"zk-verification-key", required_argument, 0, '7'},
+        {"whitelist-hashes", required_argument, 0, '8'},
+        {"blacklist-hashes", required_argument, 0, '9'}, {0}};
 
 static const struct option attester_options[] = {
         {"verbose", no_argument, 0, 'v'},
@@ -185,6 +187,14 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
                        "must use the SAME mode -- unlike DTLS, a mismatch is "
                        "reported rather than timing out. run_daemon.sh's "
                        "TRUST_MODE sets both at once.\n");
+                printf("     --whitelist-hashes=PATH: File-content digests "
+                       "this Verifier permits in log_r. Default "
+                       "'whitelist-hashes.txt'. Enforced default-deny once "
+                       "it has at least one entry; an empty file falls back "
+                       "to allow-by-default.\n");
+                printf("     --blacklist-hashes=PATH: File-content digests "
+                       "this Verifier rejects in log_r. Default "
+                       "'blacklist-hashes.txt'. Always enforced.\n");
                 printf("     --zk-verification-key=PATH: Key the redaction "
                        "proof is checked against, for --trust-mode=zk. "
                        "Default '%s'. It must be the key for the exact "
@@ -382,6 +392,30 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
                         log_name, optarg);
                 return -1;
             }
+            continue;
+        }
+
+        if (caller == VERIFIER &&
+                (identifier == '8' || identifier == '9')) {
+            /* Both lists are plain paths, handled identically -- only which
+             * pointer they land in differs. */
+            const bool is_white = (identifier == '8');
+            char** slot = is_white
+                    ? variables->verifier_config.whitelist_hashes_path
+                    : variables->verifier_config.blacklist_hashes_path;
+            const char* flag =
+                    is_white ? "--whitelist-hashes" : "--blacklist-hashes";
+            if (slot == NULL) {
+                charra_log_error(
+                        "[%s] %s is not wired up in this binary.",
+                        log_name, flag);
+                return -1;
+            }
+            char* p = charra_cli_dup_arg(log_name, flag, optarg);
+            if (p == NULL) {
+                return -1;
+            }
+            *slot = p;
             continue;
         }
 
