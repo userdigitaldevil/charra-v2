@@ -197,6 +197,33 @@ if [ -n "${REBUILD-}" ]; then
     RECOMPILE="$REBUILD"
 fi
 
+# Three different failures used to report as "the image is missing", which
+# sent you off to run a 20-minute build that was never the problem. Separate
+# them: no client, no daemon, then genuinely no image.
+if ! command -v docker >/dev/null 2>&1; then
+    echo "ERROR: 'docker' is not on your PATH." >&2
+    echo >&2
+    echo "       On macOS the client lives inside the app bundle:" >&2
+    echo >&2
+    echo "           export PATH=\"\$PATH:/Applications/Docker.app/Contents/Resources/bin\"" >&2
+    echo >&2
+    echo "       Add that line to ~/.zshrc to make it stick. If" >&2
+    echo "       /usr/local/bin/docker exists but is a dangling symlink into" >&2
+    echo "       /Volumes/Docker, Docker was launched from the installer disk" >&2
+    echo "       image once; the PATH line above sidesteps it." >&2
+    exit 1
+fi
+
+if ! docker info >/dev/null 2>&1; then
+    echo "ERROR: the Docker daemon is not running (the client is installed)." >&2
+    echo >&2
+    echo "           open -a Docker        # then wait for it to finish starting" >&2
+    echo >&2
+    echo "       Your images are not lost -- they live in the Docker VM's disk" >&2
+    echo "       and come back with it." >&2
+    exit 1
+fi
+
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     echo "ERROR: image '$IMAGE' does not exist locally." >&2
     echo "       These scripts run in it, they do not build it. Build once:" >&2

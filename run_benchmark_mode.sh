@@ -118,6 +118,24 @@ IMAGE="${IMAGE:-fraunhofer-sit/charra-dev-env:1.9.0}"
 # Without this check docker would try to PULL a name that exists only
 # locally, and fail with "pull access denied", which reads as an
 # authentication problem rather than a missing build.
+# Separate the three ways this can fail, so a missing client or a stopped
+# daemon does not read as a missing image and send you into a long rebuild.
+if ! command -v docker >/dev/null 2>&1; then
+    echo "ERROR: 'docker' is not on your PATH." >&2
+    echo >&2
+    echo "           export PATH=\"\$PATH:/Applications/Docker.app/Contents/Resources/bin\"" >&2
+    echo >&2
+    echo "       Add that to ~/.zshrc to make it stick." >&2
+    exit 1
+fi
+
+if ! docker info >/dev/null 2>&1; then
+    echo "ERROR: the Docker daemon is not running (the client is installed)." >&2
+    echo >&2
+    echo "           open -a Docker        # then wait for it to finish starting" >&2
+    exit 1
+fi
+
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     echo "ERROR: image '$IMAGE' does not exist locally." >&2
     echo "       These scripts run in it, they do not build it. Build once:" >&2
