@@ -77,9 +77,13 @@ bool use_ima_event_log = false;
 char* ima_event_log_path = "/sys/kernel/security/ima/binary_runtime_measurements";
 bool use_ima_test_log = true;
 char* ima_test_log_path = "ima_test_logs.txt";  // path to the IMA test log file for testing purposes
+/* Where log_r is written after redaction, in the same ASCII form as
+ * ima_test_log_path above, so the two can be diffed column for column.
+ * Rewritten every cycle; empty string disables it. */
+char* redacted_log_out_path = "redacted_ima_logs.txt";
 
 /* RP appraisal config */
-char* whitelist_hashes_path = "whitelist-hashes.txt";
+char* whitelist_hashes_path = "NODE_evidence_baseline.json";
 char* blacklist_hashes_path = "blacklist-hashes.txt";
 
 /* --- privacy-cleaning state, produced once per attestation -------------- */

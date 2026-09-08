@@ -18,6 +18,7 @@
 #include "../common/charra_macro.h"
 #include "../core/charra_trusted_keys.h"
 #include "../core/charra_event_log.h"
+#include "../core/charra_ima_ascii.h"
 #include "../core/charra_marshaling.h"
 #include "../core/charra_sdk.h"
 #include "../core/TEE.h"
@@ -270,10 +271,12 @@ CHARRA_RC charra_rp_prepare_evidence(void) {
     if (want_zk) {
         charra_r = charra_sdk_redact_ima_log_with_witness(
                 last_response.event_log, last_response.event_log_len,
-                &rp_log_r, &rp_log_r_len, &zk_witness);
+                CHARRA_SDK_DEFAULT_LABEL, &rp_log_r, &rp_log_r_len,
+                &zk_witness);
     } else {
         charra_r = charra_sdk_redact_ima_log(last_response.event_log,
-                last_response.event_log_len, NULL, &rp_log_r, &rp_log_r_len);
+                last_response.event_log_len, NULL, CHARRA_SDK_DEFAULT_LABEL,
+                &rp_log_r, &rp_log_r_len);
     }
     clock_gettime(CLOCK_MONOTONIC, &redact_end);
     if (charra_r != CHARRA_RC_SUCCESS) {
@@ -285,6 +288,45 @@ CHARRA_RC charra_rp_prepare_evidence(void) {
     charra_log_info("[" LOG_NAME "] log_r is %u bytes (raw log was %u), "
                     "redaction took %.3fs.",
             rp_log_r_len, last_response.event_log_len, redact_duration);
+
+    /* Write log_r out in the same ASCII form the Attester's own log uses, so
+     * what the Verifiers actually receive can be read directly and diffed
+     * against ima_test_log_path -- redaction moves the path column and the
+     * template_digest covering it, and nothing else. Rewritten every cycle.
+     *
+     * Never fatal: this is an observation point, not part of the attestation.
+     * A bad path or a full disk must not fail a cycle that is otherwise
+     * sound, so every failure here is a warning and the cycle continues. */
+    if (redacted_log_out_path != NULL && redacted_log_out_path[0] != '\0') {
+        char* log_r_text = NULL;
+        size_t log_r_text_len = 0;
+        if (charra_ima_ascii_emit(rp_log_r, rp_log_r_len, &log_r_text,
+                    &log_r_text_len) != CHARRA_RC_SUCCESS) {
+            charra_log_warn("[" LOG_NAME "] Could not render log_r as ASCII; "
+                            "'%s' not written.",
+                    redacted_log_out_path);
+        } else {
+            FILE* log_r_file = fopen(redacted_log_out_path, "w");
+            if (log_r_file == NULL) {
+                charra_log_warn("[" LOG_NAME "] Could not open '%s' for "
+                                "writing; log_r not saved.",
+                        redacted_log_out_path);
+            } else {
+                if (fwrite(log_r_text, 1, log_r_text_len, log_r_file) !=
+                        log_r_text_len) {
+                    charra_log_warn("[" LOG_NAME "] Short write to '%s'; the "
+                                    "saved log_r is incomplete.",
+                            redacted_log_out_path);
+                } else {
+                    charra_log_info("[" LOG_NAME "] Wrote log_r to '%s' "
+                                    "(%zu bytes, ASCII).",
+                            redacted_log_out_path, log_r_text_len);
+                }
+                fclose(log_r_file);
+            }
+            free(log_r_text);
+        }
+    }
 
     /* A software replay, kept only for the log line below: it predicts the
      * value the TPM is about to arrive at, which is what makes a Verifier's

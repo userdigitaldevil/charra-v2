@@ -1,0 +1,853 @@
+{
+  "header": {
+    "copyright": "Copyright (c) 2018 Huawei, Inc. and/or its affiliates. All rights reserved.",
+    "timestamp": "",
+    "version": "1.1"
+  },
+  "products": [
+    {
+      "productName": [
+        "BTS3900",
+        "BTS5900"
+      ],
+      "version": "BTS3900_5900 V100R022C10SPC050",
+      "ccFiles": [
+        {
+          "fileName": "libxt_tcp.so",
+          "fileType": "IMA",
+          "sha256": "9c89d11f017e2d7c712df2db923952555dd741c0353b006a34fb5d2c318d906c"
+        },
+        {
+          "fileName": "bash.2nd.sh",
+          "fileType": "IMA",
+          "sha256": "7496851b3f3630e2a01bf2d9edb99f5adf7e841343c21daa4c80565c8a93bec9"
+        },
+        {
+          "fileName": "comsafetools_ILP32",
+          "fileType": "IMA",
+          "sha256": "821687b4a04f55c5c4604227b9f93a5950286beb37c838a3d348f194a3f88f39"
+        },
+        {
+          "fileName": "libsym_ILP32.so",
+          "fileType": "IMA",
+          "sha256": "cdbf28e5f6a99449e8762472ae9de7959fe6f4c690a9c6e4e00030e94f27cbb0"
+        },
+        {
+          "fileName": "sremng.out",
+          "fileType": "IMA",
+          "sha256": "56ed02f9243176363eca937c70fe6d410121c4dd71afae8a4320d2ba3c3b29db"
+        },
+        {
+          "fileName": "libpatchrtosarm32a72ilp32bellvm.so",
+          "fileType": "IMA",
+          "sha256": "d2f68780ca793bdf6521019fcfba7f5c8656daeb892702d4a0aacc5cfc2b577d"
+        },
+        {
+          "fileName": "ubbp_l2bbmng.so",
+          "fileType": "IMA",
+          "sha256": "377d62a0fb455ae035a60eab16bb7350e0376c921a4bfb13a8f2500f00ed42a8"
+        },
+        {
+          "fileName": "libtran_center_adp.so",
+          "fileType": "IMA",
+          "sha256": "d368651d3defe5a1474dd04ba6954b1f4cad65c6b59d4d17d00a53c0153a54f2"
+        },
+        {
+          "fileName": "libtcp_app_weak.so",
+          "fileType": "IMA",
+          "sha256": "4aad473eda1f2febcf9a53e4a4317a2eee1bb274de35d29ec5fddfec8b795d7b"
+        },
+        {
+          "fileName": "libftpcrmtagtrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "c569096c62a89cce3f0a98d1ec8f7a6a594fc61e3783ff3d4fd9ceb532b35342"
+        },
+        {
+          "fileName": "zic",
+          "fileType": "IMA",
+          "sha256": "3261ea59812c07695166c3afbca03b519bbccb9304bc323fd0808b972649a6d1"
+        },
+        {
+          "fileName": "libom_nsa_ccommrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "b57b9bef930e7422ce0d33594e41590eb68b6c90ce536dd2cb3cfb18d28b4579"
+        },
+        {
+          "fileName": "libom_nsa_nodeMArtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "3698116a702d0beda20eb526bf829d7cea9a0e05fd155d6594e6c11e35246469"
+        },
+        {
+          "fileName": "semodule",
+          "fileType": "IMA",
+          "sha256": "5d81605522c071cc614bf0675495172a7b1c1e30e26aa65b0be4829845360b20"
+        },
+        {
+          "fileName": "libsemanage.so.2",
+          "fileType": "IMA",
+          "sha256": "c95eec4cbf0451c1f7f89d3625a40bd905775bd9279450a6a16670d59dec2188"
+        },
+        {
+          "fileName": "libbz2.so.1.0.6",
+          "fileType": "IMA",
+          "sha256": "6d6ab05303ea9b667e9b0f04e812fbc2bb67e0e4c870336084959e8edd066afc"
+        },
+        {
+          "fileName": "pp",
+          "fileType": "IMA",
+          "sha256": "3926c6b14198aa4289bea6747aa1a7e90a376272697333921d8ad9df2d2ae1b4"
+        },
+        {
+          "fileName": "secbox",
+          "fileType": "IMA",
+          "sha256": "68afc9506f25ee7704381f99ce862d026ed5964cdcbfaa95e8f16ce62bc47eb7"
+        },
+        {
+          "fileName": "FRAMEWORK.out",
+          "fileType": "IMA",
+          "sha256": "183f2beb47a8f0c83c8926be15e77fc91e490749764bee354ae3f25bc42e5a61"
+        },
+        {
+          "fileName": "libclkrblipclkrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "fbe74ee08bb5c975343e09951b1e6863ece617c67dd713a74012c10e455c4532"
+        },
+        {
+          "fileName": "libclkrblsyncethrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "e747223df8ef2aad83275409f11d4077ee41a86c8013a76b31029aedc69c7513"
+        },
+        {
+          "fileName": "libseml_itfrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "2caee0e40edcb0db9387818a80ae6fa44cfbaa154d17183d1b69c3d97374fbb3"
+        },
+        {
+          "fileName": "libsnmp_nmsrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "662e2ca58c586106a6568a6b81ffb07096368aea6b4b8edae1c53e7dd12f3d78"
+        },
+        {
+          "fileName": "libsnmp_adaptrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "f80e0ea04f0ad8d78a4ad40d0a3c4d28c61f95fdf3ff1e5f6b134fa969a12e93"
+        },
+        {
+          "fileName": "libom_snmprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "c656062a84642aed1124c952a4d6f86e74c5a2c951bc61925b623cf752f5b05f"
+        },
+        {
+          "fileName": "libcov_mrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "948ce86bd785f29d094ed41c358d3fa8ae82fd01c1010f623c9458379c4d9cfa"
+        },
+        {
+          "fileName": "libsctp.so",
+          "fileType": "IMA",
+          "sha256": "e50ab5fb68561434f656cf91ea61089ac5f156d0d554289a1ef2b4a415eedf21"
+        },
+        {
+          "fileName": "libipsi_sftp.so",
+          "fileType": "IMA",
+          "sha256": "1a051d2330a4d149eefaf3e949e04c920a23f1af35770c455263039a3fb96b1e"
+        },
+        {
+          "fileName": "libipsi_sftposal.so",
+          "fileType": "IMA",
+          "sha256": "9752826bec3ff487d90ac3adb2a4fe3e1b2843f1dcb1774f1f466e870df93ac0"
+        },
+        {
+          "fileName": "libbspp1.so",
+          "fileType": "IMA",
+          "sha256": "5a1e0129bd24132bf63ca399678a3edbdc4b35ba3f6f71885afc3789c4adf812"
+        },
+        {
+          "fileName": "libumpthclksp.so",
+          "fileType": "IMA",
+          "sha256": "e9958591446cc7665bd3f2e7df1f6eda6b988b4e40938eba18b4f26d3a5f3d03"
+        },
+        {
+          "fileName": "libtran_trpinf_itf.so",
+          "fileType": "IMA",
+          "sha256": "bbb15cb36bb02a4cb46241a0d022fee684fd32845cdeb92daa22c9c194cb363e"
+        },
+        {
+          "fileName": "libtran_sdk_itf.so",
+          "fileType": "IMA",
+          "sha256": "0a9fcda25b7b9ee165fa0f367f279b5e0956aa5d2efe5bf7e8c98dc7565f8017"
+        },
+        {
+          "fileName": "libtran_dpf_itf.so",
+          "fileType": "IMA",
+          "sha256": "1ff646a88bb19f4a9aa6b2dc2dbc345e3a057c7bebd93b074db76a903e017040"
+        },
+        {
+          "fileName": "libtran_dpf_itf_sc.so",
+          "fileType": "IMA",
+          "sha256": "8287a3a8ad0d80c9329df568320a1b6518363db5071b7e2a8feecacbb0e99894"
+        },
+        {
+          "fileName": "libtran_tpi_itf.so",
+          "fileType": "IMA",
+          "sha256": "e9a498142d67703a7813246da6777d6dc67578cab25b699cbb590ef880fd0924"
+        },
+        {
+          "fileName": "libvisp_common.so",
+          "fileType": "IMA",
+          "sha256": "44fa589460bf661cfda8f2b102436b7962740b3f63a17c7e5436afe3e753793d"
+        },
+        {
+          "fileName": "libvisp_common_sc.so",
+          "fileType": "IMA",
+          "sha256": "6a559c5631612d4fa015e3fbc5a4c3fa0d3828b001c1f07fa085e48404b034cc"
+        },
+        {
+          "fileName": "libvisp_macsec_mini.so",
+          "fileType": "IMA",
+          "sha256": "82725fb9c9b28f85cde39366f164e04e40f57817492abe3b69555780802b0d9e"
+        },
+        {
+          "fileName": "libtran_ctl.so",
+          "fileType": "IMA",
+          "sha256": "1abd38d6574db1cd840746312248e8f57c9ec8d1e0449d3986d0d42aa1fd5c81"
+        },
+        {
+          "fileName": "libtran_ctl_sc.so",
+          "fileType": "IMA",
+          "sha256": "7fd7f7acf0204cb547c2b0c3d13fb351a5646bee507e8fe551d56ef54a2c80f2"
+        },
+        {
+          "fileName": "sefcontext_compile",
+          "fileType": "IMA",
+          "sha256": "a24c30a3c99b75bdeac37da336e44a9e40cf51bb64fc964b0889a92242018c5a"
+        },
+        {
+          "fileName": "load_policy",
+          "fileType": "IMA",
+          "sha256": "3904a8df93a50736b0cc90e43f4855598301ed0c6210a0ba5c603f1ac0004a34"
+        },
+        {
+          "fileName": "seceye-agent",
+          "fileType": "IMA",
+          "sha256": "35f0d70ba8b36c8638d4b035116465302f730c4945700155be2009728bd9cfb8"
+        },
+        {
+          "fileName": "libneframe_agent.so",
+          "fileType": "IMA",
+          "sha256": "e200e5ca98cdb36ea2a4df8260e2dbc691cba0919510b5e67aa93afa12b46c57"
+        },
+        {
+          "fileName": "libnecommon.so",
+          "fileType": "IMA",
+          "sha256": "2a8bc9dbf61d6409c5101ae3974b75da60f44bc30f7aa0d70420d09cd55fa495"
+        },
+        {
+          "fileName": "libdocuejson.so",
+          "fileType": "IMA",
+          "sha256": "4d08fc9924856d6db5bb9574638616aecc5d6725cba6dd1d6edcb2e1c59d0dd8"
+        },
+        {
+          "fileName": "libhisec_hostsec.so",
+          "fileType": "IMA",
+          "sha256": "6c19c2c346570ccf9e35b54f8ae733511d52413b9b8c652b5a50305e6ead90c8"
+        },
+        {
+          "fileName": "libhisec_hostsec-common.so",
+          "fileType": "IMA",
+          "sha256": "7506ddf1d505a9ffb2cacdb3b06d9631ae489e51024631a79fdc065eaf300a13"
+        },
+        {
+          "fileName": "libhisec_detect-privilege-escalation.so",
+          "fileType": "IMA",
+          "sha256": "1431b9cff1514bce5f004ff3755e2f05a97227df12c9a0216919b2550877d33c"
+        },
+        {
+          "fileName": "libhisec_detect-rootkit.so",
+          "fileType": "IMA",
+          "sha256": "9f030d6df068ba48de40e191af8c0b8ab2d6b1ea3633a36077d6d69cfa0e8479"
+        },
+        {
+          "fileName": "libhisec_detect-shell.so",
+          "fileType": "IMA",
+          "sha256": "f0c813d03ef4b776e2f396a60ba32dff8fc454edc441a11243cbadea46ca7ae8"
+        },
+        {
+          "fileName": "libhisec_detect-shell-cmd.so",
+          "fileType": "IMA",
+          "sha256": "e0f761f29773aad1e8023331e2c7b0cf2d7a084bf427f194792e834da13f74ba"
+        },
+        {
+          "fileName": "libhisec_detect-user.so",
+          "fileType": "IMA",
+          "sha256": "8cbf5fc781fb80292c147e533f09ba584b138b9ecf56334502cbc72bc3dba546"
+        },
+        {
+          "fileName": "libhisec_hkids.so",
+          "fileType": "IMA",
+          "sha256": "2c21e3489bf0af324acfae2be3a5c617f5310e63b03ec3d7d3e327c38316017f"
+        },
+        {
+          "fileName": "libhisec_monitor-file.so",
+          "fileType": "IMA",
+          "sha256": "92ea2732a50047a965c4a42031ab3ae179e4a4573a64f484bd8d591e933e519f"
+        },
+        {
+          "fileName": "libmarrertoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "b752cfdb862952e06ecafd93b1f6b8bbbb1a2df21591cc1eb119c0cc594efa93"
+        },
+        {
+          "fileName": "libswm_lagentexrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "f93abae43905f2ca06702ee6fb4d9b0546a5caa48065199c10c04af1719a387a"
+        },
+        {
+          "fileName": "libcfgmprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "0b2b85e7855e3f51171f534b3d9235ce1f68a92b6da7c74b142d396cb6cae4e2"
+        },
+        {
+          "fileName": "libom_mpMArtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "e186a00315a6b878e6302246da812fb7c4983186e104dca1f80c8e9b1f478e80"
+        },
+        {
+          "fileName": "libom_nsa_mpMArtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "3231773e074140a5d3eba2acc99688b960c95943ef510039bfb96c8bb960cebc"
+        },
+        {
+          "fileName": "FRAMEWORK.out",
+          "fileType": "IMA",
+          "sha256": "3b511831ee533e89e69450e3a5465b9bff81474f3a298c7b45298276b1894bc5"
+        },
+        {
+          "fileName": "libswm_lagentexrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "f93abae43905f2ca06702ee6fb4d9b0546a5caa48065199c10c04af1719a387a"
+        },
+        {
+          "fileName": "weblmt_server.so",
+          "fileType": "IMA",
+          "sha256": "a40ca105cbe88cd1be1df5862411fbaf38eb272d3bddb944c2a26718e302ae7c"
+        },
+        {
+          "fileName": "libtrrb_vispadptrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "4fb23090a7d4194dc152ca38333bceb8a9462509447dd7c7154760a0084ff672"
+        },
+        {
+          "fileName": "libctimeitfrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "edc8772b94f9b7f6d822edc88249c87c8e81505780d108b4a22dea177d697f7d"
+        },
+        {
+          "fileName": "libctime_weakalgrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "c40469042fd3bde2cae40b586473e7172093702a9a0ba7bd99f58bf1a23af5cf"
+        },
+        {
+          "fileName": "libftpcrmtrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "26a7bc4f5cdba4930ff67ee10a3aae2d2cc05995f5aa6b0ecb6376d95a05a097"
+        },
+        {
+          "fileName": "libidcs_agentrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "932df187a4ec47297a2ab63b06b9bee9f1f454b57c9c9fb26ae3d26e5b1d2d30"
+        },
+        {
+          "fileName": "libseem_om_local_iseemrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "0a32c29b398329a239d27521f95bd30c8b6c094de7cab55cb689cebf98b899bf"
+        },
+        {
+          "fileName": "libtrrbtpml_ip_5grtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "88a82e6c39bfe85ee44cc1f8d65a37ae642968fb6dc877a437202dac195d2665"
+        },
+        {
+          "fileName": "libtrrbe1t1_lrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "24aa6155fa600cfb73adeea501ff4a922d41756c9b0baf5282583a23fd9d0d93"
+        },
+        {
+          "fileName": "libcert_alg_nonsa_itfrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "fb1b460416901b5b44269deedc32ee3f117eb836f3f207b59a226c3bdae30b79"
+        },
+        {
+          "fileName": "libtrrbtpml_certrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "b6bcda27b4a821bd63f640b5e211a5191f7cb035fb7f19004b2b82f7d88a76a4"
+        },
+        {
+          "fileName": "libtrrbtrm_l_5grtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "8f794e9685683e4b9d546be5692cc269a9c407aaa9f06ed04893770880e19e17"
+        },
+        {
+          "fileName": "libtrrbsctp_localdcrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "8660211533bc8a39736b95f3ee7cd706c133d1db825415b84dcfed4d807f9935"
+        },
+        {
+          "fileName": "libtrrbtpml_ipsecrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "b567c4a9edc5ca0fb4d6b5e203881383a3b57d79df26e08a4a5f19a98e01b108"
+        },
+        {
+          "fileName": "libtrrbtpml_ipsec_nsartoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "7722f08cf88f556fe0269e475b2b1d17a3f878debbbd7d757f12e7a755bfeeb5"
+        },
+        {
+          "fileName": "libtrrbtrconn_lrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "8c8b1c22b1b567c4a038f9a90a65165210fb825bd8fdfa08eb930fafa73e9fd9"
+        },
+        {
+          "fileName": "libom_lSCMrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "d63ccd0703c6d3d01ca77bdccc58d300d8103ce443a327e91af7a4d9c700d9b4"
+        },
+        {
+          "fileName": "liblefdrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "9da3a5c9f78a264e6442c8fc5661717c6e0e193b535c495f66a2dff8858521de"
+        },
+        {
+          "fileName": "libmaftmexrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "3d7dc6d8dd8a9701467ecf0a3833043006df9de6d1e7cca4d5e31d87fa56d98b"
+        },
+        {
+          "fileName": "libom.so",
+          "fileType": "IMA",
+          "sha256": "33fe4999fc1dcf1a68f7f5ea08402bd0c9f4a0f8af398c8282302da2be4325bc"
+        },
+        {
+          "fileName": "libmacfgrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "6cfb3d4a10925c492f41ae5a2e5d4ee30a34992e5e84d53caab60b3c4efc2104"
+        },
+        {
+          "fileName": "GRAT_service.so",
+          "fileType": "IMA",
+          "sha256": "78c30e559ba1727eeb9964d0356a9f9a72d8e2b0deb8f32441815f6f1d42d315"
+        },
+        {
+          "fileName": "lextcommdll.so",
+          "fileType": "IMA",
+          "sha256": "c2edd0fda42bbfc0f955e6a0beb3f002db7e46612443fc7cc6eedfd2ca6de587"
+        },
+        {
+          "fileName": "GRAT_liblinux_lapd_cbb.so",
+          "fileType": "IMA",
+          "sha256": "377b391feb764d632b5bd62e6ccb132e5953e3c8d43f5da087ebb1c153ff9330"
+        },
+        {
+          "fileName": "libom_lSCMrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "d63ccd0703c6d3d01ca77bdccc58d300d8103ce443a327e91af7a4d9c700d9b4"
+        },
+        {
+          "fileName": "liblefdrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "9da3a5c9f78a264e6442c8fc5661717c6e0e193b535c495f66a2dff8858521de"
+        },
+        {
+          "fileName": "libmaftmexrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "3d7dc6d8dd8a9701467ecf0a3833043006df9de6d1e7cca4d5e31d87fa56d98b"
+        },
+        {
+          "fileName": "libom.so",
+          "fileType": "IMA",
+          "sha256": "33fe4999fc1dcf1a68f7f5ea08402bd0c9f4a0f8af398c8282302da2be4325bc"
+        },
+        {
+          "fileName": "libmacfgrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "6cfb3d4a10925c492f41ae5a2e5d4ee30a34992e5e84d53caab60b3c4efc2104"
+        },
+        {
+          "fileName": "URAT_mptg_bs.so",
+          "fileType": "IMA",
+          "sha256": "257fae7bd787e3b6be8653faea600355bbfe4baefa7324bbcb24b7d59f728181"
+        },
+        {
+          "fileName": "URAT_ocl_bs.so",
+          "fileType": "IMA",
+          "sha256": "46e1bd1f6b709caf0fd359c6cea5e1d76eb54173fd67e6d13505b73a6323ba58"
+        },
+        {
+          "fileName": "URAT_elayer_bs.so",
+          "fileType": "IMA",
+          "sha256": "c9e68c10c9a8b2936459c9cb7fea28ba13eaf36889852a6351c7980d537806f3"
+        },
+        {
+          "fileName": "libom_lSCMrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "d63ccd0703c6d3d01ca77bdccc58d300d8103ce443a327e91af7a4d9c700d9b4"
+        },
+        {
+          "fileName": "liblefdrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "9da3a5c9f78a264e6442c8fc5661717c6e0e193b535c495f66a2dff8858521de"
+        },
+        {
+          "fileName": "libmaftmexrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "3d7dc6d8dd8a9701467ecf0a3833043006df9de6d1e7cca4d5e31d87fa56d98b"
+        },
+        {
+          "fileName": "libom.so",
+          "fileType": "IMA",
+          "sha256": "33fe4999fc1dcf1a68f7f5ea08402bd0c9f4a0f8af398c8282302da2be4325bc"
+        },
+        {
+          "fileName": "libmacfgrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "6cfb3d4a10925c492f41ae5a2e5d4ee30a34992e5e84d53caab60b3c4efc2104"
+        },
+        {
+          "fileName": "GRAT_SCTP_CBB.so",
+          "fileType": "IMA",
+          "sha256": "953c355014d122b67a9d97c4d9cf96f172d115025b93fc6b7974e6ef8be8d00d"
+        },
+        {
+          "fileName": "GRAT_liblinux_lapd.so",
+          "fileType": "IMA",
+          "sha256": "377b391feb764d632b5bd62e6ccb132e5953e3c8d43f5da087ebb1c153ff9330"
+        },
+        {
+          "fileName": "URAT_SCTP_CBB_bs.so",
+          "fileType": "IMA",
+          "sha256": "af6364ffe9d426058abaf9457d16433ffadee2f26487980a3cd59814207bfa4d"
+        },
+        {
+          "fileName": "LRAT_SCTP_CBB.so",
+          "fileType": "IMA",
+          "sha256": "5fe29bf9d92725464e664aac0b99492eb3d4094b28cff6d50a7130031ede699f"
+        },
+        {
+          "fileName": "LRAT_Service.so",
+          "fileType": "IMA",
+          "sha256": "b3fb487a9baadacf4f53bd1eac8f43915622955539605045c134b5d0a684bf45"
+        },
+        {
+          "fileName": "PDCP_Agent.so",
+          "fileType": "IMA",
+          "sha256": "9c2b8bf08882cca7c5322327113e79e8da90337217f35c6633e598d0d261ef17"
+        },
+        {
+          "fileName": "LRAT_PDCPM.so",
+          "fileType": "IMA",
+          "sha256": "e2916a33ad7e46cc8b6a56523b1d3828ef78e750079b367c8b9d1168d77d2446"
+        },
+        {
+          "fileName": "LRAT_PDCPALLOCATOR.so",
+          "fileType": "IMA",
+          "sha256": "7dbe64228aa7a1da99b5b394ca1533a6d77a3009d662c4997c5154e22ed790a0"
+        },
+        {
+          "fileName": "mccrm_umpth.so",
+          "fileType": "IMA",
+          "sha256": "7835ab3d509722f96a252a7200a3062e01f42bd40074bb11665c6e3cc4d1c46c"
+        },
+        {
+          "fileName": "oclcrsrat.so",
+          "fileType": "IMA",
+          "sha256": "4f8310c3b769bbeff077760a9c75430e0277e9bf0d3030351f049d349b05953a"
+        },
+        {
+          "fileName": "URAT_stub_bs.so",
+          "fileType": "IMA",
+          "sha256": "7f9c4ebf38416b120300a489e63071818e7d909b25a49718e98f5b4d352b74c9"
+        },
+        {
+          "fileName": "codec.so",
+          "fileType": "IMA",
+          "sha256": "1fa321b556869c7ac7c4265507b1805ff62252bcbc17f4a3b13bc17db2377f66"
+        },
+        {
+          "fileName": "libsaie_util.so",
+          "fileType": "IMA",
+          "sha256": "6f9ec5d1bbc2d11feb99fd2151400fdae5c641ce5a2632e593e984603e37568a"
+        },
+        {
+          "fileName": "libsiteai_lite_nn.so",
+          "fileType": "IMA",
+          "sha256": "f90bb6b42f46e510dab6970b94e53d7af2ab9b1e350392760f1d77ffa10ff84f"
+        },
+        {
+          "fileName": "libsiteai_lite_ml.so",
+          "fileType": "IMA",
+          "sha256": "2cb411a9a207ea185e696ff0d2f40a3fcdeb8aeb5a90dbf5071b48a2c4c1b86f"
+        },
+        {
+          "fileName": "libsiteai_lite_gnn.so",
+          "fileType": "IMA",
+          "sha256": "eaa6a3d3fe3b640314bf99404427f215f08a94d87bcb701b531f77c1306fe57d"
+        },
+        {
+          "fileName": "libsiterta_solver_lite.so",
+          "fileType": "IMA",
+          "sha256": "67eac85b1aceb7c7b845f71e24c2d2e5e609ec5526258f085b78e9a7c970de14"
+        },
+        {
+          "fileName": "libhivalai.so",
+          "fileType": "IMA",
+          "sha256": "e9b4b950e9f671773726b3e3cacde8cde4f1185703689cfe88647ba069685cec"
+        },
+        {
+          "fileName": "libliraf_v2commrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "2802db8523360db18e0937780a25cc688057c3560ecdf0a219e8e40c7363577b"
+        },
+        {
+          "fileName": "liblirafrtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "30d9f8c8711ea838ba52e33b8f34ec5cd74945dbba47efc2fdfb42c712bb97f2"
+        },
+        {
+          "fileName": "AI.so",
+          "fileType": "IMA",
+          "sha256": "93e24133f562ca7764f6ca0672a65f9ae002cd8492461ca2c40e0ca7f251d3b1"
+        },
+        {
+          "fileName": "libc.so.6",
+          "fileType": "IMA",
+          "sha256": "c727f5c43ab15cf12bbf2a16b340ff7ce51678ee04d287a0f64286961647fac7"
+        },
+        {
+          "fileName": "ps",
+          "fileType": "IMA",
+          "sha256": "0f04cb04f078e6746f28b903d4a4b01602cd4a9299f910ccdb4e200218e7e30b"
+        },
+        {
+          "fileName": "libprocps.so.8.0.3",
+          "fileType": "IMA",
+          "sha256": "9c41a57522367418da0f91e961bed046cf0899e2f76a71784f8cd19e82c884f7"
+        },
+        {
+          "fileName": "libsecurec.so",
+          "fileType": "IMA",
+          "sha256": "e1b6c3d96ef1756ecfe8759d6d72bd6464bc1945bab7151591d70e5a5e03cb24"
+        },
+        {
+          "fileName": "libcorelib_help_nodertoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "94f476c7fca3db998f881b07bbdbde113020e5349f24a78ecb28e94f7d405177"
+        },
+        {
+          "fileName": "libbsispm_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "34355e728e5caf5f96f07c052f14022bc7aa9aca87df3a255bdd2eeaf050d471"
+        },
+        {
+          "fileName": "libbsispmagt_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "d4f4b9ff2dd6ce97d3c19375fcfa77c4522d3f2cb27d07f29c0426474c754448"
+        },
+        {
+          "fileName": "libcatm_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "124763c9bf060f0d45ab726d1b365e071c765dc4aeaf5883b5c4020d44f03b9f"
+        },
+        {
+          "fileName": "libcertcomm_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "04a139dd18485d24b793db96e6040899e74351bb4e2445e2124e0b3de0a4b2b3"
+        },
+        {
+          "fileName": "libcertitf_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "caff0480e5a1b6ece15703e5ccbe0fcb4e5a246a989dfd9a4537e9ee426dd047"
+        },
+        {
+          "fileName": "libcertnode_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "0c6997907133180e7436fb6459ea02cad5f1da013449a54e0362d97ea75fd2af"
+        },
+        {
+          "fileName": "libcfg_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "627b401e595f8a6b310ac14ba4471c9028ac84f393d133a88740d210d9f776ee"
+        },
+        {
+          "fileName": "libcommlib_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "753bb8594e406538fe15317c7c5187cd8706d81199500aed59104c05a4e91750"
+        },
+        {
+          "fileName": "libcorelib_help_basertoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "47077b5284d29c391869c0791c9f61a0ad0afa9a03a860305b2417beb6cfc03d"
+        },
+        {
+          "fileName": "libcorelib_help_mprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "ff1de8b6f10d2dbc4b4d8da0411fcdd746904539d9e9f876b9b62b517b037522"
+        },
+        {
+          "fileName": "libcrm_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "39c6017adbf26f267be6b7962b1ab300b8e15a8329665ddee71d6e9e00425d9a"
+        },
+        {
+          "fileName": "libctrmsrv_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "30ae4e0f3a28fa162c5d0e43235eb9ae977dd093dfd3601b55c7650254e62419"
+        },
+        {
+          "fileName": "libgrmlcomp_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "54acd70461811b4d3ed7f1972d4bf7a971c9b73a27bd0568fad0b5ffa27d74f3"
+        },
+        {
+          "fileName": "libgrmlrce_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "00b5d7859e13c3d32718f48e7dbb7929e44d6724e1fb0b927f631184f684a8b7"
+        },
+        {
+          "fileName": "libhdlc_cpri_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "be9b9811ffa2c5e4b1f6e82b3af46cda8af1fd15879a96b4912a758e7f799972"
+        },
+        {
+          "fileName": "libhdlc_ecpri_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "f28b2eb97304193db268977589636760788289ccaf67e831fcc79fc1a545a3af"
+        },
+        {
+          "fileName": "libidcs_base_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "c3f16ba63660c22725dad36a35de92c897913664b4df1b19ba1081c83b2ac2c8"
+        },
+        {
+          "fileName": "libinfbsi_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "59207379a87100373c675f319c7ee9f7c8dbfbbf9342cce035a907bdfb6698f7"
+        },
+        {
+          "fileName": "libiqnmcrml_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "581baf81fd80096bac2700359cbf24e44730e1d33e204dc921469ada219d730d"
+        },
+        {
+          "fileName": "libiradacomm_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "52d6dcb7695d8df82adcb47c64cfbdf1a0df103698e801db6dd9bd3f0aa20cd2"
+        },
+        {
+          "fileName": "liblsbm_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "fcfded24e04f277f0c3e48a3710a10dc18cf0a4f4f439af105958ed58bbc8e42"
+        },
+        {
+          "fileName": "libltrm_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "cbf81e73a5670f5d2b5a41d7a2d002d022828744c4be1d7d40531c8f7abd50d5"
+        },
+        {
+          "fileName": "libnetmc_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "2986f398b8346778eaee6c17aa3e613fb78f5a4c171b6a3b21698b1cd3bc5f92"
+        },
+        {
+          "fileName": "libnetmcbnrm_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "084c6fb45cae4d9cb7ee058772170839fc0065e5a2858d473a6257b5a5d46926"
+        },
+        {
+          "fileName": "libnetmecpric_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "3ee42fdb5622007798a37a404c44a910c91c7b856b60c043efb4938bac631e17"
+        },
+        {
+          "fileName": "libnetmecpril_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "d9272bde087f4a5385a9c94c173593ccda4fd6ef59d09b435a2c908d0631e3be"
+        },
+        {
+          "fileName": "libnetmlbnrm_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "c5ccdafe08e112920d4c966f3e67df6c994b0143289cbd41e36ff22a56efecd2"
+        },
+        {
+          "fileName": "libnetmsriol_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "9e3ea8d4f424d90326f9c6074b7d2c56b63b8069008765be20a3849a73f3adf2"
+        },
+        {
+          "fileName": "libq922_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "521adb1bbb5ef7244adcd9fa5ba27ffb336b00b1bbcde8d1bd4b70f2e80cd6ad"
+        },
+        {
+          "fileName": "librtm_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "9f09c631b00b7410b240f897e0a9d880dc3250a06ca41896b7220753808a2864"
+        },
+        {
+          "fileName": "libseemrm_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "71a6ec85b15856f4e60d6696305b5562716d5cf1099832f8c57a2653e4635ede"
+        },
+        {
+          "fileName": "libsnmp_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "07262ff16021bc11b443cd7d7ca371a1f29ce4ebfb43a2ad23c2ff51d9270e4b"
+        },
+        {
+          "fileName": "libswmrblocalhelpmprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "d2555533000ef7128bb322f6271a66da40e515959575e098057614d5bfc4e36b"
+        },
+        {
+          "fileName": "libtrifm_inml_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "c20a23f4ba4aa9d1fa9990190b89a13795d2c6c496ed141bb1f1855c07fbfab6"
+        },
+        {
+          "fileName": "libtrrbtpml_ip_helprtoslinuxhi8261gnur.so",
+          "fileType": "IMA",
+          "sha256": "704ab246258733fed6814676b0e3bb2834934e14df7b9ea0d16b131d9fe1f44e"
+        },
+        {
+          "fileName": "inotify",
+          "fileType": "IMA",
+          "sha256": "faecec0b40d7c9a2a926417e5d48cc7770e8f10d6815e0860e23cbb6062f97e7"
+        },
+        {
+          "fileName": "regsaver",
+          "fileType": "IMA",
+          "sha256": "ac45dd85ef285553ba799237ce4a0d05379d7d2ed0f9284578b696df63e6c748"
+        },
+        {
+          "fileName": "logrotate",
+          "fileType": "IMA",
+          "sha256": "dc1383c0720a4be05b9bbcf263b8a67ab9b06e08650af99006684e8d54dfb3c8"
+        },
+        {
+          "fileName": "libpopt.so.0.0.2",
+          "fileType": "IMA",
+          "sha256": "4169dcabd79035982f9abb9cc9fe3ec9fe77abfa6c60518a59f7d5ed7794119a"
+        },
+        {
+          "fileName": "oslogrotate.sh",
+          "fileType": "IMA",
+          "sha256": "05750034c71d99a72e5911edad1dd87a9e46966fdd99717a699ec23d25609891"
+        },
+        {
+          "fileName": "flow_control",
+          "fileType": "IMA",
+          "sha256": "8d4e0b73099f12411a26835c69e101a283a51c5feca251065b8712e5286dbcc2"
+        }
+      ]
+    }
+  ]
+}

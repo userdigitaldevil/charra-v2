@@ -39,10 +39,11 @@
 /** Default wait for a Verifier's reply, and for the Attester's. Both feed
  * libcoap's ack_timeout AND a wall-clock ceiling on the wait loop, so a
  * stalled exchange cannot outlive them via CoAP's own retransmissions.
- * Six seconds is generous against measured round trips (~0.4s steady
- * state). */
-#define RP_DEFAULT_VERIFIER_TIMEOUT_S 6
-#define RP_DEFAULT_ATTESTER_TIMEOUT_S 6
+ * Thirty seconds is generous against measured round trips (~0.4s steady
+ * state at small log sizes; a 167-entry IMA log takes ~14s just to extend
+ * into the TPM PCRs). */
+#define RP_DEFAULT_VERIFIER_TIMEOUT_S 30
+#define RP_DEFAULT_ATTESTER_TIMEOUT_S 30
 
 /* --- daemon-mode config (see parse_rp_command_line()) -------------------
  * RP's default mode is a long-running loop: attest, sleep, repeat -- until
@@ -204,6 +205,8 @@ extern char* dtls_rpk_trust_manager_public_key_path;
 extern char* verifier_public_key_path;
 extern char* ima_event_log_path;
 extern char* ima_test_log_path;
+/** Where log_r is written after redaction, ASCII. Empty string disables. */
+extern char* redacted_log_out_path;
 /* Per-Verifier, not shared: five threads run these exchanges
  * concurrently, and a single flag let one thread's response end
  * another thread's wait loop -- which surfaced as "Verifier n did

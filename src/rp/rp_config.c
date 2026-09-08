@@ -43,6 +43,7 @@ void rp_interruptible_sleep(unsigned int seconds) {
 #define RP_OPT_RPK_VERIFIER_KEY 134
 #define RP_OPT_RPK_TRUST_MANAGER_KEY 135
 #define RP_OPT_TRUST_MODE 136
+#define RP_OPT_REDACTED_LOG_OUT 137
 
 static const struct option rp_long_options[] = {{"help", no_argument, 0, '0'},
         {"verbose", no_argument, 0, 'v'},
@@ -66,6 +67,7 @@ static const struct option rp_long_options[] = {{"help", no_argument, 0, '0'},
         {"trust-manager-public-key", required_argument, 0,
                 RP_OPT_RPK_TRUST_MANAGER_KEY},
         {"trust-mode", required_argument, 0, RP_OPT_TRUST_MODE},
+        {"redacted-log-out", required_argument, 0, RP_OPT_REDACTED_LOG_OUT},
         {0}};
 
 /* Which options actually appeared on the command line, indexed by their
@@ -186,6 +188,14 @@ int parse_rp_command_line(int argc, char** argv) {
                    "EVERY Verifier must use the SAME mode -- unlike DTLS, a "
                    "mismatch is reported rather than timing out. "
                    "run_daemon.sh's TRUST_MODE sets both at once.\n");
+            printf("     --redacted-log-out=PATH:  Write log_r -- the "
+                   "redacted log the Verifiers actually receive -- to PATH "
+                   "after every cycle, in the same ASCII form as the "
+                   "Attester's own log, so the two can be diffed column for "
+                   "column. Default '%s'. Pass an empty string to disable. "
+                   "Observation only: a write failure is reported and the "
+                   "cycle continues.\n",
+                    redacted_log_out_path);
             return 1;
         case 'v':
             charra_log_level = CHARRA_LOG_DEBUG;
@@ -280,6 +290,9 @@ int parse_rp_command_line(int argc, char** argv) {
             break;
         case RP_OPT_RPK_TRUST_MANAGER_KEY:
             dtls_rpk_trust_manager_public_key_path = optarg;
+            break;
+        case RP_OPT_REDACTED_LOG_OUT:
+            redacted_log_out_path = optarg;
             break;
         case RP_OPT_TRUST_MODE:
             /* Spelled out rather than numeric: an RP proving itself the way
@@ -425,6 +438,13 @@ void rp_log_effective_configuration(void) {
     charra_log_info("[" LOG_NAME "]   %-22s '%s'  (in use: %s, no flag)",
             "IMA test log", ima_test_log_path,
             use_ima_test_log ? "yes" : "no");
+    if (redacted_log_out_path != NULL && redacted_log_out_path[0] != '\0') {
+        charra_log_info("[" LOG_NAME "]   %-22s '%s'%s", "--redacted-log-out",
+                redacted_log_out_path,
+                charra_cli_default_tag(RP_OPT_REDACTED_LOG_OUT));
+    } else {
+        charra_log_info("[" LOG_NAME "]   %-22s disabled", "--redacted-log-out");
+    }
     /* Named explicitly, and never as a bare boolean: "DTLS-PSK enabled:
      * false" was the only signal this transport existed, and it read as a
      * setting rather than as the one that must match every peer. */

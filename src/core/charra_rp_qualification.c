@@ -46,7 +46,8 @@ CHARRA_RC charra_rp_qualification_generate(uint32_t num_entries,
 
     memset(state_out, 0, sizeof(*state_out));
     rc = charra_sdk_redact_ima_log(raw_log, raw_log_len, salt,
-            &state_out->golden_log, &state_out->golden_log_len);
+            CHARRA_SDK_DEFAULT_LABEL, &state_out->golden_log,
+            &state_out->golden_log_len);
     if (rc != CHARRA_RC_SUCCESS) {
         free(raw_log);
         return rc;

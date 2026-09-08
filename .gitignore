@@ -72,3 +72,13 @@ zk/circuit/Prover.toml
 # The RP<->prover job queue: transient, and jobs carry the witness.
 zk/jobs/
 __pycache__/
+
+# Vendored upstream clone kept for comparison only (openEuler Global Trust
+# Authority, ~1.2 GB with its own .git). Re-clone rather than commit it:
+#   git clone https://gitcode.com/openeuler/global-trust-authority.git
+charra-ressources/evidence/global-trust-authority/
+# Scratch output from driving that clone against a TPM simulator.
+gta-run-output/
+# log_r as the Verifiers receive it, rewritten by the RP every cycle
+# (--redacted-log-out). Generated, like the timings_/durations_ files.
+redacted_ima_logs.txt

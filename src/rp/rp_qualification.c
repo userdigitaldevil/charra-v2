@@ -189,7 +189,7 @@ CHARRA_RC rp_perform_qualification_handshake_once(int num_verifiers) {
         const double q_redact_start = charra_now_s();
         result = charra_sdk_redact_ima_log(qualify_challenge_log,
                 qualify_challenge_log_len, qualify_challenge_salt,
-                &redacted_log, &redacted_log_len);
+                CHARRA_SDK_DEFAULT_LABEL, &redacted_log, &redacted_log_len);
         charra_log_info("[" LOG_NAME "] Timing: /qualify redact challenge log "
                         "took %f second(s).", charra_now_s() - q_redact_start);
         if (result != CHARRA_RC_SUCCESS) {

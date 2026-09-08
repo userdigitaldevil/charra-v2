@@ -71,7 +71,7 @@ char* zk_verification_key_path = CHARRA_ZK_VK_DEFAULT;
  * unflagged run appraises against the same two files both sides already
  * ship -- the point is that the Verifier consults them ITSELF, over log_r,
  * rather than trusting that the RP's own pass happened. */
-char* verifier_whitelist_hashes_path = "whitelist-hashes.txt";
+char* verifier_whitelist_hashes_path = "NODE_evidence_baseline.json";
 char* verifier_blacklist_hashes_path = "blacklist-hashes.txt";
 
 /* Key this Verifier signs its /appraise verdicts with (see

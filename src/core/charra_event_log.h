@@ -34,6 +34,19 @@
 /** Upper bound on an IMA template name, e.g. "ima-ng". Generous on purpose. */
 #define CHARRA_IMA_TEMPLATE_NAME_MAX 64
 
+/**
+ * The algorithm prefix inside an ima-ng d-ng field: the name, a colon, and a
+ * NUL, so a sha256 d-ng field is 8 + 32 = 40 bytes of content.
+ *
+ * The NUL is part of it. Omitting it -- writing a 7-byte "sha256:" and a
+ * 39-byte field -- is self-consistent and passes every round-trip test built
+ * on the same assumption, which is exactly how it survived here for a while.
+ * It is still wrong: all 167 records of a real kernel log only reproduce
+ * their template digests with the 8-byte form. See charra_ima_ascii.h.
+ */
+#define CHARRA_IMA_ALGO_PREFIX "sha256:"
+#define CHARRA_IMA_ALGO_PREFIX_LEN 8 /* strlen("sha256:") + the NUL */
+
 /* --- log entries -------------------------------------------------------- */
 
 /**
@@ -273,6 +286,25 @@ bool charra_verify_log_matches_quote_pcr_digest(const uint8_t* log,
  */
 bool charra_event_log_entry_file_digest(const charra_event_log_entry* entry,
         const uint8_t** digest_out, uint32_t* digest_len_out);
+
+/**
+ * @brief The filename an entry should be appraised under -- the last path
+ * component, whether the entry has been redacted or not.
+ *
+ *     log_a (RP)        /usr/lib64/xtables/libxt_tcp.so  ->  libxt_tcp.so
+ *     log_r (Verifier)  <64 hex><label>libxt_tcp.so      ->  libxt_tcp.so
+ *
+ * A redacted n-ng field is recognised by shape -- exactly
+ * CHARRA_SDK_REDACTED_DIR_HEX_LEN hex characters followed by a separator --
+ * rather than by knowing which label was used, so the rule holds for any
+ * label the redactor was configured with, '/' included.
+ *
+ * @param[out] name_out NUL-terminated, written into the caller's buffer
+ * @return false if the entry has no readable n-ng field, or the name does
+ * not fit
+ */
+bool charra_event_log_entry_file_name(const charra_event_log_entry* entry,
+        char* name_out, size_t name_out_size);
 
 /**
  * @brief Checks every log entry's file-content digest against the

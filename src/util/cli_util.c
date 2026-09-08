@@ -189,9 +189,9 @@ int parse_command_line_arguments(int argc, char** argv, cli_config* variables) {
                        "TRUST_MODE sets both at once.\n");
                 printf("     --whitelist-hashes=PATH: File-content digests "
                        "this Verifier permits in log_r. Default "
-                       "'whitelist-hashes.txt'. Enforced default-deny once "
-                       "it has at least one entry; an empty file falls back "
-                       "to allow-by-default.\n");
+                       "'NODE_evidence_baseline.json'. Enforced default-deny "
+                       "once it has at least one entry; an empty file falls "
+                       "back to allow-by-default.\n");
                 printf("     --blacklist-hashes=PATH: File-content digests "
                        "this Verifier rejects in log_r. Default "
                        "'blacklist-hashes.txt'. Always enforced.\n");

@@ -385,12 +385,14 @@ wire(s, "RP", "Verifier", "/appraise", [
     ("rp_signature", "AK_r's signature over it"),
     ("log_r", "the redacted log — paths hashed"),
     ("attestation_data", "Quote_a, forwarded verbatim"),
+    ("tpm2_signature", "AK_a's signature over it, forwarded"),
+    ("tpm2_public_key", "AK_a, forwarded — so the Verifier can check it"),
     ("trust_mode", "qualify | tee | zk"),
     ("tee_* / zk_proof", "only the fields that mode needs"),
-], left=MARGIN, top=3.90, width=8.6, accent=GREEN)
+], left=MARGIN, top=3.75, width=8.6, accent=GREEN)
 note(s, [("Quote_a", {"font": MONO, "bold": True}), (" travels ", {}), ("verbatim", B),
-         (" to the Verifier — it checks the Attester's signature itself, rather than taking the RP's word for it.", {})],
-     top=6.20, size=13)
+         (" to the Verifier — signature and key included — so it checks the Attester's evidence itself, rather than taking the RP's word for it.", {})],
+     top=6.40, size=13)
 
 # ============================================================ 3b. RP actions
 s = slide("What the Relying Party does",

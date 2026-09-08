@@ -6,6 +6,8 @@
 
 #include "charra_event_log.h"
 
+#include "charra_baseline.h"
+
 #include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -510,115 +512,6 @@ bool charra_verify_log_matches_quote_pcr_digest(const uint8_t* log,
     return true;
 }
 
-/** qsort()/bsearch() comparator treating each TPM2_SHA256_DIGEST_SIZE-byte
- * chunk as an opaque sort key. */
-static int compare_hashes(const void* a, const void* b) {
-    return memcmp(a, b, TPM2_SHA256_DIGEST_SIZE);
-}
-
-/**
- * @brief Load a file of hex-encoded SHA-256 hashes, one per line, into a
- * freshly malloc'd flat array, sorted for hash_list_contains() to
- * binary-search ('#' comments and blank lines skipped, optional "0x"
- * prefix -- same hex convention reference-pcrs.txt uses).
- *
- * @param[out] hashes_out malloc'd buffer of *count_out *
- * TPM2_SHA256_DIGEST_SIZE bytes, sorted ascending by raw byte value; caller
- * frees. NULL if the file has no valid entries.
- * @returns CHARRA_RC_SUCCESS, CHARRA_RC_ERROR if the file can't be opened
- * or allocation fails. An unparseable line is logged and skipped, not a
- * hard error -- consistent with rejecting individual bad entries rather
- * than the whole policy file.
- */
-static CHARRA_RC load_hash_list(
-        const char* path, uint8_t** hashes_out, uint32_t* count_out) {
-    *hashes_out = NULL;
-    *count_out = 0;
-
-    FILE* f = fopen(path, "r");
-    if (f == NULL) {
-        charra_log_error(
-                "[" LOG_NAME "] Could not open hash list file '%s'.", path);
-        return CHARRA_RC_ERROR;
-    }
-
-    uint8_t* hashes = NULL;
-    uint32_t count = 0;
-    uint32_t capacity = 0;
-    char line[256];
-    while (fgets(line, sizeof(line), f) != NULL) {
-        char* p = line;
-        while (*p == ' ' || *p == '\t') {
-            p++;
-        }
-        if (*p == '#' || *p == '\n' || *p == '\0') {
-            continue; /* comment or blank line */
-        }
-        if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
-            p += 2;
-        }
-
-        uint8_t digest[TPM2_SHA256_DIGEST_SIZE];
-        bool ok = true;
-        for (uint32_t i = 0; i < TPM2_SHA256_DIGEST_SIZE; i++) {
-            if (p[i * 2] == '\0' || p[i * 2 + 1] == '\0') {
-                ok = false;
-                break;
-            }
-            char byte_str[3] = {p[i * 2], p[i * 2 + 1], '\0'};
-            char* end = NULL;
-            errno = 0;
-            long val = strtol(byte_str, &end, 16);
-            if (end != byte_str + 2 || errno != 0) {
-                ok = false;
-                break;
-            }
-            digest[i] = (uint8_t)val;
-        }
-        if (!ok) {
-            charra_log_error("[" LOG_NAME "] Hash list file '%s': "
-                             "unparseable line, skipping.",
-                    path);
-            continue;
-        }
-
-        if (count == capacity) {
-            capacity += 32;
-            uint8_t* grown = realloc(
-                    hashes, (size_t)capacity * TPM2_SHA256_DIGEST_SIZE);
-            if (grown == NULL) {
-                free(hashes);
-                fclose(f);
-                return CHARRA_RC_ERROR;
-            }
-            hashes = grown;
-        }
-        memcpy(hashes + (size_t)count * TPM2_SHA256_DIGEST_SIZE, digest,
-                TPM2_SHA256_DIGEST_SIZE);
-        count++;
-    }
-    fclose(f);
-
-    if (count > 0) {
-        qsort(hashes, count, TPM2_SHA256_DIGEST_SIZE, compare_hashes);
-    }
-
-    *hashes_out = hashes;
-    *count_out = count;
-    return CHARRA_RC_SUCCESS;
-}
-
-/**
- * @brief Binary search: is needle present in hashes? hashes must already be
- * sorted ascending by raw byte value -- true of every array load_hash_list()
- * returns, and the only producer of these arrays.
- */
-static bool hash_list_contains(
-        const uint8_t* hashes, uint32_t count, const uint8_t* needle) {
-    return bsearch(needle, hashes, count, TPM2_SHA256_DIGEST_SIZE,
-                   compare_hashes) != NULL;
-}
-
 bool charra_event_log_entry_file_digest(const charra_event_log_entry* entry,
         const uint8_t** digest_out, uint32_t* digest_len_out) {
     if (entry == NULL || digest_out == NULL || digest_len_out == NULL) {
@@ -654,6 +547,73 @@ bool charra_event_log_entry_file_digest(const charra_event_log_entry* entry,
     return *digest_len_out > 0;
 }
 
+bool charra_event_log_entry_file_name(
+        const charra_event_log_entry* entry, char* name_out, size_t cap) {
+    if (entry == NULL || name_out == NULL || cap == 0) {
+        return false;
+    }
+    /* Walk past the d-ng field to reach n-ng. */
+    if (entry->template_data_len < sizeof(uint32_t)) {
+        return false;
+    }
+    const uint32_t d_len = read_u32(entry->template_data);
+    if (d_len > entry->template_data_len - sizeof(uint32_t)) {
+        return false;
+    }
+    const uint32_t n_off = (uint32_t)sizeof(uint32_t) + d_len;
+    if (entry->template_data_len - n_off < sizeof(uint32_t)) {
+        return false;
+    }
+    const uint32_t n_len = read_u32(entry->template_data + n_off);
+    if (n_len > entry->template_data_len - n_off - sizeof(uint32_t)) {
+        return false;
+    }
+    const char* p =
+            (const char*)entry->template_data + n_off + sizeof(uint32_t);
+    uint32_t plen = n_len;
+    while (plen > 0 && p[plen - 1] == '\0') {
+        plen--;
+    }
+    if (plen == 0) {
+        return false;
+    }
+
+    /* A redacted field is 64 hex characters, a separator, then the name.
+     * Recognising it by shape rather than by the label means the same code
+     * reads a log redacted with '/' and one redacted with '*'. */
+    const uint32_t hex_len = 2 * TPM2_SHA256_DIGEST_SIZE;
+    uint32_t start = 0;
+    if (plen > hex_len + 1) {
+        bool all_hex = true;
+        for (uint32_t i = 0; i < hex_len; i++) {
+            const char c = p[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+                all_hex = false;
+                break;
+            }
+        }
+        if (all_hex) {
+            start = hex_len + 1; /* past the commitment and its label */
+        }
+    }
+    if (start == 0) {
+        /* An ordinary path: the name is what follows the last '/'. */
+        for (uint32_t i = 0; i < plen; i++) {
+            if (p[i] == '/') {
+                start = i + 1;
+            }
+        }
+    }
+
+    const uint32_t name_len = plen - start;
+    if (name_len == 0 || (size_t)name_len + 1 > cap) {
+        return false;
+    }
+    memcpy(name_out, p + start, name_len);
+    name_out[name_len] = '\0';
+    return true;
+}
+
 bool charra_verify_log_file_hashes_against_policy(const uint8_t* log,
         uint32_t log_len, const char* whitelist_path,
         const char* blacklist_path) {
@@ -670,28 +630,31 @@ bool charra_verify_log_file_hashes_against_policy(const uint8_t* log,
      * and the log says plainly which mode is in force rather than leaving
      * "passed" ambiguous between "checked and fine" and "nothing to check
      * against". */
-    uint8_t* whitelist = NULL;
-    uint32_t whitelist_count = 0;
-    uint8_t* blacklist = NULL;
-    uint32_t blacklist_count = 0;
+    charra_baseline whitelist = {0};
+    charra_baseline blacklist = {0};
 
-    if (load_hash_list(whitelist_path, &whitelist, &whitelist_count) !=
+    if (charra_baseline_load(whitelist_path, &whitelist) !=
             CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not load whitelist '%s'.",
                 whitelist_path);
         return false;
     }
-    if (load_hash_list(blacklist_path, &blacklist, &blacklist_count) !=
+    if (charra_baseline_load(blacklist_path, &blacklist) !=
             CHARRA_RC_SUCCESS) {
         charra_log_error("[" LOG_NAME "] Could not load blacklist '%s'.",
                 blacklist_path);
-        free(whitelist);
+        charra_baseline_free(&whitelist);
         return false;
     }
+    const uint32_t whitelist_count = whitelist.count;
+    const uint32_t blacklist_count = blacklist.count;
 
     if (whitelist_count > 0) {
-        charra_log_info("[" LOG_NAME "] File-hash policy: DEFAULT-DENY "
-                        "(whitelist '%s', %u entries; blacklist '%s', %u).",
+        charra_log_info("[" LOG_NAME "] File policy: DEFAULT-DENY, matching "
+                        "on %s (whitelist '%s', %u entries; blacklist '%s', "
+                        "%u).",
+                whitelist.has_names ? "filename AND content hash"
+                                    : "content hash only",
                 whitelist_path, whitelist_count, blacklist_path,
                 blacklist_count);
     } else {
@@ -756,22 +719,52 @@ bool charra_verify_log_file_hashes_against_policy(const uint8_t* log,
                     continue;
                 }
 
-                /* Blacklist first: an explicit deny outranks approval. */
-                if (blacklist_count > 0 &&
-                        hash_list_contains(
-                                blacklist, blacklist_count, file_digest)) {
-                    charra_log_error(
-                            "[" LOG_NAME "] Entry %u's file-content digest "
-                            "matches the BLACKLIST.",
+                /* The name the entry is appraised under. Redacted or not,
+                 * it is the last path component -- see
+                 * charra_event_log_entry_file_name(). */
+                char file_name[CHARRA_BASELINE_NAME_MAX];
+                const bool have_name = charra_event_log_entry_file_name(
+                        &entry, file_name, sizeof(file_name));
+                const char* name = have_name ? file_name : NULL;
+                if (!have_name && whitelist.has_names && whitelist_count > 0) {
+                    charra_log_error("[" LOG_NAME "] Entry %u: could not read "
+                                     "a filename to match against a "
+                                     "name-carrying whitelist, rejecting.",
                             entry_num);
                     all_ok = false;
+                    entry_num++;
+                    continue;
+                }
+
+                /* Blacklist first: an explicit deny outranks approval. */
+                if (blacklist_count > 0 &&
+                        charra_baseline_contains(
+                                &blacklist, name, file_digest)) {
+                    charra_log_error("[" LOG_NAME "] Entry %u ('%s') matches "
+                                     "the BLACKLIST.",
+                            entry_num, have_name ? file_name : "?");
+                    all_ok = false;
                 } else if (whitelist_count > 0 &&
-                           !hash_list_contains(
-                                   whitelist, whitelist_count, file_digest)) {
-                    charra_log_error(
-                            "[" LOG_NAME "] Entry %u's file-content digest is "
-                            "NOT on the whitelist (default-deny).",
-                            entry_num);
+                           !charra_baseline_contains(
+                                   &whitelist, name, file_digest)) {
+                    /* Distinguish the two ways this fails. A known-good
+                     * binary sitting under a name it has no business having
+                     * is a very different finding from an unknown binary,
+                     * and a hash-only list cannot tell them apart at all. */
+                    if (whitelist.has_names &&
+                            charra_baseline_contains_hash_only(
+                                    &whitelist, file_digest)) {
+                        charra_log_error(
+                                "[" LOG_NAME "] Entry %u: content hash IS "
+                                "whitelisted, but not under the name '%s' "
+                                "(default-deny).",
+                                entry_num, have_name ? file_name : "?");
+                    } else {
+                        charra_log_error(
+                                "[" LOG_NAME "] Entry %u ('%s'): content hash "
+                                "is NOT on the whitelist (default-deny).",
+                                entry_num, have_name ? file_name : "?");
+                    }
                     all_ok = false;
                 }
                 entry_num++;
@@ -779,7 +772,7 @@ bool charra_verify_log_file_hashes_against_policy(const uint8_t* log,
         }
     }
 
-    free(whitelist);
-    free(blacklist);
+    charra_baseline_free(&whitelist);
+    charra_baseline_free(&blacklist);
     return all_ok;
 }

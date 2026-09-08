@@ -59,7 +59,11 @@ CHARRA_RC charra_synth_generate_ima_log(uint32_t num_entries, uint32_t seed,
         return CHARRA_RC_BAD_ARGUMENT;
     }
 
-    static const char ALGO_PREFIX[] = "sha256:";
+    /* "sha256:" AND its NUL -- CHARRA_IMA_ALGO_PREFIX_LEN is 8, not 7. The
+     * synthetic log has to match what a real kernel writes byte for byte,
+     * or the golden redaction the Verifier computes here would only ever
+     * agree with logs this file produced. */
+    static const char ALGO_PREFIX[] = CHARRA_IMA_ALGO_PREFIX;
     /* upper bound: use the longest path in the pool for every entry, since
      * actual entries will only ever be shorter */
     uint32_t max_path_len = 0;
@@ -70,9 +74,9 @@ CHARRA_RC charra_synth_generate_ima_log(uint32_t num_entries, uint32_t seed,
         }
     }
     /* real ima-ng template_data is two length-prefixed fields:
-     * d-ng = u32 len + ("sha256:" + digest), n-ng = u32 len + (path + NUL) */
-    uint32_t max_d_field_len = (uint32_t)(sizeof(ALGO_PREFIX) - 1) +
-                                TPM2_SHA256_DIGEST_SIZE;
+     * d-ng = u32 len + ("sha256:" NUL + digest), n-ng = u32 len + path NUL */
+    uint32_t max_d_field_len =
+            (uint32_t)CHARRA_IMA_ALGO_PREFIX_LEN + TPM2_SHA256_DIGEST_SIZE;
     uint32_t max_n_field_len = max_path_len + 1 /* NUL */;
     uint32_t max_template_data_len = sizeof(uint32_t) + max_d_field_len +
                                       sizeof(uint32_t) + max_n_field_len;
@@ -98,11 +102,11 @@ CHARRA_RC charra_synth_generate_ima_log(uint32_t num_entries, uint32_t seed,
         const char* path = FAKE_SENSITIVE_PATHS[i % NUM_FAKE_PATHS];
         uint32_t path_len = (uint32_t)strlen(path);
 
-        /* template_data = u32(d_len) + "sha256:" + file_digest
+        /* template_data = u32(d_len) + "sha256:" NUL + file_digest
          *               + u32(n_len) + path + '\0'
          * -- real ima-ng's two length-prefixed field pair, not a flat blob */
         uint32_t d_content_len =
-                (uint32_t)(sizeof(ALGO_PREFIX) - 1) + TPM2_SHA256_DIGEST_SIZE;
+                (uint32_t)CHARRA_IMA_ALGO_PREFIX_LEN + TPM2_SHA256_DIGEST_SIZE;
         uint32_t n_content_len = path_len + 1 /* NUL */;
         uint32_t template_data_len = sizeof(uint32_t) + d_content_len +
                                       sizeof(uint32_t) + n_content_len;
@@ -113,8 +117,9 @@ CHARRA_RC charra_synth_generate_ima_log(uint32_t num_entries, uint32_t seed,
         }
         uint32_t td_off = 0;
         charra_event_log_append_u32(template_data, &td_off, d_content_len);
-        memcpy(template_data + td_off, ALGO_PREFIX, sizeof(ALGO_PREFIX) - 1);
-        td_off += (uint32_t)(sizeof(ALGO_PREFIX) - 1);
+        memcpy(template_data + td_off, ALGO_PREFIX,
+                CHARRA_IMA_ALGO_PREFIX_LEN);
+        td_off += (uint32_t)CHARRA_IMA_ALGO_PREFIX_LEN;
         memcpy(template_data + td_off, file_digest, TPM2_SHA256_DIGEST_SIZE);
         td_off += TPM2_SHA256_DIGEST_SIZE;
         charra_event_log_append_u32(template_data, &td_off, n_content_len);

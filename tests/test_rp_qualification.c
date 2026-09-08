@@ -52,7 +52,7 @@ static void honest_rp_respond(const uint8_t* challenge_log,
         uint32_t challenge_log_len, uint8_t** rp_log_out,
         uint32_t* rp_log_len_out, uint8_t rp_pcr_out[TPM2_SHA256_DIGEST_SIZE]) {
     charra_sdk_redact_ima_log(challenge_log, challenge_log_len, test_salt,
-            rp_log_out, rp_log_len_out);
+            CHARRA_SDK_DEFAULT_LABEL, rp_log_out, rp_log_len_out);
     charra_replay_ima_log(*rp_log_out, *rp_log_len_out, CHARRA_IMA_PCR_INDEX,
             rp_pcr_out);
 }

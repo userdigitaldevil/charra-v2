@@ -67,29 +67,61 @@ static bool split_ima_ng_fields(const charra_event_log_entry* entry,
 }
 
 /**
- * @brief redacted_path = SHA256(path || salt). salt is mandatory -- callers
+ * @brief commitment = SHA256(dir || salt). salt is mandatory -- callers
  * decide where it comes from: charra_sdk_redact_ima_log() generates a
  * fresh one right before every call (never reused, never transmitted),
- * charra_sdk_redact_ima_log_with_salt() passes the same caller-given salt
- * to every call. This function itself has no notion of "no salt given".
+ * or passes the same caller-given salt to every entry for the qualification
+ * handshake. This function itself has no notion of "no salt given".
+ *
+ * dir may legitimately be empty -- "/etc" splits into an empty directory and
+ * "etc" -- and an empty input still commits, to SHA256(salt). Special-casing
+ * it would make two different paths share a redaction.
  */
-static CHARRA_RC hash_path_with_salt(const uint8_t* path, uint32_t path_len,
+static CHARRA_RC hash_dir_with_salt(const uint8_t* dir, uint32_t dir_len,
         const uint8_t salt[CHARRA_SDK_PATH_SALT_LEN],
         uint8_t out[CHARRA_SDK_REDACTED_PATH_LEN]) {
-    uint8_t* buf = malloc((size_t)path_len + CHARRA_SDK_PATH_SALT_LEN);
+    uint8_t* buf = malloc((size_t)dir_len + CHARRA_SDK_PATH_SALT_LEN);
     if (buf == NULL) {
         return CHARRA_RC_ERROR;
     }
-    if (path_len > 0) {
-        memcpy(buf, path, path_len);
+    if (dir_len > 0) {
+        memcpy(buf, dir, dir_len);
     }
-    memcpy(buf + path_len, salt, CHARRA_SDK_PATH_SALT_LEN);
+    memcpy(buf + dir_len, salt, CHARRA_SDK_PATH_SALT_LEN);
 
-    CHARRA_RC charra_r = hash_sha256(
-            (size_t)path_len + CHARRA_SDK_PATH_SALT_LEN, buf, out);
+    CHARRA_RC charra_r =
+            hash_sha256((size_t)dir_len + CHARRA_SDK_PATH_SALT_LEN, buf, out);
     free(buf);
     return (charra_r == CHARRA_RC_SUCCESS) ? CHARRA_RC_SUCCESS
                                            : CHARRA_RC_CRYPTO_ERROR;
+}
+
+static void hex_encode_lower(const uint8_t* in, uint32_t in_len, uint8_t* out) {
+    static const char D[] = "0123456789abcdef";
+    for (uint32_t i = 0; i < in_len; i++) {
+        out[2 * i] = (uint8_t)D[in[i] >> 4];
+        out[2 * i + 1] = (uint8_t)D[in[i] & 0x0f];
+    }
+}
+
+/**
+ * @brief Copy an entry through unchanged.
+ *
+ * Used for a path with no '/' in it. See charra_sdk.h: rejoining a directory
+ * and a filename that were never separated would introduce a leading '/'
+ * the Attester never measured.
+ */
+static void append_entry_verbatim(const charra_event_log_entry* entry,
+        uint8_t* buf, uint32_t* out_offset) {
+    charra_event_log_append_u32(buf, out_offset, entry->pcr_index);
+    charra_event_log_append_bytes(
+            buf, out_offset, entry->template_digest, entry->template_digest_len);
+    charra_event_log_append_u32(buf, out_offset, entry->template_name_len);
+    charra_event_log_append_bytes(
+            buf, out_offset, entry->template_name, entry->template_name_len);
+    charra_event_log_append_u32(buf, out_offset, entry->template_data_len);
+    charra_event_log_append_bytes(
+            buf, out_offset, entry->template_data, entry->template_data_len);
 }
 
 /**
@@ -110,8 +142,8 @@ static CHARRA_RC hash_path_with_salt(const uint8_t* path, uint32_t path_len,
  */
 static CHARRA_RC redact_one_entry(const charra_event_log_entry* entry,
         uint32_t entry_num,
-        const uint8_t entry_salt[CHARRA_SDK_PATH_SALT_LEN], uint8_t* buf,
-        uint32_t* out_offset, charra_zk_entry* witness_out) {
+        const uint8_t entry_salt[CHARRA_SDK_PATH_SALT_LEN], char label,
+        uint8_t* buf, uint32_t* out_offset, charra_zk_entry* witness_out) {
     const uint8_t* d_field = NULL;
     uint32_t d_field_len = 0;
     const uint8_t* path = NULL;
@@ -124,56 +156,107 @@ static CHARRA_RC redact_one_entry(const charra_event_log_entry* entry,
         return CHARRA_RC_MARSHALING_ERROR;
     }
 
-    uint8_t redacted_path[CHARRA_SDK_REDACTED_PATH_LEN] = {0};
-    CHARRA_RC charra_r;
-    if (witness_out != NULL) {
-        if (path_len > CHARRA_POSEIDON_MAX_PATH) {
-            charra_log_error("[" LOG_NAME "] Entry %u's path is %u bytes; the "
-                             "ZK circuit accepts at most %u. Raise MAX_PATH "
-                             "in the circuit, recompile, and redistribute "
-                             "zk/vk.",
-                    entry_num, path_len, (unsigned)CHARRA_POSEIDON_MAX_PATH);
+    /* The n-ng field carries the path's NUL and counts it. Work on the path
+     * itself and put the NUL back on the way out. */
+    uint32_t plen = path_len;
+    while (plen > 0 && path[plen - 1] == '\0') {
+        plen--;
+    }
+
+    /* Split at the LAST '/': everything before is the directory, everything
+     * after is the filename. Keeping all of the leading portion is what
+     * makes the join lossless -- "/a//b" gives dir "/a/" and base "b", which
+     * rejoins exactly. */
+    int64_t slash = -1;
+    for (uint32_t i = 0; i < plen; i++) {
+        if (path[i] == '/') {
+            slash = (int64_t)i;
+        }
+    }
+    if (slash < 0) {
+        charra_log_warn("[" LOG_NAME "] Entry %u's path has no '/'; passing it "
+                        "through unredacted rather than inventing one.",
+                entry_num);
+        append_entry_verbatim(entry, buf, out_offset);
+        if (witness_out != NULL) {
+            /* A verbatim entry has no commitment for the circuit to check,
+             * and quietly proving something else is not an option. */
+            charra_log_error("[" LOG_NAME "] Entry %u cannot be redacted, so "
+                             "no ZK witness can be built for this log.",
+                    entry_num);
             return CHARRA_RC_BAD_ARGUMENT;
         }
-        charra_r = charra_poseidon_commit(
-                path, path_len, entry_salt, redacted_path);
+        return CHARRA_RC_SUCCESS;
+    }
+
+    const uint8_t* dir = path;
+    const uint32_t dir_len = (uint32_t)slash;
+    const uint8_t* base = path + slash + 1;
+    const uint32_t base_len = plen - (uint32_t)slash - 1;
+
+    uint8_t commitment[CHARRA_SDK_REDACTED_PATH_LEN] = {0};
+    CHARRA_RC charra_r;
+    if (witness_out != NULL) {
+        if (dir_len > CHARRA_POSEIDON_MAX_PATH) {
+            charra_log_error("[" LOG_NAME "] Entry %u's directory is %u bytes; "
+                             "the ZK circuit accepts at most %u. Raise "
+                             "MAX_PATH in the circuit, recompile, and "
+                             "redistribute zk/vk.",
+                    entry_num, dir_len, (unsigned)CHARRA_POSEIDON_MAX_PATH);
+            return CHARRA_RC_BAD_ARGUMENT;
+        }
+        charra_r =
+                charra_poseidon_commit(dir, dir_len, entry_salt, commitment);
     } else {
-        charra_r = hash_path_with_salt(
-                path, path_len, entry_salt, redacted_path);
+        charra_r = hash_dir_with_salt(dir, dir_len, entry_salt, commitment);
     }
     if (charra_r != CHARRA_RC_SUCCESS) {
         return charra_r;
     }
 
     if (witness_out != NULL) {
-        /* The proof needs exactly what redaction is about to throw away. All
-         * of this is secret except file_hash: it must never be marshaled. */
+        /* The proof needs exactly what redaction is about to throw away --
+         * which is now the directory, not the whole path. The filename
+         * travels in log_r in the clear, so the circuit will take it as a
+         * public input and rejoin the two with '/' to rebuild the record the
+         * Attester actually measured. */
         memset(witness_out, 0, sizeof(*witness_out));
-        memcpy(witness_out->path, path, path_len);
-        witness_out->path_len = path_len;
+        if (dir_len > 0) {
+            memcpy(witness_out->path, dir, dir_len);
+        }
+        witness_out->path_len = dir_len;
         memcpy(witness_out->salt, entry_salt, CHARRA_SDK_PATH_SALT_LEN);
-        memcpy(witness_out->commitment, redacted_path,
+        memcpy(witness_out->commitment, commitment,
                 CHARRA_SDK_REDACTED_PATH_LEN);
         /* d_field spans its own u32 length prefix too, so the layout is
-         *   0..3  d_len | 4..10 "sha256\0" | 11..42 the digest
-         * and the circuit wants those last 32 bytes. Reading from 7 lands in
-         * the middle of the algorithm name -- which is exactly what happened
-         * the first time, and it surfaces only as "pcrdigest_a mismatch"
-         * inside the circuit, so it is worth being explicit here. */
-        if (d_field_len == sizeof(uint32_t) + 7 + 32) {
-            memcpy(witness_out->file_hash, d_field + sizeof(uint32_t) + 7, 32);
+         *   0..3  d_len | 4..11 "sha256:" NUL | 12..43 the digest
+         * and the circuit wants those last 32 bytes. The prefix is EIGHT
+         * bytes -- name, colon, NUL -- not seven; reading from 7 lands on
+         * the NUL and shifts the whole digest, which surfaces only as
+         * "pcrdigest_a mismatch" inside the circuit. See
+         * CHARRA_IMA_ALGO_PREFIX. */
+        const uint32_t expect =
+                (uint32_t)sizeof(uint32_t) + CHARRA_IMA_ALGO_PREFIX_LEN + 32;
+        if (d_field_len == expect) {
+            memcpy(witness_out->file_hash,
+                    d_field + sizeof(uint32_t) + CHARRA_IMA_ALGO_PREFIX_LEN,
+                    32);
         } else {
             charra_log_error("[" LOG_NAME "] Entry %u's d-ng field is %u bytes, "
-                             "not the %zu a sha256 ima-ng entry has. The ZK "
+                             "not the %u a sha256 ima-ng entry has. The ZK "
                              "circuit cannot describe it.",
-                    entry_num, d_field_len, sizeof(uint32_t) + 7 + 32);
+                    entry_num, d_field_len, expect);
             return CHARRA_RC_MARSHALING_ERROR;
         }
     }
 
-    /* new template_data = d-ng verbatim || u32(32) || redacted path */
-    const uint32_t new_td_len =
-            d_field_len + sizeof(uint32_t) + CHARRA_SDK_REDACTED_PATH_LEN;
+    /* new n-ng contents = hex(commitment) | label | filename | NUL, so the
+     * field stays a well-formed NUL-terminated n-ng field and log_r can be
+     * re-emitted as a genuine ASCII IMA log. */
+    const uint32_t new_n_len =
+            CHARRA_SDK_REDACTED_DIR_HEX_LEN + 1 + base_len + 1;
+    const uint32_t new_td_len = d_field_len + (uint32_t)sizeof(uint32_t) +
+                                new_n_len;
     uint8_t* new_template_data = malloc(new_td_len);
     if (new_template_data == NULL) {
         return CHARRA_RC_ERROR;
@@ -181,23 +264,34 @@ static CHARRA_RC redact_one_entry(const charra_event_log_entry* entry,
     uint32_t td_offset = 0;
     charra_event_log_append_bytes(
             new_template_data, &td_offset, d_field, d_field_len);
-    charra_event_log_append_u32(
-            new_template_data, &td_offset, CHARRA_SDK_REDACTED_PATH_LEN);
-    charra_event_log_append_bytes(new_template_data, &td_offset,
-            redacted_path, CHARRA_SDK_REDACTED_PATH_LEN);
+    charra_event_log_append_u32(new_template_data, &td_offset, new_n_len);
+    hex_encode_lower(commitment, CHARRA_SDK_REDACTED_PATH_LEN,
+            new_template_data + td_offset);
+    td_offset += CHARRA_SDK_REDACTED_DIR_HEX_LEN;
+    new_template_data[td_offset++] = (uint8_t)label;
+    if (base_len > 0) {
+        memcpy(new_template_data + td_offset, base, base_len);
+        td_offset += base_len;
+    }
+    new_template_data[td_offset++] = '\0';
 
-    /* template_digest = SHA256(new template_data), recomputed from the
-     * REDACTED content -- never copied from the original entry. */
+    /* template_digest recomputed from the REDACTED content -- never copied
+     * from the original entry -- and with the SAME algorithm the input log
+     * used, so log_r keeps log_a's shape. */
     uint8_t new_digest[TPM2_SHA256_DIGEST_SIZE] = {0};
-    charra_r = hash_sha256(new_td_len, new_template_data, new_digest);
+    const uint16_t digest_len = entry->template_digest_len;
+    if (digest_len == TPM2_SHA1_DIGEST_SIZE) {
+        charra_r = hash_sha1(new_td_len, new_template_data, new_digest);
+    } else {
+        charra_r = hash_sha256(new_td_len, new_template_data, new_digest);
+    }
     if (charra_r != CHARRA_RC_SUCCESS) {
         free(new_template_data);
         return CHARRA_RC_CRYPTO_ERROR;
     }
 
     charra_event_log_append_u32(buf, out_offset, entry->pcr_index);
-    charra_event_log_append_bytes(
-            buf, out_offset, new_digest, sizeof(new_digest));
+    charra_event_log_append_bytes(buf, out_offset, new_digest, digest_len);
     charra_event_log_append_u32(buf, out_offset, entry->template_name_len);
     charra_event_log_append_bytes(
             buf, out_offset, entry->template_name, entry->template_name_len);
@@ -213,7 +307,7 @@ static CHARRA_RC redact_one_entry(const charra_event_log_entry* entry,
  * commitments, and every path and salt collected for the prover.
  */
 static CHARRA_RC redact_log(const uint8_t* raw_log, uint32_t raw_log_len,
-        const uint8_t salt[CHARRA_SDK_PATH_SALT_LEN],
+        const uint8_t salt[CHARRA_SDK_PATH_SALT_LEN], char label,
         uint8_t** redacted_log_out, uint32_t* redacted_log_len_out,
         charra_zk_witness* witness) {
     if (redacted_log_out == NULL || redacted_log_len_out == NULL) {
@@ -236,11 +330,12 @@ static CHARRA_RC redact_log(const uint8_t* raw_log, uint32_t raw_log_len,
         return charra_r;
     }
 
-    /* A redacted entry is never larger than its original: the d-ng field is
-     * copied verbatim, and the n-ng field shrinks to a fixed 32 bytes unless
-     * the original path was shorter than that. Size for the worst case --
-     * every path shorter than its hash -- plus the digest possibly growing
-     * from SHA-1 to SHA-256. */
+    /* A redacted entry CAN be larger than its original now: the filename is
+     * kept and a 64-character hex commitment replaces the directory, so an
+     * entry grows by (64 - dir_len) bytes -- at most 64, when the directory
+     * is empty. The template digest keeps the input's width, so it
+     * contributes nothing. Size for that worst case, with a digest's worth
+     * of margin on top. */
     uint32_t num_entries = 0;
     {
         uint32_t offset = 0;
@@ -254,8 +349,9 @@ static CHARRA_RC redact_log(const uint8_t* raw_log, uint32_t raw_log_len,
             num_entries++;
         }
     }
-    const size_t slack = (size_t)num_entries *
-                         (CHARRA_SDK_REDACTED_PATH_LEN + TPM2_SHA256_DIGEST_SIZE);
+    const size_t slack =
+            (size_t)num_entries * (CHARRA_SDK_REDACTED_DIR_HEX_LEN +
+                                          TPM2_SHA256_DIGEST_SIZE);
     uint8_t* buf = malloc((size_t)raw_log_len + slack);
     if (buf == NULL) {
         return CHARRA_RC_ERROR;
@@ -301,7 +397,7 @@ static CHARRA_RC redact_log(const uint8_t* raw_log, uint32_t raw_log_len,
         }
 
         charra_r = redact_one_entry(
-                &entry, entry_num, entry_salt, buf, &out_offset, slot);
+                &entry, entry_num, entry_salt, label, buf, &out_offset, slot);
         if (charra_r != CHARRA_RC_SUCCESS) {
             goto error;
         }
@@ -331,13 +427,14 @@ error:
 
 CHARRA_RC charra_sdk_redact_ima_log(const uint8_t* raw_log,
         uint32_t raw_log_len, const uint8_t salt[CHARRA_SDK_PATH_SALT_LEN],
-        uint8_t** redacted_log_out, uint32_t* redacted_log_len_out) {
-    return redact_log(raw_log, raw_log_len, salt, redacted_log_out,
+        char label, uint8_t** redacted_log_out,
+        uint32_t* redacted_log_len_out) {
+    return redact_log(raw_log, raw_log_len, salt, label, redacted_log_out,
             redacted_log_len_out, NULL);
 }
 
 CHARRA_RC charra_sdk_redact_ima_log_with_witness(const uint8_t* raw_log,
-        uint32_t raw_log_len, uint8_t** redacted_log_out,
+        uint32_t raw_log_len, char label, uint8_t** redacted_log_out,
         uint32_t* redacted_log_len_out, charra_zk_witness* witness) {
     if (witness == NULL) {
         return CHARRA_RC_BAD_ARGUMENT;
@@ -345,6 +442,6 @@ CHARRA_RC charra_sdk_redact_ima_log_with_witness(const uint8_t* raw_log,
     memset(witness, 0, sizeof(*witness));
     /* Always a fresh per-entry salt: the shared-salt path exists only for the
      * qualification handshake, which does not run in ZK mode. */
-    return redact_log(raw_log, raw_log_len, NULL, redacted_log_out,
+    return redact_log(raw_log, raw_log_len, NULL, label, redacted_log_out,
             redacted_log_len_out, witness);
 }

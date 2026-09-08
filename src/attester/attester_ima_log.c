@@ -31,15 +31,22 @@ static uint32_t cached_ima_log_len = 0;
  *
  * The ima-ng layout is two length-prefixed fields:
  *
- *     u32 len | "<alg>" '\0' <file-digest>     (the d-ng field)
+ *     u32 len | "<alg>:" '\0' <file-digest>    (the d-ng field)
  *     u32 len | "<path>" '\0'                  (the n-ng field)
+ *
+ * The colon belongs to the stored prefix -- the kernel writes "sha256:" NUL,
+ * not "sha256" NUL, which is why a sha256 d-ng field is 44 bytes and not 43.
+ * Omitting it parsed fine here but broke every consumer that assumed the
+ * kernel's layout: the ZK circuit rejects the entry outright, and the ASCII
+ * emitter rendered "sha2569c89..." with no separator.
  *
  * @return the number of bytes written, or 0 if buf_len is too small.
  */
 static uint32_t build_ima_ng_template_data(const char* alg,
         const uint8_t* file_digest, uint32_t file_digest_len, const char* path,
         uint8_t* buf, uint32_t buf_len) {
-    const uint32_t alg_len = (uint32_t)strlen(alg) + 1; /* includes NUL */
+    /* strlen(alg) + ':' + NUL */
+    const uint32_t alg_len = (uint32_t)strlen(alg) + 2;
     const uint32_t d_len = alg_len + file_digest_len;
     const uint32_t n_len = (uint32_t)strlen(path) + 1; /* includes NUL */
     const uint32_t total = sizeof(uint32_t) + d_len + sizeof(uint32_t) + n_len;
@@ -49,7 +56,8 @@ static uint32_t build_ima_ng_template_data(const char* alg,
 
     uint32_t offset = 0;
     charra_event_log_append_u32(buf, &offset, d_len);
-    charra_event_log_append_bytes(buf, &offset, alg, alg_len);
+    charra_event_log_append_bytes(buf, &offset, alg, (uint32_t)strlen(alg));
+    charra_event_log_append_bytes(buf, &offset, ":", 2); /* ':' and its NUL */
     charra_event_log_append_bytes(buf, &offset, file_digest, file_digest_len);
     charra_event_log_append_u32(buf, &offset, n_len);
     charra_event_log_append_bytes(buf, &offset, path, n_len);

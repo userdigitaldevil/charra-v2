@@ -67,15 +67,15 @@ set -euo pipefail
 # =============================================================================
 
 # --- Relying Party: cadence -------------------------------------------------
-RP_INTERVAL="${RP_INTERVAL:-15}"                 # --interval, seconds between cycles
+RP_INTERVAL="${RP_INTERVAL:-8}"                 # --interval, seconds between cycles
 RP_VERIFIERS="${RP_VERIFIERS:-5}"                # --verifiers, 1..10; also how many get started
 RP_DURATION="${RP_DURATION:-0}"                  # --duration, 0 = run until SIGINT
 RP_CYCLES="${RP_CYCLES:-0}"                      # --cycles, 0 = unbounded
 
 # --- Relying Party: timeouts ------------------------------------------------
 # A Verifier that times out counts against the majority exactly like a NO vote.
-RP_VERIFIER_TIMEOUT="${RP_VERIFIER_TIMEOUT:-6}"  # --verifier-timeout, seconds
-RP_ATTESTER_TIMEOUT="${RP_ATTESTER_TIMEOUT:-6}"  # --attester-timeout, seconds
+RP_VERIFIER_TIMEOUT="${RP_VERIFIER_TIMEOUT:-30}"  # --verifier-timeout, seconds
+RP_ATTESTER_TIMEOUT="${RP_ATTESTER_TIMEOUT:-30}"  # --attester-timeout, seconds
 
 # --- Verifier: what IT grants -----------------------------------------------
 # How long a passing /qualify is honoured for. The Verifier that runs the

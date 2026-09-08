@@ -9,6 +9,8 @@
  * Build and run:  make test_sdk && ./bin/test_sdk
  */
 
+#define _GNU_SOURCE /* memmem */
+
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,7 +43,7 @@ static void test_redacted_log_is_valid_replay_input(void) {
     uint8_t* redacted = NULL;
     uint32_t redacted_len = 0;
     CHARRA_RC rc = charra_sdk_redact_ima_log(
-            raw_log, raw_log_len, NULL, &redacted, &redacted_len);
+            raw_log, raw_log_len, NULL, CHARRA_SDK_DEFAULT_LABEL, &redacted, &redacted_len);
     check("redaction succeeds", rc == CHARRA_RC_SUCCESS);
     check("redacted log is non-empty", redacted != NULL && redacted_len > 0);
 
@@ -65,7 +67,7 @@ static void test_redacted_pcr_differs_from_raw(void) {
     uint8_t* redacted = NULL;
     uint32_t redacted_len = 0;
     charra_sdk_redact_ima_log(
-            raw_log, raw_log_len, NULL, &redacted, &redacted_len);
+            raw_log, raw_log_len, NULL, CHARRA_SDK_DEFAULT_LABEL, &redacted, &redacted_len);
 
     uint8_t pcr_raw[TPM2_SHA256_DIGEST_SIZE] = {0};
     uint8_t pcr_redacted[TPM2_SHA256_DIGEST_SIZE] = {0};
@@ -94,8 +96,8 @@ static void test_salted_nondeterministic(void) {
 
     uint8_t *redacted_a = NULL, *redacted_b = NULL;
     uint32_t len_a = 0, len_b = 0;
-    charra_sdk_redact_ima_log(raw_log, raw_log_len, NULL, &redacted_a, &len_a);
-    charra_sdk_redact_ima_log(raw_log, raw_log_len, NULL, &redacted_b, &len_b);
+    charra_sdk_redact_ima_log(raw_log, raw_log_len, NULL, CHARRA_SDK_DEFAULT_LABEL, &redacted_a, &len_a);
+    charra_sdk_redact_ima_log(raw_log, raw_log_len, NULL, CHARRA_SDK_DEFAULT_LABEL, &redacted_b, &len_b);
 
     /* with salt == NULL, a fresh salt is generated per call and never
      * transmitted, so two redactions of the identical input must land on
@@ -124,9 +126,9 @@ static void test_shared_salt_is_deterministic(void) {
     uint8_t *redacted_a = NULL, *redacted_b = NULL;
     uint32_t len_a = 0, len_b = 0;
     charra_sdk_redact_ima_log(
-            raw_log, raw_log_len, salt, &redacted_a, &len_a);
+            raw_log, raw_log_len, salt, CHARRA_SDK_DEFAULT_LABEL, &redacted_a, &len_a);
     charra_sdk_redact_ima_log(
-            raw_log, raw_log_len, salt, &redacted_b, &len_b);
+            raw_log, raw_log_len, salt, CHARRA_SDK_DEFAULT_LABEL, &redacted_b, &len_b);
 
     /* this is the whole point of the salt parameter: the RP qualification
      * handshake needs the RP's redaction to byte-match the Verifier's own
@@ -139,7 +141,7 @@ static void test_shared_salt_is_deterministic(void) {
     uint8_t* redacted_random = NULL;
     uint32_t len_random = 0;
     charra_sdk_redact_ima_log(
-            raw_log, raw_log_len, NULL, &redacted_random, &len_random);
+            raw_log, raw_log_len, NULL, CHARRA_SDK_DEFAULT_LABEL, &redacted_random, &len_random);
     check("differs from a NULL-salt (random) redaction of the same log",
             len_random != len_a ||
                     memcmp(redacted_random, redacted_a, len_a) != 0);
@@ -164,7 +166,7 @@ static void test_different_entries_redact_differently(void) {
     uint8_t* redacted = NULL;
     uint32_t redacted_len = 0;
     charra_sdk_redact_ima_log(
-            raw_log, raw_log_len, NULL, &redacted, &redacted_len);
+            raw_log, raw_log_len, NULL, CHARRA_SDK_DEFAULT_LABEL, &redacted, &redacted_len);
 
     /* Walk the redacted log and collect each entry's template_digest. */
     uint16_t digest_len = 0;
@@ -208,11 +210,13 @@ static void test_file_digest_preserved_path_redacted(void) {
     uint8_t* redacted = NULL;
     uint32_t redacted_len = 0;
     charra_sdk_redact_ima_log(
-            raw_log, raw_log_len, NULL, &redacted, &redacted_len);
+            raw_log, raw_log_len, NULL, CHARRA_SDK_DEFAULT_LABEL, &redacted, &redacted_len);
 
     /* pull the file-content digest straight out of the RAW entry's
-     * template_data: u32(d_len) + "sha256:" (7 bytes) + digest (32 bytes)
-     * + u32(n_len) + path + NUL -- the real ima-ng two-field layout */
+     * template_data: u32(d_len) + "sha256:" NUL (8 bytes) + digest (32
+     * bytes) + u32(n_len) + path + NUL -- the real ima-ng two-field layout.
+     * The prefix is EIGHT bytes, not seven: the NUL after the colon is part
+     * of the field. */
     uint16_t raw_digest_len = 0;
     charra_event_log_ima_detect_digest_len(
             raw_log, raw_log_len, &raw_digest_len);
@@ -220,8 +224,8 @@ static void test_file_digest_preserved_path_redacted(void) {
     charra_event_log_entry raw_entry = {0};
     charra_event_log_parse_entry(
             raw_log, raw_log_len, &raw_offset, raw_digest_len, &raw_entry);
-    const char* prefix = "sha256:";
-    uint32_t prefix_len = (uint32_t)strlen(prefix);
+    const char* prefix = CHARRA_IMA_ALGO_PREFIX;
+    uint32_t prefix_len = (uint32_t)CHARRA_IMA_ALGO_PREFIX_LEN;
     uint32_t d_len_prefix = (uint32_t)sizeof(uint32_t);
     check("raw template_data is at least prefix+digest long",
             raw_entry.template_data_len >=
@@ -238,10 +242,22 @@ static void test_file_digest_preserved_path_redacted(void) {
     charra_event_log_parse_entry(redacted, redacted_len, &red_offset,
             redacted_digest_len, &red_entry);
 
-    check("redacted template_data is exactly 79 bytes "
-          "(4-byte d-ng length + 7-byte prefix + 32-byte file digest "
-          "+ 4-byte n-ng length + 32-byte path hash)",
-            red_entry.template_data_len == 79);
+    /* The first synthetic path is /home/finance/payroll_2024.csv, so the
+     * filename kept in the clear is 16 characters. Spelled out as a sum
+     * rather than a magic number, since every term is a design decision:
+     *   4  d-ng length prefix
+     *   8  "sha256:" and its NUL
+     *  32  file-content digest, copied verbatim
+     *   4  n-ng length prefix
+     *  64  the directory commitment, hex
+     *   1  the label
+     *  16  "payroll_2024.csv"
+     *   1  the path's NUL, which a well-formed n-ng field keeps */
+    const uint32_t expect_td_len = 4 + 8 + 32 + 4 +
+                                   CHARRA_SDK_REDACTED_DIR_HEX_LEN + 1 +
+                                   (uint32_t)strlen("payroll_2024.csv") + 1;
+    check("redacted template_data is the expected length",
+            red_entry.template_data_len == expect_td_len);
     check("redacted template_data starts with \"sha256:\" after its d-ng "
           "length prefix",
             red_entry.template_data_len >= d_len_prefix + prefix_len &&
@@ -252,6 +268,15 @@ static void test_file_digest_preserved_path_redacted(void) {
                     d_len_prefix + prefix_len + TPM2_SHA256_DIGEST_SIZE &&
                     memcmp(red_entry.template_data + d_len_prefix + prefix_len,
                             raw_file_digest, TPM2_SHA256_DIGEST_SIZE) == 0);
+
+    /* the filename survives in the clear -- that is what the whitelist
+     * checks against -- while the directory it lived in does not */
+    check("the filename is kept",
+            memmem(red_entry.template_data, red_entry.template_data_len,
+                    "payroll_2024.csv", 16) != NULL);
+    check("the directory is NOT present",
+            memmem(red_entry.template_data, red_entry.template_data_len,
+                    "/home/finance", 13) == NULL);
 
     /* the sensitive path must not appear anywhere in the redacted log */
     const char* needle = "/etc/company/api_keys.conf";
@@ -276,7 +301,7 @@ static void test_empty_log(void) {
     uint8_t* redacted = NULL;
     uint32_t redacted_len = 999;
     CHARRA_RC rc =
-            charra_sdk_redact_ima_log(NULL, 0, NULL, &redacted, &redacted_len);
+            charra_sdk_redact_ima_log(NULL, 0, NULL, CHARRA_SDK_DEFAULT_LABEL, &redacted, &redacted_len);
 
     check("succeeds", rc == CHARRA_RC_SUCCESS);
     check("output is NULL", redacted == NULL);
@@ -291,15 +316,15 @@ static void test_bad_arguments(void) {
     uint8_t dummy[4] = {0};
 
     check("NULL redacted_log_out rejected",
-            charra_sdk_redact_ima_log(
-                    dummy, sizeof(dummy), NULL, NULL, &out_len) ==
+            charra_sdk_redact_ima_log(dummy, sizeof(dummy), NULL,
+                    CHARRA_SDK_DEFAULT_LABEL, NULL, &out_len) ==
                     CHARRA_RC_BAD_ARGUMENT);
     check("NULL redacted_log_len_out rejected",
-            charra_sdk_redact_ima_log(
-                    dummy, sizeof(dummy), NULL, &out, NULL) ==
+            charra_sdk_redact_ima_log(dummy, sizeof(dummy), NULL,
+                    CHARRA_SDK_DEFAULT_LABEL, &out, NULL) ==
                     CHARRA_RC_BAD_ARGUMENT);
     check("NULL raw_log with non-zero length rejected",
-            charra_sdk_redact_ima_log(NULL, 10, NULL, &out, &out_len) ==
+            charra_sdk_redact_ima_log(NULL, 10, NULL, CHARRA_SDK_DEFAULT_LABEL, &out, &out_len) ==
                     CHARRA_RC_BAD_ARGUMENT);
 }
 
@@ -310,7 +335,7 @@ static void test_malformed_log_rejected(void) {
     uint8_t* out = NULL;
     uint32_t out_len = 0;
     CHARRA_RC rc = charra_sdk_redact_ima_log(
-            garbage, sizeof(garbage), NULL, &out, &out_len);
+            garbage, sizeof(garbage), NULL, CHARRA_SDK_DEFAULT_LABEL, &out, &out_len);
     check("truncated/garbage log rejected", rc != CHARRA_RC_SUCCESS);
 }
 
