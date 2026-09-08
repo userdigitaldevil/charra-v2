@@ -273,9 +273,24 @@ and Base64-encodes — the same 167 entries occupy 35,823 bytes. Both commitment
 give the same size, since each is 32 bytes before hex.
 
 Redaction is therefore not a meaningful cost in itself: a whole 167-entry log
-is rewritten in about a millisecond. What it *forces* is expensive — replaying
-the redacted log into a TPM to obtain a second quote takes roughly 14 s on this
-hardware — but that is the price of the second quote, not of the rewriting.
+is rewritten in about a millisecond. What it *forces* is expensive. Because the
+redacted log no longer replays to the Attester's PCR, the RP must replay it into
+its own TPM to obtain a second quote, one `TPM2_PCR_Extend` round trip per
+entry:
+
+| **Operation** | **Whole log (167 entries)** | **Per entry** |
+|---|--:|--:|
+| RP replay of `log_r` into PCR 23, `n = 5` cycles | **14.159 s ± 0.037** | **84.79 ms ± 0.22** |
+
+That is roughly **13,000 times** the cost of the redaction itself, and it is the
+price of the second quote rather than of the rewriting. It is also the reason
+this approach does not reach a real IMA log: at ~85 ms an entry, and with the
+per-entry cost flat in log length, several thousand entries would take minutes.
+
+Note that this is the **IBM TPM 2.0 software simulator** reached over `mssim`,
+not a discrete hardware TPM, and it runs inside the emulated container
+described below. The cost is dominated by per-extend round trips to an emulated
+process rather than by cryptography, so hardware would plausibly be faster.
 
 *Conditions.* Apple M4 Pro (8 performance + 4 efficiency cores), 24 GiB RAM,
 macOS 26.6.2 on `arm64`; Docker Desktop 29.6.2 with 12 CPUs and 7.75 GiB

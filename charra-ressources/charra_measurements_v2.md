@@ -337,6 +337,37 @@ the RP logs — 0.002 s, printed to three decimals — agrees with 1.090 ms only
 within its own rounding. The Poseidon figures are a much sharper check: 370.6 ms
 measured here against the 0.371 s and 0.395 s the RP logged in live ZK runs.
 
+### TPM replay of the 167-entry log, per entry
+
+Redaction is cheap; the replay it forces is not. This is the RP extending
+`log_r` into PCR 23 of its own TPM — one `TPM2_PCR_Extend` round trip per
+entry — measured over **five consecutive attestation cycles** of a live
+`run_daemon.sh`, 835 extends in total.
+
+| **Operation** | **Whole log (167 entries)** | **Per entry** |
+|---|--:|--:|
+| RP replay of `log_r` into PCR 23 (`n = 5`) | **14.159 s ± 0.037** | **84.79 ms ± 0.22** |
+| Attester extend of `log_a` into PCR 10 (`n = 1`) | 14.136 s | 84.65 ms |
+
+The Attester's figure is a single observation because it converts and extends
+its log once and caches the result, so a five-cycle run exercises it only on
+the first `/attest`.
+
+This agrees closely with the 33-entry row earlier in this section: 2833.0 ms
+over 33 entries is 85.85 ms per entry, against 84.79 ms here over five times
+as many. Per-entry cost is essentially flat in log length, which is what a
+per-call round trip should look like — the log gets longer, the cost per entry
+does not move. It also means the whole replay scales linearly, and at ~85 ms an
+entry a real IMA log of several thousand entries would take minutes.
+
+**This is a software TPM, not a discrete one.** The measurement is against the
+IBM TPM 2.0 simulator (`tpm_server`), one instance per role, reached over
+`mssim` on localhost — and inside a `linux/amd64` container emulated on an
+`arm64` host. A hardware TPM would give a different figure, plausibly a faster
+one: these are slow because every extend is a socket round trip to an emulated
+process, not because the cryptography is expensive. The conditions block above
+applies unchanged.
+
 **Once per Verifier** (`n = 165`) — `charra_rp_build_evidence_message()` and the
 submission that follows:
 
