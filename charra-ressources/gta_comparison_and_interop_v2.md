@@ -278,14 +278,36 @@ redacted log no longer replays to the Attester's PCR, the RP must replay it into
 its own TPM to obtain a second quote, one `TPM2_PCR_Extend` round trip per
 entry:
 
-| **Operation** | **Whole log (167 entries)** | **Per entry** |
-|---|--:|--:|
-| RP replay of `log_r` into PCR 23, `n = 5` cycles | **14.159 s ± 0.037** | **84.79 ms ± 0.22** |
+| **Operation** | **Who performs it** | **Whole log (167 entries)** | **Per entry** |
+|---|---|--:|--:|
+| Software replay — recompute the chain and compare | GTA's server; CHARRA's Verifiers | **0.065 ms ± 0.015** | **0.0004 ms** |
+| TPM replay — `TPM2_PCR_Extend` per entry | CHARRA's RP only | **14,159 ms ± 37** | **84.79 ms ± 0.22** |
 
-That is roughly **13,000 times** the cost of the redaction itself, and it is the
-price of the second quote rather than of the rewriting. It is also the reason
-this approach does not reach a real IMA log: at ~85 ms an entry, and with the
+The two differ by a factor of roughly **218,000**, and the reason is that they
+are not the same task.
+
+*Verifying* a log means recomputing its hash chain and comparing the result
+with a value that has already been signed. That is arithmetic; it needs no TPM.
+It is what GTA's server does — the server links no TPM library at all, only the
+agent does — and it is also what each CHARRA Verifier does. At 0.065 ms for the
+whole log, verification is effectively free on both sides.
+
+CHARRA's Relying Party is not verifying. It is *producing a new attestation*.
+Redaction changes every `template_hash`, so `log_r` no longer replays to the
+Attester's PCR; the RP must therefore extend the redacted log into a PCR on its
+own TPM and sign a fresh quote over the result. That needs real hardware and one
+round trip per entry. The 14 s is the price of the second quote — roughly
+**13,000 times** the redaction that necessitates it, and about 218,000 times
+what checking the result costs. GTA has no equivalent line because it does not
+redact.
+
+It is also why this does not reach a real IMA log: at ~85 ms an entry, with the
 per-entry cost flat in log length, several thousand entries would take minutes.
+
+GTA's agent does use a TPM, but only to produce a quote — a few operations, not
+one per entry. It never extends the IMA log itself: on a real machine the kernel
+does that as files are measured, at no cost to the attestation. The manual PCR
+extension described in §4.7 is precisely the step that would not exist there.
 
 Note that this is the **IBM TPM 2.0 software simulator** reached over `mssim`,
 not a discrete hardware TPM, and it runs inside the emulated container

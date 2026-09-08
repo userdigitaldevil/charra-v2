@@ -25,6 +25,7 @@
 #include "../src/core/charra_ima_ascii.h"
 #include "../src/core/charra_sdk.h"
 #include "../src/core/charra_zk.h"
+#include "../src/util/tpm2_util.h"
 
 #define ITERATIONS 100
 
@@ -148,6 +149,33 @@ int main(int argc, char** argv) {
         memset(&w, 0, sizeof(w)); /* the witness holds real paths and salts */
     }
 
+    /* --- software replay: what a Verifier does, and what GTA's server does
+     * for the whole of its check. No TPM involved. ----------------------- */
+    double* rep = malloc(sizeof(double) * ITERATIONS);
+    int rep_ok = (rep != NULL);
+    if (rep_ok) {
+        uint8_t* red = NULL;
+        uint32_t red_len = 0;
+        if (charra_sdk_redact_ima_log(log, log_len, NULL,
+                    CHARRA_SDK_DEFAULT_LABEL, &red, &red_len) !=
+                CHARRA_RC_SUCCESS) {
+            rep_ok = 0;
+        } else {
+            for (int i = 0; i < ITERATIONS; i++) {
+                uint8_t pcr[TPM2_SHA256_DIGEST_SIZE] = {0};
+                const double t0 = now_s();
+                const CHARRA_RC rc = charra_replay_ima_log(
+                        red, red_len, CHARRA_IMA_PCR_INDEX, pcr);
+                rep[i] = now_s() - t0;
+                if (rc != CHARRA_RC_SUCCESS) {
+                    rep_ok = 0;
+                    break;
+                }
+            }
+            free(red);
+        }
+    }
+
     double m = 0.0, sd = 0.0;
     stats(sha, ITERATIONS, &m, &sd);
     printf("SHA-256 (default, every cycle)\n");
@@ -163,6 +191,14 @@ int main(int argc, char** argv) {
         printf("  per entry    %.4f ms\n", m / entries);
     }
 
+    if (rep_ok) {
+        stats(rep, ITERATIONS, &m, &sd);
+        printf("\nSoftware replay of log_r (no TPM -- what a Verifier does)\n");
+        printf("  whole log    %.3f ms +/- %.3f\n", m, sd);
+        printf("  per entry    %.4f ms\n", m / entries);
+    }
+
+    free(rep);
     free(sha);
     free(pos);
     free(log);
