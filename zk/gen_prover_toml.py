@@ -36,12 +36,12 @@ PROVER = pathlib.Path(
 MAX_BYTES = 192
 MAX_MSG = 183
 MAX_PATH = 136
-HEADER_LEN = 47
+HEADER_LEN = 48
 
 # Slots the circuit was compiled for -- main.nr's `global N`. A shorter log is
 # padded up to this and the padding marked by n_real; a longer one cannot be
 # proved at all without recompiling and redistributing the verification key.
-MAX_N = 33
+MAX_N = 167
 
 
 def path_bytes(p):

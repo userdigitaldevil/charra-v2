@@ -82,8 +82,8 @@ data_len B  template_data
 ### `template_data` — `build_ima_ng_template_data()`, attester_ima_log.c:39
 
 ```
-u32le  d_len       (= alg_len + 32 = 7 + 32 = 39)
-7B     "sha256\0"  (alg name INCLUDING its NUL)
+u32le  d_len       (= alg_len + 32 = 8 + 32 = 40)
+8B     "sha256:\0" (alg name, its COLON, and the NUL)
 32B    file_digest
 u32le  n_len       (= strlen(path) + 1)
 n_len B  path ‖ "\0"
@@ -377,7 +377,7 @@ on every proof."
 | A quoted PCR above index 10 | PCR 10 is no longer last in the composite | wrong shape |
 | Log extends more than one PCR | single `pcr` accumulator | redesign |
 | `ima-sig` / `ima-buf` instead of `ima-ng` | `template.nr` layout | rewrite that module |
-| SHA-1 or SHA-512 template hash | `d_len = 39`, digest primitive | rewrite |
+| SHA-1 or SHA-512 template hash | `d_len = 40`, digest primitive | rewrite |
 
 ### How each would be done, cheapest first
 

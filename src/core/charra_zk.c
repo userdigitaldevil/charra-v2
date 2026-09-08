@@ -93,8 +93,16 @@ CHARRA_RC charra_zk_write_witness_json(
         print_hex(f, e->commitment, 32);
         /* The circuit derives template_data itself, but the generator
          * cross-checks this length against the layout constant it assumes --
-         * a mismatch is far easier to read here than as a digest mismatch. */
-        fprintf(f, "\",\n      \"template_data_len\": %u\n", 47u + e->path_len);
+         * a mismatch is far easier to read here than as a digest mismatch.
+         *
+         * Derived rather than written as a literal: this was 47, one short,
+         * from before the algorithm prefix gained its colon, and a stale
+         * literal here fails as "HEADER_LEN wrong" in a Python script two
+         * containers away. u32 d_len | "sha256:" NUL | digest | u32 n_len. */
+        const uint32_t header_len = (uint32_t)(2 * sizeof(uint32_t) +
+                                               CHARRA_IMA_ALGO_PREFIX_LEN + 32);
+        fprintf(f, "\",\n      \"template_data_len\": %u\n",
+                header_len + e->path_len);
         fprintf(f, "    }%s\n", (i + 1 < witness->num_entries) ? "," : "");
     }
 

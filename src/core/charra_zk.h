@@ -32,7 +32,7 @@ struct charra_zk_public_inputs;
  * results, never skip them. A longer log cannot be proved at all without
  * raising N, recompiling, and redistributing zk/vk.
  */
-#define CHARRA_ZK_MAX_ENTRIES 33
+#define CHARRA_ZK_MAX_ENTRIES 167
 
 /** One entry's witness. `path` and `salt` are secret and must not be
  *  marshaled into any message. */

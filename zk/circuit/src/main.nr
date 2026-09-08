@@ -31,9 +31,9 @@ mod commit;
 /// The most entries this circuit can prove. A circuit has no runtime loop
 /// bound, so this is fixed at compile time and every proof pays for all N
 /// slots whatever `n_real` says -- a 5-entry log costs exactly what a
-/// 33-entry one costs. Raising it needs a recompile and a new verification
+/// 167-entry one costs. Raising it needs a recompile and a new verification
 /// key; see the PoC boundary note in ZK_REDACTION.md.
-global N: u32 = 33;
+global N: u32 = 167;
 
 fn main(
     // Private: the file paths the redaction exists to hide. Each is the

@@ -61,7 +61,7 @@ Then re-run `negative_test.sh`, and a live cycle:
 
 ### Change the entry ceiling
 
-The circuit is compiled for at most `global N` entries — 33 by default. A
+The circuit is compiled for at most `global N` entries — 167 by default. A
 longer log cannot be proved. Raising it means editing three places that must
 agree, then regenerating the key:
 
