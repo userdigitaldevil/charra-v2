@@ -75,7 +75,7 @@ of work in v2; and *discoverVerifiers* has no v1 counterpart at all.
 | Samples (steady state) | 10 measured cycles per sweep step, plus 1 discarded warm-up; 55 attestation cycles in total. This describes the main sweep, taken with `NUM_RUNS = 10`; the trust-mode comparison sections were run later at `NUM_RUNS = 5` and say so. |
 | Samples (one-off costs) | 10 independent cold starts, each wiping both NVChips, restarting both simulators, regenerating the trust anchor and clearing the qualification grant |
 | Verifiers | Sweep of 1 to 5 |
-| IMA log under test | **33 entries**, 4728 bytes raw → `log_r` 4257 bytes after redaction |
+| IMA log under test | **33 entries**, 4728 bytes raw → `log_r` 4257 bytes after redaction. **This is no longer the default log.** `ima_test_logs.txt` now holds the 167-entry vendor evidence, and every figure below that scales with entry count — the PCR extend, both replays, the redaction — is correspondingly larger on it: the extend alone measures ~14 s rather than the 2.7 s tabulated here. The tables are kept as the measurements they were; re-running the sweep against the 167-entry log is a separate exercise. |
 | Qualification challenge log | **40 entries**, 5210 bytes (synthetic, generated fresh per handshake) |
 | Evidence size | 6582 bytes on the wire |
 | Trust mode | `TRUST_MODE=qualify`, the default. `tee` and `zk` are measured in their own sections; no figure outside those was taken under either. |
@@ -629,19 +629,30 @@ where the sweep settles at 4.1 s.
 | Public inputs (rebuilt by the Verifier, never sent) | 44 KB |
 | Verification key | 3.7 KB |
 
-Two figures bound what this can be used for. The circuit is compiled for at
-most 33 entries and the cost grows linearly with that ceiling — measured up to
-192 entries, where 7.75 GiB of RAM runs out — so a real IMA log of thousands of
-entries is out of reach. And proving runs in a native
+Two figures bound what this can be used for. The circuit is compiled for a
+fixed ceiling — `global N`, **167** at the time of writing, sized to the vendor
+evidence log — and the cost grows linearly with it, so a real IMA log of
+thousands of entries is out of reach. And proving runs in a native
 `linux/arm64` container: under x86 emulation Barretenberg does not run at
 all.
+
+> **The figures in this section and the next were measured against the
+> three-SHA-block circuit, compiled for 33 entries.** The circuit has since
+> changed in two ways that raise the per-entry cost: it rebuilds the *whole*
+> path — rejoining a private directory with a public filename — rather than
+> hashing a single array, and the longest resulting record (185 B) no longer
+> fits three SHA-256 blocks, so `sha256_var` now uses four. A single
+> observed run of the current circuit at N = 167 took ~39 s to prove with
+> 6.8 GiB peak. That is one shot, not the five-run average the tables below
+> report, and it is not comparable to them; the tables are kept as the
+> measurements they were rather than being overwritten with estimates.
 
 ---
 
 ## How the ZK proof scales with the log
 
-The section above prices one circuit, compiled for 33 entries. This one asks
-what happens as that ceiling moves — which is the question that decides
+The section above prices one circuit, compiled for 33 entries with the
+three-block SHA. This one asks what happens as that ceiling moves — which is the question that decides
 whether the approach could ever meet a real IMA log.
 
 Nine circuits were compiled, each proved **five times**, so every row carries a

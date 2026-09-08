@@ -72,15 +72,18 @@ each item was checked by symbol lookup in both versions.
 
 **4.1 Privacy: log redaction and a second quote.** Previously the Relying Party
 forwarded the Attester's evidence as received. It now has
-`charra_sdk_redact_ima_log()`,
-which rewrites each log entry's path, and `charra_event_log` / IMA log replay
-(`charra_replay_ima_log`). Because the redacted log is no longer the log the
-Attester measured, the RP cannot forward the Attester's PCR value; it replays
-the redacted log into **its own TPM** to rebuild `PCR_r` and signs a second
-quote, `Quote_r`, over it (`rp_quote_pcr_with_ak`). **That replay is the single
-most expensive operation in the system** — not the quote that follows it, and
-not the redaction that necessitates it. See `charra_measurements_v2` for the
-figures and **Appendix A** for how the mechanism works.
+`charra_sdk_redact_ima_log()`, which rewrites each log entry's **directory** —
+committing it and leaving the filename in the clear — and `charra_event_log` /
+IMA log replay (`charra_replay_ima_log`). Because the redacted log is no longer
+the log the Attester measured, the RP cannot forward the Attester's PCR value;
+it replays the redacted log into **its own TPM** to rebuild `PCR_r` and signs a
+second quote, `Quote_r`, over it (`rp_quote_pcr_with_ak`). **That replay is the
+single most expensive operation in the system** — not the quote that follows
+it, and not the redaction that necessitates it. The redacted log the Verifiers
+receive can now be read directly: `--redacted-log-out` writes it as ASCII every
+cycle (default `redacted_ima_logs.txt`), in the same format the Attester's own
+log arrives in, so the two diff column for column. See `charra_measurements_v2`
+for the figures and **Appendix A** for how the mechanism works.
 
 **4.2 An identity mechanism.** There was none before. There is now a flat trust
 anchor, `keys/trusted_keys.txt`, holding the public halves of the two
@@ -338,12 +341,25 @@ prover chose it, it could mark entries as padding and drop them from the
 replay. And `zk/negative_test.sh` checks all of that empirically — six
 tampering cases, each rejected, against an honest witness that is accepted.
 
-Two boundaries are worth stating plainly. The circuit is compiled for **at
-most 33 entries**; a real IMA log has thousands, and the cost grows with the
-count, so this does not scale to one. And Barretenberg needs x86 instructions
-Rosetta does not emulate, so the prover runs in its own `linux/arm64`
-container alongside the charra one, sharing the checkout — which is also the
-job queue between them.
+Two boundaries are worth stating plainly. The circuit is compiled for a fixed
+entry count — `global N`, currently **167**, sized to the vendor evidence log
+now used throughout. Proving that costs about 39 s and 6.8 GiB of peak RAM,
+which is close to the ceiling a 7.75 GiB Docker allocation allows; a real IMA
+log has thousands of entries, and since every proof pays for all `N` slots
+whatever the log's actual length, this does not scale to one. Raising `N`
+means editing three constants that must agree (`main.nr`, `gen_prover_toml.py`,
+`charra_zk.h`), recompiling the circuit and redistributing `zk/vk`. And
+Barretenberg needs x86 instructions Rosetta does not emulate, so the prover
+runs in its own `linux/arm64` container alongside the charra one, sharing the
+checkout — which is also the job queue between them.
+
+The circuit takes the directory as a **private** input and the filename as a
+**public** one, and rejoins them with the label to rebuild the record the
+Attester measured. It has to: the commitment in `log_r` covers the directory
+alone, while the PCR chain covers the whole path, so one array cannot serve
+both. Making the filename public is also what lets a Verifier tie the name it
+reads in `log_r` to the one that was proved — a private filename would let an
+RP prove one and publish another.
 
 Neither mechanism subsumes the other. Qualification proves the redaction OUTPUT, the
 TEE names the CODE that produced it, and the ZK proof shows the redaction was
@@ -422,15 +438,39 @@ The path is the sensitive half — it reveals what software and configuration
 exist on the Attester. The content digest is not: on its own it says only that
 some file hashed to some value, not where that file lives.
 
-5\. **Redaction.** `charra_sdk_redact_ima_log()` replaces each path with
-`SHA256(original_path || salt)`, copying the content digest through byte for
-byte. The salt is a fresh 32 bytes **per entry**, and for real evidence it is
-never transmitted (the qualification handshake is the one deliberate exception —
-see Appendix B). That granularity buys two distinct properties: the mapping is irreversible even
-against a dictionary of guessed paths, which an unsalted `SHA256(path)` would
-not be; and two entries with the *same* path redact to *different* values, so a
-Verifier cannot count or correlate repeated paths. Because content digests
-survive, appraisal by content hash — the whitelist/blacklist pass — still works.
+5\. **Redaction.** Only the **directory** is sensitive, so only the directory is
+hidden. A path splits at its last `/`, and the two halves leak very different
+things: the directory carries deployment detail — mount points, job instance
+identifiers, version-stamped image names such as
+`/var/secbox/job/lte/secbox_lte_ai_3_24_0/…` — while the filename is a generic
+library name the vendor's own published baseline already lists. So
+`charra_sdk_redact_ima_log()` rewrites each entry's n-ng field as
+
+```
+hex(SHA256(dir || salt)) | label | filename | NUL
+```
+
+copying the content digest through byte for byte. In practice an entry reads
+`2305abb3…5d1e/libxt_tcp.so`. The salt is a fresh 32 bytes **per entry**, and
+for real evidence it is never transmitted (the qualification handshake is the
+one deliberate exception — see Appendix B). That granularity buys two distinct
+properties: the mapping is irreversible even against a dictionary of guessed
+directories, which an unsalted `SHA256(dir)` would not be; and two entries in
+the *same* directory redact to *different* values, so a Verifier cannot count
+or correlate them.
+
+Keeping the filename in the clear is what makes appraisal still work at full
+strength: the whitelist is matched on **name and content hash together**, so a
+known-good binary sitting under a name it has no business having is still a
+finding. The commitment is rendered as 64 hex characters rather than 32 raw
+bytes so that `log_r` remains a printable IMA log, writable in the same ASCII
+format `log_a` arrived in and diffable against it column for column — which is
+what `--redacted-log-out` now writes to disk every cycle.
+
+`charra_sdk_redact_ima_log_with_witness()` is the same function with Poseidon
+in place of SHA-256, used only in ZK mode because a commitment the circuit has
+to re-check is far cheaper there. Both are 32 bytes before hex, so `log_r`'s
+format is identical either way.
 
 6\. **Why redaction forces a second quote.** Change any entry and the replay no
 longer reproduces the Attester's PCR 10. The RP therefore *cannot* forward

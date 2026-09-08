@@ -95,8 +95,8 @@ environment **without editing the file at all**:
 | `RP_VERIFIERS`                      |      5       | How many Verifiers to use — and how many get started (1..10)                      |
 | `RP_DURATION`                       |      0       | Stop after N seconds; 0 = until Ctrl-C                                            |
 | `RP_CYCLES`                         |      0       | Stop after N cycles; 0 = unbounded                                                |
-| `RP_VERIFIER_TIMEOUT`               |      6       | Per Verifier round trip; a timeout counts as a NO vote                            |
-| `RP_ATTESTER_TIMEOUT`               |      6       | Attester round trip; exceeding it abandons the cycle                              |
+| `RP_VERIFIER_TIMEOUT`               |      30      | Per Verifier round trip; a timeout counts as a NO vote                            |
+| `RP_ATTESTER_TIMEOUT`               |      30      | Attester round trip; exceeding it abandons the cycle                              |
 | `VERIFIER_QUALIFICATION_VALIDITY`   |     180      | How long a passing `/qualify` is honoured                                         |
 | `TWO_TPMS`                          |      1       | One simulator per role; `0` falls back to a single shared TPM                     |
 | `ATTESTER_TPM_PORT` / `RP_TPM_PORT` | 2321 / 2325  | Simulator ports (each binds `PORT` and `PORT+1`)                                  |
@@ -235,7 +235,7 @@ To complete a full round of remote attestation:
         --trust-mode=qualify|tee|zk     what it requires of the RP (default qualify)
         --zk-verification-key=PATH      key for --trust-mode=zk (default zk/vk)
         --whitelist-hashes=PATH         file digests it permits in log_r
-                                        (default whitelist-hashes.txt)
+                                        (default NODE_evidence_baseline.json)
         --blacklist-hashes=PATH         file digests it rejects in log_r
                                         (default blacklist-hashes.txt)
         --qualification-validity=SECONDS how long a passed /qualify lasts (default 180)
@@ -277,9 +277,12 @@ To complete a full round of remote attestation:
         --interval=SECONDS         between cycles (default 15)
         --cycles=COUNT             stop after COUNT cycles (0 = unbounded)
         --duration=SECONDS         stop after roughly SECONDS (0 = until Ctrl-C)
-        --verifier-timeout=SECONDS every Verifier round trip (default 6)
-        --attester-timeout=SECONDS the Attester round trip (default 6)
+        --verifier-timeout=SECONDS every Verifier round trip (default 30)
+        --attester-timeout=SECONDS the Attester round trip (default 30)
         --trust-mode=qualify|tee|zk  must match the Verifiers, see step 3
+        --redacted-log-out=PATH    write log_r as ASCII every cycle
+                                   (default redacted_ima_logs.txt; empty
+                                   string disables)
         --log-level=LEVEL          TRACE..FATAL (default INFO)
 
     Plus the DTLS options. The RP needs **three** peer-key paths where the
@@ -312,8 +315,8 @@ bound it:
 | `--interval S`         |  15 s   | Sleep between cycles                                    |
 | `--cycles N`           |    0    | Stop after N cycles; 0 = unbounded                      |
 | `--duration S`         |    0    | Stop after roughly S seconds; 0 = until SIGINT          |
-| `--verifier-timeout S` |   6 s   | Per Verifier-bound round trip; a timeout counts as a NO |
-| `--attester-timeout S` |   6 s   | Attester round trip; exceeding it abandons the cycle    |
+| `--verifier-timeout S` |  30 s   | Per Verifier-bound round trip; a timeout counts as a NO |
+| `--attester-timeout S` |  30 s   | Attester round trip; exceeding it abandons the cycle    |
 | `--benchmark` / `-B`   |   off   | Run the bounded 1..5-Verifier sweep, then exit          |
 | `--log-level L`        |  INFO   | Also settable as `LOG_LEVEL_CHARRA`                     |
 
