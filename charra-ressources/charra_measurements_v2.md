@@ -299,6 +299,44 @@ the cycle table is `n = 10`, and the standard deviations (± 24.9 and ± 14.85)
 overlap comfortably. Treat agreement between the two tables as ± 15 ms, not as
 the two decimals each prints.
 
+### Redaction on its own, over the 167-entry vendor log
+
+The row above prices redaction as it occurs inside a cycle, on the old 33-entry
+log. This section prices the function directly, on the log now in use, over
+**100 consecutive calls** — `bin/test_redaction_bench`, which links the same
+objects a run does rather than a copy of them.
+
+**Conditions.** Apple M4 Pro (8 performance + 4 efficiency cores), 24 GiB RAM,
+macOS 26.6.2 on `arm64`. Docker Desktop 29.6.2 with 12 CPUs and 7.75 GiB
+available to containers. CHARRA itself builds and runs in
+`fraunhofer-sit/charra-dev-env:1.9.0`, which is a **`linux/amd64` image and is
+therefore emulated on this host** — `uname -m` inside it reports `x86_64`.
+Every figure here is emulated, not native, and would be faster on matching
+hardware. gcc 9.4.0, Ubuntu 20.04.6 LTS. Input `ima_test_logs.txt`: 167
+entries, 27,986 bytes as binary `log_a`, carrying 20-byte SHA-1 template
+digests, which redaction preserves.
+
+| **Commitment** | **Whole log (167 entries)** | **Per entry** | **`log_r`** |
+|---|--:|--:|--:|
+| SHA-256 — every ordinary cycle | **1.090 ms ± 0.215** | **0.0065 ms** | 29,644 B |
+| Poseidon — `--trust-mode=zk` only | **370.584 ms ± 4.434** | **2.2191 ms** | 29,644 B |
+
+Poseidon costs about **340× more per entry** than SHA-256 here, and that is the
+expected direction rather than a defect: the commitment is chosen to be cheap
+*inside* a circuit, where a SHA-256 would dominate the gate count, and it is
+paid for outside one. It is still small beside the TPM replay that follows it,
+and beside the ~39 s the proof itself takes. Both produce the same `log_r` size,
+since both commitments are 32 bytes before hex.
+
+Two cautions on reading these against the in-cycle row above. They are not the
+same measurement: this one calls the function in a tight loop with everything
+already warm, while the row above catches it once per cycle amid other work, so
+the per-entry figures are not directly comparable (0.0065 ms against the older
+0.024 ms implied by 0.800 ms over 33 entries). And the in-cycle SHA-256 figure
+the RP logs — 0.002 s, printed to three decimals — agrees with 1.090 ms only to
+within its own rounding. The Poseidon figures are a much sharper check: 370.6 ms
+measured here against the 0.371 s and 0.395 s the RP logged in live ZK runs.
+
 **Once per Verifier** (`n = 165`) — `charra_rp_build_evidence_message()` and the
 submission that follows:
 

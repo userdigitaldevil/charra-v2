@@ -257,6 +257,26 @@ The salt is fresh per entry and never transmitted. The content hash is copied
 through unchanged, and the filename is preserved deliberately: it is what
 allows a baseline to be matched at all.
 
+**What the redaction costs.** Measured directly over **100 consecutive calls**
+on this log (`bin/test_redaction_bench`, linking the same objects a run uses):
+
+| **Commitment** | **Whole log (167 entries)** | **Per entry** |
+|---|--:|--:|
+| SHA-256 — the default, used for this experiment | **1.090 ms ± 0.215** | **0.0065 ms** |
+| Poseidon — `--trust-mode=zk` only | **370.584 ms ± 4.434** | **2.2191 ms** |
+
+Redaction is therefore not a meaningful cost in itself: a whole 167-entry log
+is rewritten in about a millisecond. What it *forces* is expensive — replaying
+the redacted log into a TPM to obtain a second quote takes roughly 14 s on this
+hardware — but that is the price of the second quote, not of the rewriting.
+
+*Conditions.* Apple M4 Pro (8 performance + 4 efficiency cores), 24 GiB RAM,
+macOS 26.6.2 on `arm64`; Docker Desktop 29.6.2 with 12 CPUs and 7.75 GiB
+available. CHARRA runs in a `linux/amd64` image and is therefore **emulated on
+this host** (`uname -m` reports `x86_64` inside the container), so these figures
+are emulated rather than native. gcc 9.4.0, Ubuntu 20.04.6 LTS. Mean ± sample
+standard deviation over 100 iterations.
+
 ### 4.3 Preparing GTA
 
 Four pieces of setup were required.
