@@ -260,10 +260,17 @@ allows a baseline to be matched at all.
 **What the redaction costs.** Measured directly over **100 consecutive calls**
 on this log (`bin/test_redaction_bench`, linking the same objects a run uses):
 
-| **Commitment** | **Whole log (167 entries)** | **Per entry** |
-|---|--:|--:|
-| SHA-256 — the default, used for this experiment | **1.090 ms ± 0.215** | **0.0065 ms** |
-| Poseidon — `--trust-mode=zk` only | **370.584 ms ± 4.434** | **2.2191 ms** |
+| **Commitment** | **Whole log (167 entries)** | **Per entry** | **`log_r`** |
+|---|--:|--:|--:|
+| SHA-256 — the default, used for this experiment | **1.090 ms ± 0.215** | **0.0065 ms** | 29,644 B |
+| Poseidon — `--trust-mode=zk` only | **370.584 ms ± 4.434** | **2.2191 ms** | 29,644 B |
+
+The `log_r` column is the redacted log in CHARRA's **binary** event-log form,
+which is what the function returns and what the RP replays into its TPM (`log_a`
+is 27,986 bytes in the same form). Rendered back out as an ASCII IMA log — the
+shape `redacted_evidence.txt` is stored in, and the shape GTA's attester reads
+and Base64-encodes — the same 167 entries occupy 35,823 bytes. Both commitments
+give the same size, since each is 32 bytes before hex.
 
 Redaction is therefore not a meaningful cost in itself: a whole 167-entry log
 is rewritten in about a millisecond. What it *forces* is expensive — replaying
