@@ -318,10 +318,16 @@ digests, which redaction preserves.
 
 | **Commitment** | **Whole log (167 entries)** | **Per entry** | **`log_r`** |
 |---|--:|--:|--:|
-| SHA-256 — every ordinary cycle | **1.090 ms ± 0.215** | **0.0065 ms** | 29,644 B |
-| Poseidon — `--trust-mode=zk` only | **370.584 ms ± 4.434** | **2.2191 ms** | 29,644 B |
+| SHA-256 — every ordinary cycle | **1.071 ms ± 0.180** | **0.0064 ms** | 29,644 B |
+| Poseidon — `--trust-mode=zk` only | **383.448 ms ± 3.895** | **2.2961 ms** | 29,644 B |
 
-Poseidon costs about **340× more per entry** than SHA-256 here, and that is the
+For scale, the same harness times the **software** replay of `log_r` — folding
+the chain and comparing, which is all a Verifier does and all GTA's server does
+— at **0.065 ms ± 0.012** for the whole log, **0.0004 ms** per entry. Checking a
+log costs essentially nothing; see the TPM section below for what *producing*
+one costs.
+
+Poseidon costs about **360× more per entry** than SHA-256 here, and that is the
 expected direction rather than a defect: the commitment is chosen to be cheap
 *inside* a circuit, where a SHA-256 would dominate the gate count, and it is
 paid for outside one. It is still small beside the TPM replay that follows it,
@@ -331,11 +337,12 @@ since both commitments are 32 bytes before hex.
 Two cautions on reading these against the in-cycle row above. They are not the
 same measurement: this one calls the function in a tight loop with everything
 already warm, while the row above catches it once per cycle amid other work, so
-the per-entry figures are not directly comparable (0.0065 ms against the older
+the per-entry figures are not directly comparable (0.0064 ms against the older
 0.024 ms implied by 0.800 ms over 33 entries). And the in-cycle SHA-256 figure
-the RP logs — 0.002 s, printed to three decimals — agrees with 1.090 ms only to
-within its own rounding. The Poseidon figures are a much sharper check: 370.6 ms
-measured here against the 0.371 s and 0.395 s the RP logged in live ZK runs.
+the RP logs — 0.002 s, printed to three decimals — agrees with 1.071 ms only to
+within its own rounding. The Poseidon figures are a much sharper check: 383.4 ms
+measured here against the 0.371 s and 0.395 s the RP logged in live ZK runs,
+which bracket it.
 
 ### TPM replay of the 167-entry log, per entry
 

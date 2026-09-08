@@ -382,9 +382,11 @@ inside the charra image:
     ./docker/build-zk.sh          # about two minutes, once
     TRUST_MODE=zk ./run_daemon.sh # starts and stops the prover itself
 
-Two limits worth knowing: the circuit is compiled for **at most 33 log
-entries** — more needs a recompile and a new `zk/vk` — and it is built for
-`linux/arm64`, because `bb` needs x86 instructions Rosetta does not emulate.
+Two limits worth knowing: the circuit is compiled for a fixed ceiling —
+**`global N`, currently 167 log entries**, sized to the vendor evidence log in
+`ima_test_logs.txt`; more needs a recompile and a new `zk/vk` — and it is built
+for `linux/arm64`, because `bb` needs x86 instructions Rosetta does not
+emulate. Proving at that size takes roughly 39 s and 6.8 GiB of peak RAM.
 
 The RP and the prover container talk through a file queue under `zk/jobs/`,
 implemented in `src/core/charra_zk_job.{h,c}`. **`zk/README.md` covers the

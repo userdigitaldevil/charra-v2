@@ -262,8 +262,8 @@ on this log (`bin/test_redaction_bench`, linking the same objects a run uses):
 
 | **Commitment** | **Whole log (167 entries)** | **Per entry** | **`log_r`** |
 |---|--:|--:|--:|
-| SHA-256 — the default, used for this experiment | **1.090 ms ± 0.215** | **0.0065 ms** | 29,644 B |
-| Poseidon — `--trust-mode=zk` only | **370.584 ms ± 4.434** | **2.2191 ms** | 29,644 B |
+| SHA-256 — the default, used for this experiment | **1.071 ms ± 0.180** | **0.0064 ms** | 29,644 B |
+| Poseidon — `--trust-mode=zk` only | **383.448 ms ± 3.895** | **2.2961 ms** | 29,644 B |
 
 The `log_r` column is the redacted log in CHARRA's **binary** event-log form,
 which is what the function returns and what the RP replays into its TPM (`log_a`
@@ -280,7 +280,7 @@ entry:
 
 | **Operation** | **Who performs it** | **Whole log (167 entries)** | **Per entry** |
 |---|---|--:|--:|
-| Software replay — recompute the chain and compare | GTA's server; CHARRA's Verifiers | **0.065 ms ± 0.015** | **0.0004 ms** |
+| Software replay — recompute the chain and compare | GTA's server; CHARRA's Verifiers | **0.065 ms ± 0.012** | **0.0004 ms** |
 | TPM replay — `TPM2_PCR_Extend` per entry | CHARRA's RP only | **14,159 ms ± 37** | **84.79 ms ± 0.22** |
 
 The two differ by a factor of roughly **218,000**, and the reason is that they
