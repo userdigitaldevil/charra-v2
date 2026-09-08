@@ -108,7 +108,10 @@ fails closed.
    least five whitespace-separated fields, a numeric PCR index, and a
    `<algorithm>:<hash>` field that splits in two. At most 100,000 lines.
 8. Each entry's `template_hash` is **recomputed** from that line's `file_hash`
-   and `file_path`; the value written in the log is discarded.
+   and `file_path`; the value written in the log is discarded. The one
+   exception is an all-zero field, IMA's marker for a file it could not
+   measure, which is preserved and later replayed as all-`f` — the same
+   convention the kernel follows.
 9. The recomputed hashes are folded into a PCR chain and compared against the
    quoted PCR value, producing `ima_replayed`.
 10. The `file_hash` values are looked up in `t_ref_value_detail`, producing
@@ -280,17 +283,31 @@ the database. The file is not present inside the server's container at all —
 this was confirmed by searching its filesystem. This is the opposite of
 CHARRA, which opens its baseline file from disk on every single appraisal.
 
-**Pointing the agent at the redacted log.** One line of
-`attestation_agent/conf/agent_config.yaml` was changed:
+**Making the server reachable.** Two settings in
+`attestation_server/conf/.env` were changed for a local container deployment:
+`COMMUNICATION_PROTOCOL` from `1` to `0`, selecting plain HTTP because the
+HTTPS path expects certificates that the optional `key_manager` service would
+provision; and `ATTESTATION_ADDRESS` (with `SCHEDULE_TASK_ADDRESS`) from
+`127.0.0.1` to `0.0.0.0`, because binding to the container's own loopback makes
+the published port unreachable from outside it. Neither affects verification.
+
+**Pointing the agent at the redacted log.** In
+`attestation_agent/conf/agent_config.yaml`, the `tpm_ima` plugin was enabled,
+its TCTI set to the simulator, and its log source changed:
 
 ```yaml
 - name: "tpm_ima"
+  enabled: true
   params:
+    tcti_config: "mssim"
     log_file_path: "/data/redacted_evidence.txt"   # was the kernel IMA path
 ```
 
-No GTA source code was modified for this. The path was already a configuration
-field; the agent's log collector opens whatever file it names.
+**No GTA source code was modified at any point in this experiment.** Every
+change above is a configuration file — one `.yaml` and one `.env`. The log
+path was already a configuration field; the agent's collector opens whatever
+file it names, reads it line by line without interpreting it, and Base64-encodes
+the bytes into the evidence payload.
 
 ### 4.4 Running it
 
@@ -394,7 +411,8 @@ These were found while establishing the above, and each was confirmed by
 experiment rather than by reading alone.
 
 **The `template_hash` field in the log is ignored.** GTA recomputes it from the
-line's own `file_hash` and `file_path`. Replacing the field on all 167 entries
+line's own `file_hash` and `file_path`, except where the field is all zeros
+(see step 8). Replacing the field on all 167 entries
 with the constant `deadadad…` changed nothing: `ima_replayed` remained `true`.
 This is a defensible design — recomputation binds the chain to the content
 actually displayed — but it means the field is inert, and a corrupted log is
