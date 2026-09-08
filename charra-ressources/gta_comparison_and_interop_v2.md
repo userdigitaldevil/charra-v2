@@ -304,10 +304,24 @@ redact.
 It is also why this does not reach a real IMA log: at ~85 ms an entry, with the
 per-entry cost flat in log length, several thousand entries would take minutes.
 
-GTA's agent does use a TPM, but only to produce a quote — a few operations, not
-one per entry. It never extends the IMA log itself: on a real machine the kernel
-does that as files are measured, at no cost to the attestation. The manual PCR
-extension described in §4.7 is precisely the step that would not exist there.
+**GTA's agent never extends the IMA log at all.** It does use a TPM — that is
+what its `tss-esapi` dependency is for — but only to *read* and to *quote*. Its
+entire repertoire of TPM operations is `tr_from_tpm_public` to load the AK
+handle, `read_public` for its public area, `nv_read_public` and `nv_read` to
+retrieve the AK certificate, and one `quote`. There is no `pcr_extend` anywhere
+in the agent, and that is not an omission: on a real machine the **kernel**
+extends PCR 10 through IMA as it measures each file, long before any
+attestation runs. By the time the agent is asked for evidence the PCR already
+holds the right value, so the agent simply signs over it. The cost of extending
+is real but it is paid by the operating system during normal execution, not by
+the attestation.
+
+This is what makes the manual PCR extension described in §4.7 the artificial
+step in this experiment. Nothing in GTA extends a PCR, so nothing in GTA could
+have produced a PCR 10 matching a redacted log; that state had to be
+constructed by hand. And it is the same fact that makes CHARRA's Relying Party
+expensive: it *cannot* rely on the kernel, because the log it needs attested is
+one the kernel never measured.
 
 Note that this is the **IBM TPM 2.0 software simulator** reached over `mssim`,
 not a discrete hardware TPM, and it runs inside the emulated container
