@@ -225,7 +225,15 @@ baseline?
 ### 4.2 Producing the redacted log
 
 The input was `charra-ressources/evidence/evidence.txt`: 167 IMA measurement
-entries from Huawei BTS3900/5900 base-station firmware. It was passed through
+entries. The attribution to Huawei BTS3900/5900 base-station firmware comes
+from the accompanying baseline rather than from independent analysis —
+`NODE_evidence_baseline.json` declares `"productName": ["BTS3900", "BTS5900"]`,
+version `BTS3900_5900 V100R022C10SPC050`, under a 2018 Huawei copyright — and
+every one of the log's 167 entries matches that baseline on filename and
+content hash, with none unmatched. The measured paths are consistent with it:
+`GRAT_`, `URAT_` and `LRAT_` prefixes for the GSM, UMTS and LTE radio access
+technologies, `ubbp_l2bbmng.so` for the baseband processing unit, and a
+`WEBLMT` maintenance-terminal image. The log was passed through
 CHARRA's own redaction function, `charra_sdk_redact_ima_log()`, producing
 `redacted_evidence.txt`. Each entry's n-ng field becomes
 
