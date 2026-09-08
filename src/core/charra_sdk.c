@@ -220,11 +220,24 @@ static CHARRA_RC redact_one_entry(const charra_event_log_entry* entry,
          * travels in log_r in the clear, so the circuit will take it as a
          * public input and rejoin the two with '/' to rebuild the record the
          * Attester actually measured. */
+        if (base_len > CHARRA_ZK_MAX_BASE) {
+            charra_log_error("[" LOG_NAME "] Entry %u's filename is %u bytes; "
+                             "the ZK circuit accepts at most %u. Raise "
+                             "CHARRA_ZK_MAX_BASE and the circuit's basenames "
+                             "width together, recompile, and redistribute "
+                             "zk/vk.",
+                    entry_num, base_len, (unsigned)CHARRA_ZK_MAX_BASE);
+            return CHARRA_RC_BAD_ARGUMENT;
+        }
         memset(witness_out, 0, sizeof(*witness_out));
         if (dir_len > 0) {
             memcpy(witness_out->path, dir, dir_len);
         }
         witness_out->path_len = dir_len;
+        if (base_len > 0) {
+            memcpy(witness_out->base, base, base_len);
+        }
+        witness_out->base_len = base_len;
         memcpy(witness_out->salt, entry_salt, CHARRA_SDK_PATH_SALT_LEN);
         memcpy(witness_out->commitment, commitment,
                 CHARRA_SDK_REDACTED_PATH_LEN);

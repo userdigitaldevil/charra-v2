@@ -13,15 +13,18 @@
 //! length -- which is why MAX_BLOCKS is what drives circuit size, and the
 //! true length costs nothing and therefore need not be revealed.
 //!
-//! MAX_BLOCKS = 3 covers messages up to 183 bytes, comfortably past the 124
-//! we need, so raising the path-length ceiling later is free.
+//! MAX_BLOCKS = 4 covers messages up to 247 bytes. Three (183) was not
+//! enough once the circuit began rebuilding the FULL path: the longest entry
+//! in the reference log is a 136-byte path, so its n-ng field is 137 and its
+//! template_data 185. The fourth block costs about a third more SHA gates
+//! per entry and is what that one entry buys.
 
-global MAX_BLOCKS: u32 = 3;
+global MAX_BLOCKS: u32 = 4;
 /// MAX_BLOCKS * 64.
-global MAX_BYTES: u32 = 192;
+global MAX_BYTES: u32 = 256;
 /// Longest message that still fits: the 1-byte 0x80 and the 8-byte length
 /// field must land inside the same MAX_BLOCKS blocks.
-global MAX_MSG: u32 = 183;
+global MAX_MSG: u32 = 247;
 
 /// SHA-256 initial state (FIPS 180-4 §5.3.3).
 global IV: [u32; 8] = [
@@ -55,8 +58,8 @@ pub fn hash(msg: [u8; MAX_BYTES], msg_len: u32) -> [u8; 32] {
     let nblocks: u32 = (msg_len + 9 + 63) / 64;
 
     // Big-endian 64-bit bit length. Only the low two bytes can ever be
-    // non-zero: the assert above bounds msg_len at MAX_MSG (183), so
-    // bitlen <= 1464. Writing just those two, rather than shifting a u64
+    // non-zero: the assert above bounds msg_len at MAX_MSG (247), so
+    // bitlen <= 1976. Writing just those two, rather than shifting a u64
     // eight times, keeps everything in u32 -- and stays correct for any
     // MAX_MSG below 8192.
     let bitlen: u32 = msg_len * 8;
@@ -65,9 +68,14 @@ pub fn hash(msg: [u8; MAX_BYTES], msg_len: u32) -> [u8; 32] {
     lenb[7] = (bitlen & 0xff) as u8;
 
     // The length field's position depends on the block count, so write it
-    // at whichever of the three candidate offsets applies. The other two
+    // at whichever of the four candidate offsets applies. The other three
     // writes are predicated off. Offsets are the last 8 bytes of block
-    // 1, 2 and 3 respectively.
+    // 1, 2, 3 and 4 respectively.
+    //
+    // Every case MAX_BLOCKS allows must appear here. Raising MAX_BLOCKS
+    // without adding its case leaves a message of that size with no length
+    // field at all -- it still hashes, just not to SHA-256, and the only
+    // symptom is an unexplained pcrdigest_a mismatch much later.
     for k in 0..8 {
         let b = lenb[k];
         if nblocks == 1 {
@@ -78,6 +86,9 @@ pub fn hash(msg: [u8; MAX_BYTES], msg_len: u32) -> [u8; 32] {
         }
         if nblocks == 3 {
             buf[184 + k] = b;
+        }
+        if nblocks == 4 {
+            buf[248 + k] = b;
         }
     }
 
@@ -90,6 +101,7 @@ pub fn hash(msg: [u8; MAX_BYTES], msg_len: u32) -> [u8; 32] {
     let mut after_1: [u32; 8] = IV;
     let mut after_2: [u32; 8] = IV;
     let mut after_3: [u32; 8] = IV;
+    let mut after_4: [u32; 8] = IV;
 
     for b in 0..MAX_BLOCKS {
         let mut w: [u32; 16] = [0; 16];
@@ -110,14 +122,20 @@ pub fn hash(msg: [u8; MAX_BYTES], msg_len: u32) -> [u8; 32] {
         if b == 2 {
             after_3 = state;
         }
+        if b == 3 {
+            after_4 = state;
+        }
     }
 
-    let mut out_state: [u32; 8] = after_3;
+    let mut out_state: [u32; 8] = after_4;
     if nblocks == 1 {
         out_state = after_1;
     }
     if nblocks == 2 {
         out_state = after_2;
+    }
+    if nblocks == 3 {
+        out_state = after_3;
     }
 
     // --- serialise ---------------------------------------------------
@@ -232,4 +250,40 @@ fn test_ignores_bytes_past_the_length() {
         dirty[i] = 0xff;
     }
     assert(hash(clean, 62) == hash(dirty, 62));
+}
+
+#[test]
+fn test_four_blocks_185() {
+    // 185 bytes -- the longest real template_data once the circuit rebuilds
+    // the FULL path: a 136-byte path gives a 137-byte n-ng field and
+    // 48 + 137 = 185. This is the length that forced MAX_BLOCKS to 4, and
+    // the case whose missing length-field offset made every 4-block hash
+    // silently wrong.
+    let mut m: [u8; MAX_BYTES] = [0; MAX_BYTES];
+    for i in 0..185 {
+        m[i] = 0x42;
+    }
+    let expect: [u8; 32] = [
+        0x0c, 0x7a, 0xc4, 0x3e, 0x14, 0x54, 0x62, 0x5e,
+        0xed, 0x3e, 0x4a, 0xda, 0xca, 0x1b, 0x20, 0xd3,
+        0x75, 0xa2, 0x0c, 0xe5, 0x9b, 0xdb, 0x7b, 0x7c,
+        0xe4, 0x5e, 0xea, 0xfb, 0x5d, 0xaa, 0x4a, 0xf5,
+    ];
+    assert(hash(m, 185) == expect);
+}
+
+#[test]
+fn test_four_blocks_boundary_247() {
+    // MAX_MSG: the largest message MAX_BLOCKS = 4 can hold.
+    let mut m: [u8; MAX_BYTES] = [0; MAX_BYTES];
+    for i in 0..247 {
+        m[i] = 0x44;
+    }
+    let expect: [u8; 32] = [
+        0xd5, 0xe4, 0x3f, 0x2b, 0xcc, 0xa8, 0x67, 0xf1,
+        0x5d, 0xbf, 0x1d, 0xaf, 0x51, 0x93, 0x92, 0xae,
+        0xa2, 0xe8, 0x8f, 0x00, 0x3d, 0x24, 0x5e, 0x0f,
+        0xa5, 0x07, 0x19, 0xf1, 0x32, 0x42, 0x9d, 0x66,
+    ];
+    assert(hash(m, 247) == expect);
 }

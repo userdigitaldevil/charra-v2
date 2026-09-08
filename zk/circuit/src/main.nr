@@ -4,10 +4,17 @@
 //! measurements produce the PCR digest the Attester's TPM signed, and the
 //! values I am publishing are Poseidon commitments to exactly those paths.*
 //!
-//! For every entry the circuit rebuilds the ima-ng template_data record
-//! from a private path and a public file hash, hashes it, and folds the
-//! result into a PCR chain exactly as the TPM did -- then checks the
-//! composite against pcrdigest_a, straight out of the signed quote.
+//! For every entry the circuit rejoins a private directory with a public
+//! filename, rebuilds the ima-ng template_data record from that path and a
+//! public file hash, hashes it, and folds the result into a PCR chain
+//! exactly as the TPM did -- then checks the composite against pcrdigest_a,
+//! straight out of the signed quote.
+//!
+//! The split matters. Redaction hides the directory and publishes the
+//! filename, so the commitment in log_r is over the directory alone while
+//! the PCR chain covers the whole path. Handing the circuit one array for
+//! both -- as it did until the two halves were separated -- cannot satisfy
+//! either: commit wants the directory, template::build wants the full path.
 //!
 //! That assertion is what makes the redaction trustworthy. A prover that
 //! substitutes a path, reorders entries, drops or adds one, or lies about
@@ -36,10 +43,20 @@ mod commit;
 global N: u32 = 167;
 
 fn main(
-    // Private: the file paths the redaction exists to hide. Each is the
-    // n-ng field -- path plus its trailing NUL -- zero-padded.
-    paths: [[u8; 136]; N],
-    path_lens: [u32; N],
+    // Private: the DIRECTORIES the redaction exists to hide -- everything
+    // up to and excluding the last '/'. Not the whole path: the filename is
+    // published in log_r in the clear, so only this half is secret. Width
+    // 136 matches charra_poseidon.h's CHARRA_POSEIDON_MAX_PATH, which the
+    // commitment pads to.
+    dirs: [[u8; 136]; N],
+    dir_lens: [u32; N],
+    // Public: the filenames, exactly as log_r publishes them. Public because
+    // the Verifier must be able to tie what it reads in log_r to what was
+    // proved -- private ones would let the RP prove one filename and publish
+    // another. The circuit rejoins dir ‖ '/' ‖ base below, so the pcrdigest_a
+    // assertion covers the whole path even though only half of it is secret.
+    basenames: pub [[u8; 48]; N],
+    base_lens: pub [u32; N],
     // Private: blinding factors. Without them the commitments would be
     // brute-forceable -- the space of plausible system paths is small
     // enough to enumerate. The RP must draw these from a CSPRNG and must
@@ -85,7 +102,27 @@ fn main(
         // results -- so padding costs exactly what a real entry costs.
         let is_real = (i as u32) < n_real;
 
-        let (td, td_len) = template::build(file_hashes[i], paths[i], path_lens[i]);
+        // Rejoin the two halves into the n-ng field the Attester measured:
+        // dir ‖ '/' ‖ base ‖ NUL. Construction, not assertion -- there is no
+        // "does this path match?" check to get wrong, because the only path
+        // the circuit can hash is the one it builds from these inputs.
+        let mut joined: [u8; 144] = [0; 144];
+        for j in 0..136 {
+            if (j as u32) < dir_lens[i] {
+                joined[j] = dirs[i][j];
+            }
+        }
+        joined[dir_lens[i]] = 0x2f; // '/'
+        for j in 0..48 {
+            if (j as u32) < base_lens[i] {
+                joined[dir_lens[i] + 1 + (j as u32)] = basenames[i][j];
+            }
+        }
+        // n_len counts the path AND its NUL; `joined` is zero-padded, so the
+        // terminator is already in place at dir_len + 1 + base_len.
+        let n_len = dir_lens[i] + 1 + base_lens[i] + 1;
+
+        let (td, td_len) = template::build(file_hashes[i], joined, n_len);
         let td_digest = sha256_var::hash(td, td_len);
 
         let mut ext: [u8; 64] = [0; 64];
@@ -110,7 +147,7 @@ fn main(
         // Padding slots are exempt: they have no path to commit to, and
         // forcing them to match would mean publishing commitments in log_r
         // for entries that do not exist.
-        let commitment = commit::commit(paths[i], path_lens[i], salts[i]);
+        let commitment = commit::commit(dirs[i], dir_lens[i], salts[i]);
         assert(
             !is_real | (commitment == cleaned[i]),
             "commitment does not match the redacted path in log_r",

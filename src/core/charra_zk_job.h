@@ -62,6 +62,13 @@
 typedef struct charra_zk_public_inputs {
     uint8_t file_hashes[CHARRA_ZK_MAX_ENTRIES][32];
     uint8_t commitments[CHARRA_ZK_MAX_ENTRIES][32];
+    /** The filenames log_r publishes in the clear, and their lengths. Public
+     *  inputs because the circuit rejoins each with its private directory to
+     *  rebuild the measured path: without them here the Verifier could not
+     *  tie the filename it reads in log_r to the one that was proved, and an
+     *  RP could prove one filename while publishing another. */
+    uint8_t basenames[CHARRA_ZK_MAX_ENTRIES][CHARRA_ZK_MAX_BASE];
+    uint32_t base_lens[CHARRA_ZK_MAX_ENTRIES];
     uint8_t pcrdigest_a[32];
     /** How many of the arrays above are real entries; the circuit treats the
      * rest as padding.

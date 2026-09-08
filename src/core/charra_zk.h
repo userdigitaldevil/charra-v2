@@ -36,9 +36,20 @@ struct charra_zk_public_inputs;
 
 /** One entry's witness. `path` and `salt` are secret and must not be
  *  marshaled into any message. */
+/** Longest filename the circuit's `basenames` input holds. The reference
+ *  log's worst case is 44. */
+#define CHARRA_ZK_MAX_BASE 48
+
 typedef struct charra_zk_entry {
-    uint8_t path[CHARRA_POSEIDON_MAX_PATH]; /**< n-ng field, with its NUL */
+    /** The DIRECTORY -- everything before the last '/', no NUL. This is the
+     *  half redaction hides, and the half the commitment is over. */
+    uint8_t path[CHARRA_POSEIDON_MAX_PATH];
     uint32_t path_len;
+    /** The filename -- everything after that '/', no NUL. Public: it travels
+     *  in log_r in the clear, and the circuit takes it as a public input and
+     *  rejoins the two so the PCR chain still covers the whole path. */
+    uint8_t base[CHARRA_ZK_MAX_BASE];
+    uint32_t base_len;
     uint8_t salt[32];       /**< CSPRNG, never reused, never transmitted */
     uint8_t file_hash[32];  /**< public: the Verifier appraises against it */
     uint8_t commitment[32]; /**< Poseidon(path, salt), as it appears in log_r */

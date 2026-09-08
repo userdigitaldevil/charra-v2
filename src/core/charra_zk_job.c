@@ -40,17 +40,26 @@ void charra_zk_set_verification_key_path(const char* path) {
     zk_vk_path = (path != NULL && path[0] != '\0') ? path : NULL;
 }
 
-#define PI_FIELDS 1378
+/* bb lays the public inputs out one Field each, in the order main() declares
+ * its `pub` parameters -- basenames, base_lens, file_hashes, other_pcrs,
+ * cleaned, pcrdigest_a, n_real. Every byte of a [u8; K] array costs a whole
+ * Field, so the arrays are wide.
+ *
+ * Derived from the two ceilings rather than written out. These were literals
+ * (1056/1312/1345/1377/1378) sized for N = 33, and every one of them was
+ * silently wrong the moment N changed -- with no error, just a proof that
+ * would not verify. */
 #define PI_FIELD_BYTES 32
-#define PI_TOTAL (PI_FIELDS * PI_FIELD_BYTES)
-#define PI_OFF_FILE_HASHES 0
-#define PI_OFF_OTHER_PCRS 1056
-#define PI_OFF_COMMITMENTS 1312
-#define PI_OFF_PCRDIGEST 1345
-/* n_real is last, because it is the last `pub` parameter main() declares.
- * Confirmed against a real proof: bb wrote 1378 fields and the final one was
- * 0x21 = 33. */
-#define PI_OFF_N_REAL 1377
+#define PI_N ((uint32_t)CHARRA_ZK_MAX_ENTRIES)
+#define PI_OFF_BASENAMES 0u
+#define PI_OFF_BASE_LENS (PI_OFF_BASENAMES + PI_N * (uint32_t)CHARRA_ZK_MAX_BASE)
+#define PI_OFF_FILE_HASHES (PI_OFF_BASE_LENS + PI_N)
+#define PI_OFF_OTHER_PCRS (PI_OFF_FILE_HASHES + PI_N * 32u)
+#define PI_OFF_COMMITMENTS (PI_OFF_OTHER_PCRS + 8u * 32u)
+#define PI_OFF_PCRDIGEST (PI_OFF_COMMITMENTS + PI_N)
+#define PI_OFF_N_REAL (PI_OFF_PCRDIGEST + 32u)
+#define PI_FIELDS (PI_OFF_N_REAL + 1u)
+#define PI_TOTAL ((size_t)PI_FIELDS * PI_FIELD_BYTES)
 
 static const char* jobs_root(void) {
     const char* r = getenv("CHARRA_ZK_JOBS");
@@ -282,6 +291,14 @@ static CHARRA_RC populate_verify(const char* dir, const void* vctx) {
         return CHARRA_RC_ERROR;
     }
     for (uint32_t i = 0; i < CHARRA_ZK_MAX_ENTRIES; i++) {
+        put_bytes_as_fields(pi, PI_OFF_BASENAMES + i * CHARRA_ZK_MAX_BASE,
+                c->inputs->basenames[i], CHARRA_ZK_MAX_BASE);
+        uint8_t base_len_field[32] = {0};
+        base_len_field[28] = (uint8_t)(c->inputs->base_lens[i] >> 24);
+        base_len_field[29] = (uint8_t)(c->inputs->base_lens[i] >> 16);
+        base_len_field[30] = (uint8_t)(c->inputs->base_lens[i] >> 8);
+        base_len_field[31] = (uint8_t)(c->inputs->base_lens[i]);
+        put_field(pi, PI_OFF_BASE_LENS + i, base_len_field);
         put_bytes_as_fields(pi, PI_OFF_FILE_HASHES + i * 32,
                 c->inputs->file_hashes[i], 32);
         put_field(pi, PI_OFF_COMMITMENTS + i, c->inputs->commitments[i]);

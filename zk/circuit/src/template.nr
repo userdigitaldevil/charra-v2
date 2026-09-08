@@ -27,16 +27,16 @@
 //! unexplained pcrdigest_a mismatch, because every byte after the alg name
 //! lands one position early.
 
-/// Longest path (including its NUL) the circuit accepts. The array width is
-/// 136 to match charra_poseidon.h's CHARRA_POSEIDON_MAX_PATH, which the
-/// commitment pads to; the SHA-256 of template_data is the tighter bound,
-/// since 48 + path_len must stay within sha256_var's MAX_MSG of 183 to
-/// avoid a fourth block. build() asserts that separately below. The log's
-/// real worst case is 77, so there is ample headroom either way.
-global MAX_PATH: u32 = 136;
+/// Width of the rejoined n-ng field this module hashes: dir + '/' + base +
+/// NUL. Not the same thing as charra_poseidon.h's CHARRA_POSEIDON_MAX_PATH
+/// (136), which sizes the DIRECTORY the commitment pads -- the rejoined path
+/// is necessarily longer. The reference log's longest is 137 (a 136-byte
+/// path plus its NUL); 144 leaves a little room without a fifth block.
+global MAX_PATH: u32 = 144;
 
-/// The largest path that still fits three SHA-256 blocks: MAX_MSG - HEADER_LEN.
-global MAX_PATH_HASHABLE: u32 = 135;
+/// The largest n-ng field that still fits sha256_var's four blocks:
+/// MAX_MSG (247) - HEADER_LEN (48).
+global MAX_PATH_HASHABLE: u32 = 199;
 
 /// 4 (d_len) + 40 (d-ng field) + 4 (n_len).
 global HEADER_LEN: u32 = 48;
@@ -44,7 +44,7 @@ global HEADER_LEN: u32 = 48;
 /// Must match sha256_var::MAX_BYTES. Kept as a literal rather than imported
 /// so the two modules do not have to agree on global visibility; if you
 /// change one, change the other.
-global BUF_LEN: u32 = 192;
+global BUF_LEN: u32 = 256;
 
 /// Build the record, returning the buffer and the true length of the bytes
 /// within it. Everything past that length is zero and is ignored by

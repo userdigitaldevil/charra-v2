@@ -33,9 +33,13 @@ PROVER = pathlib.Path(
     os.environ.get("CHARRA_ZK_PROVER", ROOT / "circuit" / "Prover.toml"))
 
 # Must match sha256_var.nr's MAX_BYTES / MAX_MSG and template.nr's MAX_PATH.
-MAX_BYTES = 192
-MAX_MSG = 183
+MAX_BYTES = 256
+MAX_MSG = 247
+# The DIRECTORY width (charra_poseidon.h's CHARRA_POSEIDON_MAX_PATH), not the
+# rejoined path -- the circuit builds that itself from dir, '/' and base.
 MAX_PATH = 136
+# The FILENAME width, charra_zk.h's CHARRA_ZK_MAX_BASE.
+MAX_BASE = 48
 HEADER_LEN = 48
 
 # Slots the circuit was compiled for -- main.nr's `global N`. A shorter log is
@@ -113,7 +117,7 @@ def emit(w, index):
     # ingredients. Cross-check the length it will derive against the one the
     # C tool recorded -- if these disagree the layout constant is wrong, and
     # that is far easier to read here than as a digest mismatch.
-    derived_len = HEADER_LEN + len(raw_path)
+    derived_len = HEADER_LEN + len(raw_path) + 1 + len(path_bytes(e["base"])) + 1
     if derived_len != e["template_data_len"]:
         sys.exit(
             f"entry {index}: circuit would build a {derived_len} B record "
@@ -162,15 +166,32 @@ def emit_full(w, tamper=None):
     """
     entries = w["entries"]
 
-    paths, lens, hashes = [], [], []
+    paths, lens, hashes, bases, base_lens = [], [], [], [], []
     for e in entries:
         raw = path_bytes(e["path"])
         if len(raw) != e["path_len"]:
             sys.exit(f"entry {e['index']}: path/path_len disagree")
         if len(raw) > MAX_PATH:
-            sys.exit(f"entry {e['index']}: path {len(raw)} B over MAX_PATH")
-        if HEADER_LEN + len(raw) != e["template_data_len"]:
-            sys.exit(f"entry {e['index']}: HEADER_LEN wrong")
+            sys.exit(f"entry {e['index']}: dir {len(raw)} B over MAX_PATH")
+        raw_base = path_bytes(e["base"])
+        if len(raw_base) != e["base_len"]:
+            sys.exit(f"entry {e['index']}: base/base_len disagree")
+        if len(raw_base) > MAX_BASE:
+            sys.exit(f"entry {e['index']}: base {len(raw_base)} B over MAX_BASE")
+        # The circuit rejoins dir + '/' + base + NUL, so the record it builds
+        # is HEADER_LEN + that. Cross-check against what the C tool recorded.
+        n_len = len(raw) + 1 + len(raw_base) + 1
+        if HEADER_LEN + n_len != e["template_data_len"]:
+            sys.exit(
+                f"entry {e['index']}: circuit would build a "
+                f"{HEADER_LEN + n_len} B record but the log's is "
+                f"{e['template_data_len']} B -- HEADER_LEN wrong"
+            )
+        if HEADER_LEN + n_len > MAX_MSG:
+            sys.exit(
+                f"entry {e['index']}: record is {HEADER_LEN + n_len} B, over "
+                f"sha256_var's MAX_MSG {MAX_MSG} -- needs another SHA block"
+            )
         if e.get("pcr_index", 10) != 10:
             sys.exit(
                 f"entry {e['index']} targets PCR {e['pcr_index']}, not 10. "
@@ -179,6 +200,8 @@ def emit_full(w, tamper=None):
             )
         paths.append(list(raw) + [0] * (MAX_PATH - len(raw)))
         lens.append(e["path_len"])
+        bases.append(list(raw_base) + [0] * (MAX_BASE - len(raw_base)))
+        base_lens.append(e["base_len"])
         hashes.append(list(bytes.fromhex(e["file_hash"])))
 
     note = ""
@@ -194,6 +217,8 @@ def emit_full(w, tamper=None):
             sys.exit("need >=2 entries to test reordering")
         paths[0], paths[1] = paths[1], paths[0]
         lens[0], lens[1] = lens[1], lens[0]
+        bases[0], bases[1] = bases[1], bases[0]
+        base_lens[0], base_lens[1] = base_lens[1], base_lens[0]
         hashes[0], hashes[1] = hashes[1], hashes[0]
         note = "TAMPERED: entries 0 and 1 swapped"
     elif tamper == "drop":
@@ -202,6 +227,8 @@ def emit_full(w, tamper=None):
         # that no longer matches what was measured.
         paths[-1] = [0] * MAX_PATH
         lens[-1] = 0
+        bases[-1] = [0] * MAX_BASE
+        base_lens[-1] = 0
         note = "TAMPERED: last entry blanked"
     elif tamper == "commit":
         pass          # applied below, once the commitments are computed
@@ -269,6 +296,8 @@ def emit_full(w, tamper=None):
     while len(paths) < MAX_N:
         paths.append([0] * MAX_PATH)
         lens.append(0)
+        bases.append([0] * MAX_BASE)
+        base_lens.append(0)
         hashes.append([0] * 32)
         salts.append(0)
         cleaned.append(0)
@@ -280,8 +309,10 @@ def emit_full(w, tamper=None):
         f"# Salts are DETERMINISTIC TEST VALUES -- see test_salt().\n"
         + (f"# {note}\n" if note else "")
         + f"# Target pcrdigest_a: {w['pcrdigest_a']}\n\n"
-        f"paths = {arr2(paths)}\n\n"
-        f"path_lens = {arr(lens)}\n\n"
+        f"dirs = {arr2(paths)}\n\n"
+        f"dir_lens = {arr(lens)}\n\n"
+        f"basenames = {arr2(bases)}\n\n"
+        f"base_lens = {arr(base_lens)}\n\n"
         f"salts = {arr(salts)}\n\n"
         f"cleaned = {arr(cleaned)}\n\n"
         f"file_hashes = {arr2(hashes)}\n\n"

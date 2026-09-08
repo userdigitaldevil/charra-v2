@@ -11,7 +11,9 @@
 #include <string.h>
 
 #include "../common/charra_log.h"
+#include "../util/hex_util.h"
 #include "charra_event_log.h"
+#include "charra_sdk.h"
 #include "charra_zk_job.h"
 
 #define LOG_NAME "zk"
@@ -85,6 +87,9 @@ CHARRA_RC charra_zk_write_witness_json(
         fprintf(f, "      \"path\": ");
         print_json_string(f, e->path, e->path_len);
         fprintf(f, ",\n      \"path_len\": %u,\n", e->path_len);
+        fprintf(f, "      \"base\": ");
+        print_json_string(f, e->base, e->base_len);
+        fprintf(f, ",\n      \"base_len\": %u,\n", e->base_len);
         fprintf(f, "      \"file_hash\": \"");
         print_hex(f, e->file_hash, 32);
         fprintf(f, "\",\n      \"salt\": \"");
@@ -98,11 +103,17 @@ CHARRA_RC charra_zk_write_witness_json(
          * Derived rather than written as a literal: this was 47, one short,
          * from before the algorithm prefix gained its colon, and a stale
          * literal here fails as "HEADER_LEN wrong" in a Python script two
-         * containers away. u32 d_len | "sha256:" NUL | digest | u32 n_len. */
+         * containers away. u32 d_len | "sha256:" NUL | digest | u32 n_len.
+         *
+         * The n-ng field is the WHOLE path -- dir, '/', filename -- plus its
+         * NUL, not just the directory the commitment covers. Measuring it
+         * from path_len alone understated it by the filename and read as a
+         * layout bug rather than the omission it was. */
         const uint32_t header_len = (uint32_t)(2 * sizeof(uint32_t) +
                                                CHARRA_IMA_ALGO_PREFIX_LEN + 32);
+        const uint32_t n_len = e->path_len + 1 + e->base_len + 1;
         fprintf(f, "\",\n      \"template_data_len\": %u\n",
-                header_len + e->path_len);
+                header_len + n_len);
         fprintf(f, "    }%s\n", (i + 1 < witness->num_entries) ? "," : "");
     }
 
@@ -189,24 +200,59 @@ CHARRA_RC charra_zk_public_inputs_from_log_r(const uint8_t* log_r,
                     n);
             return CHARRA_RC_MARSHALING_ERROR;
         }
-        /* 4 (d_len) + 7 ("sha256\0") + 32; the hash starts at offset 11. */
-        if (d_field_len != 43) {
+        /* 4 (d_len) + 8 ("sha256:" NUL) + 32; the hash starts right after
+         * the prefix. Derived from the constant rather than written out, so
+         * it cannot drift from what the Attester actually builds. */
+        const uint32_t d_expect = (uint32_t)(sizeof(uint32_t) +
+                                             CHARRA_IMA_ALGO_PREFIX_LEN + 32);
+        if (d_field_len != d_expect) {
             charra_log_error("[" LOG_NAME "] log_r entry %u's d-ng field is %u "
-                             "bytes, not the 43 expected for SHA-256.",
-                    n, d_field_len);
-            return CHARRA_RC_MARSHALING_ERROR;
-        }
-        /* The redacted path IS the commitment: 32 raw bytes, big-endian. */
-        if (path_len != 32) {
-            charra_log_error("[" LOG_NAME "] log_r entry %u's redacted path is "
-                             "%u bytes, not the 32 a commitment occupies. "
-                             "This log was not redacted by a matching RP.",
-                    n, path_len);
+                             "bytes, not the %u expected for SHA-256.",
+                    n, d_field_len, d_expect);
             return CHARRA_RC_MARSHALING_ERROR;
         }
 
-        memcpy(out->file_hashes[n], d_field + 11, 32);
-        memcpy(out->commitments[n], path, 32);
+        /* The redacted n-ng field is hex(commitment) | label | filename | NUL
+         * -- see charra_sdk.h. It was once the raw 32-byte commitment and
+         * nothing else, which is why this used to check for exactly 32. */
+        uint32_t plen = path_len;
+        while (plen > 0 && path[plen - 1] == '\0') {
+            plen--;
+        }
+        if (plen < CHARRA_SDK_REDACTED_DIR_HEX_LEN + 1) {
+            charra_log_error("[" LOG_NAME "] log_r entry %u's redacted path is "
+                             "%u bytes, too short to hold a %u-character "
+                             "commitment, a label and a filename. This log was "
+                             "not redacted by a matching RP.",
+                    n, plen, (unsigned)CHARRA_SDK_REDACTED_DIR_HEX_LEN);
+            return CHARRA_RC_MARSHALING_ERROR;
+        }
+        if (!charra_hex_decode((const char*)path,
+                    CHARRA_SDK_REDACTED_PATH_LEN, out->commitments[n])) {
+            charra_log_error("[" LOG_NAME "] log_r entry %u's redacted path "
+                             "does not start with a hex commitment.",
+                    n);
+            return CHARRA_RC_MARSHALING_ERROR;
+        }
+
+        /* Everything after the label is the filename the circuit takes as a
+         * public input and rejoins with the private directory. */
+        const uint8_t* base = path + CHARRA_SDK_REDACTED_DIR_HEX_LEN + 1;
+        const uint32_t base_len = plen - CHARRA_SDK_REDACTED_DIR_HEX_LEN - 1;
+        if (base_len > CHARRA_ZK_MAX_BASE) {
+            charra_log_error("[" LOG_NAME "] log_r entry %u's filename is %u "
+                             "bytes; the circuit's basenames input holds at "
+                             "most %u.",
+                    n, base_len, (unsigned)CHARRA_ZK_MAX_BASE);
+            return CHARRA_RC_MARSHALING_ERROR;
+        }
+
+        memcpy(out->file_hashes[n],
+                d_field + sizeof(uint32_t) + CHARRA_IMA_ALGO_PREFIX_LEN, 32);
+        if (base_len > 0) {
+            memcpy(out->basenames[n], base, base_len);
+        }
+        out->base_lens[n] = base_len;
         n++;
     }
 
