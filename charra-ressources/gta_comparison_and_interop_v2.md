@@ -316,7 +316,7 @@ holds the right value, so the agent simply signs over it. The cost of extending
 is real but it is paid by the operating system during normal execution, not by
 the attestation.
 
-This is what makes the manual PCR extension described in §4.7 the artificial
+This is what makes the manual PCR extension described in §4.8 the artificial
 step in this experiment. Nothing in GTA extends a PCR, so nothing in GTA could
 have produced a PCR 10 matching a redacted log; that state had to be
 constructed by hand. And it is the same fact that makes CHARRA's Relying Party
@@ -335,9 +335,153 @@ this host** (`uname -m` reports `x86_64` inside the container), so these figures
 are emulated rather than native. gcc 9.4.0, Ubuntu 20.04.6 LTS. Mean ± sample
 standard deviation over 100 iterations.
 
-### 4.3 Preparing GTA
+### 4.3 The protocol, end to end
 
-Four pieces of setup were required.
+The sequence that was actually performed, in order. Steps 1–3 happen inside
+CHARRA; steps 4–10 happen inside GTA. Every artifact named below is on disk, in
+`charra-ressources/evidence/` or in `gta-run-output/`.
+
+```
+  CHARRA                                              GTA
+  ------                                              ---
+  evidence.txt          (vendor, 497 wrapped lines)
+       │ 1. unwrap
+       ▼
+  ima_test_logs.txt     (167 lines, 34,165 B)
+       │ 2. charra_sdk_redact_ima_log()
+       ▼
+  redacted_evidence.txt (167 lines, 35,823 B) ─────┐
+       │                                           │ mounted at
+       │ 3. an RP run emits the same artifact      │ /data/redacted_evidence.txt
+       ▼    via --redacted-log-out                 │
+  redacted_ima_logs.txt                            │
+                                                   ▼
+   4. TPM simulator + AK ──▶ 5. extend PCR 10 from the redacted template hashes
+                                        │
+   6. POST /cert  ──▶  7. POST /ref_value (NODE_evidence_baseline.json)
+                                        │
+   8. agent_config.yaml: log_file_path ─▶ /data/redacted_evidence.txt
+                                        │
+   9. attestation_cli evidence get ──▶ attest ──▶ 10. token: status "pass"
+```
+
+**Step 1 — unwrap the vendor log.** `evidence.txt` as supplied is hard-wrapped
+at 81 columns: its 167 measurement entries occupy 497 physical lines, each entry
+spanning two or three of them. Every consumer downstream is line-oriented —
+CHARRA's ASCII reader, GTA's agent, GTA's parser — so the file was rewritten one
+entry per line as `ima_test_logs.txt` (167 lines, 34,165 B). No field changed;
+only the line breaks did. The vendor's own field layout was kept exactly:
+
+```
+pcr_index  template_hash  ima-ng  alg:file_hash  path
+```
+
+with **no `PCR` prefix** in front of it. That detail matters for this experiment
+and not only for CHARRA: GTA's parser splits each line on whitespace and reads
+`parts[0]` as a `u32` PCR index
+([measurement_log.rs:461-470](evidence/global-trust-authority/attestation_server/verifier/common/src/measurement_log.rs#L461-L470)),
+so a prefixed line would fail on `u32::from_str("PCR")` and be rejected at their
+end too — and a prefix would shift every subsequent field by one besides.
+
+**Step 2 — redact with CHARRA.** `ima_test_logs.txt` was passed through
+`charra_sdk_redact_ima_log()`, producing `redacted_evidence.txt` (167 lines,
+35,823 B) in the n-ng form given in §4.2. The `pcr_index`, `ima-ng` and
+`alg:file_hash` fields pass through untouched; the filename passes through
+untouched; only the directory is replaced, by a fresh-salted commitment, and the
+`template_hash` is recomputed over the rewritten record.
+
+**Step 3 — the RP emits the same artifact in a live run.** The file above was
+produced by calling the redaction function over the log directly. CHARRA's
+Relying Party now writes the identical artifact as a side effect of an ordinary
+cycle: `--redacted-log-out=PATH` (default `redacted_ima_logs.txt`) makes it dump
+`log_r` in ASCII IMA form immediately after redacting it and before replaying it
+into its own TPM ([rp_evidence.c](../src/rp/rp_evidence.c)). Running
+`./run_daemon.sh` over the same 167-entry log reproduces it.
+
+One field differs between the two, and it is worth stating rather than glossing.
+`redacted_evidence.txt` carries **40-hex** `template_hash` values, because it was
+redacted straight from the vendor file and CHARRA's redaction preserves whatever
+digest width it finds — the vendor's are 20-byte SHA-1. `redacted_ima_logs.txt`
+carries **64-hex** values, because in a live run the Attester rebuilds each
+`template_data` and recomputes `template_digest` as SHA-256
+([attester_ima_log.c:150-154](../src/attester/attester_ima_log.c#L150-L154)),
+which is why it is 39,831 B against 35,823 B for the same 167 entries. Entry
+count, file hashes, filenames and commitment scheme are identical. The 40-hex
+file is the one that went to GTA.
+
+**Step 4 — give GTA's agent a TPM and an AK.** Described in §4.4 below: an
+RSA-2048 attestation key in a software TPM simulator, persisted at
+`0x81010020`, with a certificate at NV index `0x150001b`.
+
+**Step 5 — construct PCR 10 to match the redacted log.** The 167 redacted
+`template_hash` values were recomputed from `redacted_evidence.txt` and extended
+into the simulator's PCR 10, one `tpm2_pcrextend` per entry, so that the log and
+the quote GTA's agent would later produce agreed:
+
+```bash
+# hashes written to gta-run-output/pcr_extends.txt, then:
+while IFS= read -r h; do tpm2_pcrextend "10:sha256=$h"; done < pcr_extends.txt
+```
+
+**This is the artificial step of the experiment**, and §4.8 explains why: on real
+hardware the kernel extends PCR 10 from the *original* paths, so no redacted log
+could ever replay against a genuine quote.
+
+**Step 6 — register a trust root.** A CA was generated and its certificate
+posted, so the server would accept the agent's AK certificate chain:
+
+```bash
+curl -X POST -H "Content-Type: application/json" -H "User-Id: test_01" \
+  -d '{"name":"charra-gta-test-root-ca","type":["tpm_ima"],"content":"<PEM>"}' \
+  http://<server>:8080/global-trust-authority/service/v1/cert
+```
+
+**Step 7 — import `NODE_evidence_baseline.json` into GTA's database.** The
+vendor baseline is not in GTA's format, so its `products[].ccFiles[]` entries
+were projected onto the pair GTA stores:
+
+```python
+refs = [{"fileName": cc["fileName"], "sha256": cc["sha256"]}
+        for prod in data["products"] for cc in prod["ccFiles"]]
+```
+
+That document was Base64-encoded and posted:
+
+```bash
+curl -X POST -H "Content-Type: application/json" -H "User-Id: test_01" \
+  -d '{"name":"charra-gta-baseline","attester_type":"tpm_ima",
+       "content":"<base64>","content_type":"base64"}' \
+  http://<server>:8080/global-trust-authority/service/v1/ref_value
+```
+
+The server parsed it and wrote **one row to `t_ref_value` and 167 rows to
+`t_ref_value_detail`**. From this point the baseline lives in the database; the
+JSON file plays no further part (§4.4).
+
+**Step 8 — point GTA's agent at the redacted log.** One line of
+`agent_config.yaml`, shown in §4.4. No GTA source code was changed.
+
+**Step 9 — collect and submit.** GTA's own unmodified CLI:
+
+```bash
+attestation_cli -u test_01 evidence get -s ignore -o evidence.json -t tpm_ima
+attestation_cli -u test_01 attest -f evidence.json -o token.json
+```
+
+The agent read `/data/redacted_evidence.txt`, Base64-encoded it into
+`evidence.logs[0].log_data`, took a quote over PCR 10, and posted both.
+
+**Step 10 — read the token.** The server verified the chain and quote, replayed
+the log against the quoted PCR, matched every entry against the rows from step
+7, and issued a signed EAT. Decoded in §4.6: `ima_replayed: true`,
+`ima_rv_matched: true`, `status: "pass"`.
+
+The remaining subsections give the detail behind steps 4–10 and the conditions
+under which the result should be read.
+
+### 4.4 Preparing GTA
+
+Five pieces of setup were required.
 
 **A TPM.** GTA's agent needs an attestation key in a TPM. An AK was created in
 a software TPM simulator (RSA-2048, RSA-PSS with SHA-256), persisted at handle
@@ -395,7 +539,7 @@ path was already a configuration field; the agent's collector opens whatever
 file it names, reads it line by line without interpreting it, and Base64-encodes
 the bytes into the evidence payload.
 
-### 4.4 Running it
+### 4.5 Running it
 
 GTA's own `attestation_cli` binary — built from source, unmodified — collected
 evidence and submitted it:
@@ -412,7 +556,7 @@ that the configuration previously named does not exist inside the container, so
 had the change not taken effect the agent would have failed rather than
 silently falling back.
 
-### 4.5 Result
+### 4.6 Result
 
 The server accepted the evidence and issued a signed token:
 
@@ -439,7 +583,7 @@ Matching also succeeded without naming a baseline explicitly. When the
 submission carries no `ref_value_id`, the server searches every baseline
 registered for that user and attester type, and finds the same rows.
 
-### 4.6 What this demonstrates
+### 4.7 What this demonstrates
 
 The redaction is **transparent to GTA**. Its verifier never noticed that the
 directory portion of every path had been replaced by a commitment hash,
@@ -455,7 +599,7 @@ GTA: the property that makes the redaction painless is the same property that
 prevents GTA from telling a known-good binary at a legitimate path from the
 same binary somewhere it does not belong.
 
-### 4.7 Conditions and limitations
+### 4.8 Conditions and limitations
 
 Three qualifications are necessary for the result above to be read correctly.
 
