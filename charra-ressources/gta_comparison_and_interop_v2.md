@@ -425,6 +425,9 @@ the quote GTA's agent would later produce agreed:
 while IFS= read -r h; do tpm2_pcrextend "10:sha256=$h"; done < pcr_extends.txt
 ```
 
+Note what this step is and is not. It sets the TPM's *state*; it does not touch
+the quote. The agent, run in step 9, produced its own quote over this PCR and
+signed it with its own AK, and the server verified that signature normally.
 **This is the artificial step of the experiment**, and §4.8 explains why: on real
 hardware the kernel extends PCR 10 from the *original* paths, so no redacted log
 could ever replay against a genuine quote.
@@ -612,6 +615,25 @@ therefore the PCR value the log replays to. For this experiment PCR 10 in the
 simulator was extended using template hashes computed over the **redacted**
 paths, so that the log and the quote agreed.
 
+Precisely what was and was not done here matters, because the two are easy to
+conflate and only one of them would invalidate the result.
+
+*What was done.* The 167 template hashes were recomputed from the redacted
+paths and extended into PCR 10 of the TPM simulator with `tpm2_pcrextend`, one
+call per entry, **before** the agent was run.
+
+*What was not done.* The agent was not handed a quote. It produced its own,
+genuinely signed by its AK inside that simulator, and the server verified that
+signature against the CA chain registered in step 6. That gate fails closed
+(§2, step 3a), so `status: "pass"` is not reachable with a fabricated quote.
+The quote is real, the signature is real, and the agent ran unmodified and
+unaware.
+
+The manipulation was therefore **upstream of the quote, not inside it**. The TPM
+was placed in a state in which an *honest* quote would happen to agree with the
+redacted log. Stated another way, the experiment simulated a machine whose
+kernel had measured the redacted paths — and that machine cannot exist.
+
 On real hardware this would not hold. The kernel extends PCR 10 as it measures
 files, using the **original** paths, so a redacted log presented against a real
 quote would not replay and `ima_replayed` would be false. **GTA cannot verify a
@@ -625,6 +647,27 @@ signs a second quote over it, then proves separately — by the `/qualify`
 handshake, a TEE document, or a zero-knowledge proof — that the redacted log
 derives faithfully from the original. That second quote is precisely the piece
 GTA has no place for, because it has no Relying Party.
+
+The comparison is worth drawing exactly, because the manual step above is
+*mechanically the same operation* CHARRA's RP performs automatically — take
+`log_r`, extend it entry by entry into a PCR, quote the result. It is the
+14,159 ms measured in §4.2. What differs is whose TPM receives it:
+
+| | Whose TPM receives `log_r` | What the resulting quote proves |
+|---|---|---|
+| CHARRA's Relying Party | a **second** party's, in a different trust domain from the Attester | that the RP holds `log_r`, with `/qualify`, a TEE document or a ZK proof separately binding `log_r` to the Attester's `log_a` |
+| This experiment, against GTA | the agent's **own**, the same one it quotes from | only that a PCR set by hand holds the value set by hand |
+
+In CHARRA the extend happens somewhere other than where the log was produced,
+and a distinct mechanism ties the two together. In the GTA run it happened in
+the same TPM the agent quotes, with nothing binding it back to the kernel's
+real measurements. Every cryptographic operation is valid in both cases; what
+the GTA run severs is the chain of custody to the kernel.
+
+Hence the narrow claim this experiment supports: **GTA's verifier accepts and
+correctly matches CHARRA-redacted evidence** — its parser, its replay and its
+baseline lookup all handle the format without complaint. It is not a claim that
+GTA could verify redacted logs in production, which it structurally cannot.
 
 **`ima_rv_matched` is advisory.** No Rego policy was attached to these
 submissions, so `status` would have been `pass` even had the baseline check
