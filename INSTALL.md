@@ -61,8 +61,8 @@ Knowing which is which saves a lot of confusion:
 | You run | It starts | For |
 | --- | --- | --- |
 | `./docker/run.sh` | an unnamed, interactive container | editing, debugging, attaching VS Code, running `make` by hand |
-| `./run_daemon.sh` | one named `charra-daemon` | a normal attestation run |
-| `./run_benchmark_mode.sh` | one named `charra` | the timing sweep |
+| `./scripts/run_daemon.sh` | one named `charra-daemon` | a normal attestation run |
+| `./scripts/run_benchmark_mode.sh` | one named `charra` | the timing sweep |
 
 **The run scripts are launched from the host, not from inside a container.**
 They start, use and remove their own container automatically, so a normal run
@@ -136,7 +136,7 @@ Two checks, cheapest first.
 2. **An end-to-end attestation.** From the **host**, not inside the
    container — the script starts the container itself:
 
-       RP_CYCLES=1 ./run_daemon.sh
+       RP_CYCLES=1 ./scripts/run_daemon.sh
 
    It starts a TPM simulator per role, wipes each `NVChip`, regenerates the
    trust anchor from the fresh TPMs, launches all four roles, runs one
@@ -224,7 +224,7 @@ deleting `NVChip` does.
 * AddressSanitizer:
 
       make clean ; make ENABLE_ADDRESS_SANITIZER=1
-      RP_CYCLES=1 ./run_daemon.sh
+      RP_CYCLES=1 ./scripts/run_daemon.sh
 
 * Valgrind — attach it to one role rather than the whole run, since
   `run_daemon.sh` starts four:

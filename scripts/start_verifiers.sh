@@ -35,13 +35,18 @@
 # Verifier's own --ip, which is distinct from --host here).
 #
 # Examples:
-#   ./start_verifiers.sh                            # 5 Verifiers from 5684
-#   ./start_verifiers.sh 3 --startingport 5684      # 5684, 5685, 5686
+#   ./scripts/start_verifiers.sh                            # 5 Verifiers from 5684
+#   ./scripts/start_verifiers.sh 3 --startingport 5684      # 5684, 5685, 5686
 #   (a bare number is the count only as the FIRST argument; use -n otherwise)
-#   ./start_verifiers.sh 3 --qualification-validity 300 -v  # 3, with those flags
-#   ./start_verifiers.sh 2 -- --ip 10.0.0.4         # pass the Verifier's --ip
+#   ./scripts/start_verifiers.sh 3 --qualification-validity 300 -v  # 3, with those flags
+#   ./scripts/start_verifiers.sh 2 -- --ip 10.0.0.4         # pass the Verifier's --ip
 
 set -euo pipefail
+
+# Every path below is relative to the repository root, and these scripts live
+# one level under it, so anchor there rather than trusting the caller's cwd.
+# This is what lets ./scripts/start_verifiers.sh work from anywhere.
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 COUNT=5
 START_PORT=5684

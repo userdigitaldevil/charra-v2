@@ -53,7 +53,7 @@ Read the vocabulary table first — several words below are narrower than they l
   /* ---------------- tunables -------------------------------------------- */
   TUNE [shape=plaintext, fillcolor="none", label=<
 <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="5">
-  <TR><TD BGCOLOR="#1e293b" COLSPAN="4"><FONT COLOR="white" POINT-SIZE="12"><B>TUNABLE FROM run_daemon.sh</B> &#8212; <FONT POINT-SIZE="10">every one is an environment override, e.g. <FONT FACE="Courier">RP_VERIFIERS=3 VERIFIER_QUALIFICATION_VALIDITY=20 ./run_daemon.sh</FONT></FONT></FONT></TD></TR>
+  <TR><TD BGCOLOR="#1e293b" COLSPAN="4"><FONT COLOR="white" POINT-SIZE="12"><B>TUNABLE FROM run_daemon.sh</B> &#8212; <FONT POINT-SIZE="10">every one is an environment override, e.g. <FONT FACE="Courier">RP_VERIFIERS=3 VERIFIER_QUALIFICATION_VALIDITY=20 ./scripts/run_daemon.sh</FONT></FONT></FONT></TD></TR>
   <TR><TD BGCOLOR="#e2e8f0"><B>env var</B></TD><TD BGCOLOR="#e2e8f0"><B>becomes</B></TD><TD BGCOLOR="#e2e8f0"><B>default</B></TD><TD BGCOLOR="#e2e8f0"><B>what it changes</B></TD></TR>
 
   <TR><TD ALIGN="LEFT"><FONT FACE="Courier">RP_VERIFIERS</FONT></TD><TD ALIGN="LEFT"><B>--verifiers</B></TD><TD ALIGN="RIGHT"><B>5</B></TD>

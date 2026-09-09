@@ -11,8 +11,8 @@
 # EVERY setting can also be overridden from the environment without editing
 # this file:
 #
-#   RP_INTERVAL=5 RP_VERIFIERS=3 ./run_daemon.sh
-#   RP_DURATION=120 ./run_daemon.sh            # stop cleanly after 2 minutes
+#   RP_INTERVAL=5 RP_VERIFIERS=3 ./scripts/run_daemon.sh
+#   RP_DURATION=120 ./scripts/run_daemon.sh            # stop cleanly after 2 minutes
 #
 # The Attester and the Relying Party each get their OWN TPM simulator, as
 # they would on real hardware. Each role's AK is derived by, and read from,
@@ -27,14 +27,14 @@
 # stale, but behaviour can. Shorten the window to watch the RP re-qualify
 # mid-run:
 #
-#   VERIFIER_QUALIFICATION_VALIDITY=20 RP_CYCLES=8 ./run_daemon.sh
+#   VERIFIER_QUALIFICATION_VALIDITY=20 RP_CYCLES=8 ./scripts/run_daemon.sh
 #
 # DTLS is off by default. ONE variable turns it on for every role at once,
 # because they must agree -- a mismatch does not error, it times out, and a
 # timeout counts as a NO vote, so the run reports 0/N as a failed attestation:
 #
-#   DTLS_MODE=rpk ./run_daemon.sh     # mutual auth, keypairs from keys/
-#   DTLS_MODE=psk ./run_daemon.sh     # one shared secret, no peer identity
+#   DTLS_MODE=rpk ./scripts/run_daemon.sh     # mutual auth, keypairs from keys/
+#   DTLS_MODE=psk ./scripts/run_daemon.sh     # one shared secret, no peer identity
 #
 # TRUST_MODE picks how the RP proves it runs the expected appraisal code, and
 # likewise sets the RP and every Verifier at once. Unlike DTLS a mismatch here
@@ -45,9 +45,9 @@
 # redaction OUTPUT once per cycle, tee names the CODE once per Verifier, and
 # zk proves the redaction itself, once per cycle, in about 8 seconds.
 #
-#   TRUST_MODE=qualify ./run_daemon.sh   # /qualify handshake (default)
-#   TRUST_MODE=tee ./run_daemon.sh       # simulated TEE Attestation Document
-#   TRUST_MODE=zk ./run_daemon.sh        # zero-knowledge proof over log_r
+#   TRUST_MODE=qualify ./scripts/run_daemon.sh   # /qualify handshake (default)
+#   TRUST_MODE=tee ./scripts/run_daemon.sh       # simulated TEE Attestation Document
+#   TRUST_MODE=zk ./scripts/run_daemon.sh        # zero-knowledge proof over log_r
 #
 # zk additionally needs the prover image, built once with ./docker/build-zk.sh.
 # This script starts and stops that container itself; it holds Noir and
@@ -61,6 +61,11 @@
 #   -h, --help     this message
 #
 set -euo pipefail
+
+# Every path below is relative to the repository root, and these scripts live
+# one level under it, so anchor there rather than trusting the caller's cwd.
+# This is what lets ./scripts/run_daemon.sh work from anywhere.
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 # =============================================================================
 #  TUNABLES -- all set to the binaries' own defaults
@@ -583,7 +588,7 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
 
     # start_verifiers.sh also generates verifiers_config.txt for exactly these
     # ports, which is what the Trust Manager resolves the RP requests against.
-    ./start_verifiers.sh "$RP_VERIFIERS" \
+    ./scripts/start_verifiers.sh "$RP_VERIFIERS" \
         --startingport "$VERIFIER_START_PORT" \
         --host "$VERIFIER_HOST" \
         --logdir logs \

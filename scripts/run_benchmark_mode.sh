@@ -62,7 +62,7 @@
 #                            the prover container (./docker/build-zk.sh) and
 #                            adds about 8 s to every cycle.
 #
-#   TRUST_MODE=tee ./run_benchmark_mode.sh
+#   TRUST_MODE=tee ./scripts/run_benchmark_mode.sh
 #
 # Both mode settings default to the value that keeps figures comparable with
 # those already recorded (off, and qualify).
@@ -73,6 +73,11 @@
 # re-running the script kills them itself (step 3) before starting fresh.
 
 set -e
+
+# Every path below is relative to the repository root, and these scripts live
+# one level under it, so anchor there rather than trusting the caller's cwd.
+# This is what lets ./scripts/run_benchmark_mode.sh work from anywhere.
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 docker rm -f charra >/dev/null 2>&1 || true
 
@@ -282,7 +287,7 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
 
     # Regenerate verifiers_config.txt for exactly the five ports started
     # below. start_verifiers.sh writes this file too, so a previous
-    # "./start_verifiers.sh 3" would otherwise leave a three-row config here
+    # "./scripts/start_verifiers.sh 3" would otherwise leave a three-row config here
     # and the sweep would fail at 4 and 5 Verifiers with "Verifier ID not
     # found" rather than anything pointing at the config.
     # Derived from the RP binary itself, not hardcoded: the sweep runs
@@ -337,5 +342,5 @@ docker run -v "$PWD/:/home/bob/charra" $tty_flags --rm --init \
 
     echo "--- timings written to timings_RP_multi_verifiers.txt"
     echo "--- plot them on the HOST (matplotlib is not in this image):"
-    echo "      python3 plot_multi_verifiers.py"
+    echo "      python3 scripts/plot_multi_verifiers.py"
   '

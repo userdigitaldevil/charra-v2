@@ -19,4 +19,4 @@ echo
 docker run --rm --platform "$PLATFORM" "$IMAGE" bash -lc \
     'echo "  nargo: $(nargo --version | head -1)"; echo "  bb:    $(bb --version)"'
 echo
-echo "Done. TRUST_MODE=zk ./run_daemon.sh will start this image itself."
+echo "Done. TRUST_MODE=zk ./scripts/run_daemon.sh will start this image itself."

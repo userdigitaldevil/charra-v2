@@ -398,7 +398,7 @@ Relying Party now writes the identical artifact as a side effect of an ordinary
 cycle: `--redacted-log-out=PATH` (default `redacted_ima_logs.txt`) makes it dump
 `log_r` in ASCII IMA form immediately after redacting it and before replaying it
 into its own TPM ([rp_evidence.c](../src/rp/rp_evidence.c)). Running
-`./run_daemon.sh` over the same 167-entry log reproduces it.
+`./scripts/run_daemon.sh` over the same 167-entry log reproduces it.
 
 One field differs between the two, and it is worth stating rather than glossing.
 `redacted_evidence.txt` carries **40-hex** `template_hash` values, because it was

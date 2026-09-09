@@ -57,7 +57,7 @@ RP rather than a stale key, so it is worth doing immediately:
 
 Then re-run `negative_test.sh`, and a live cycle:
 
-    TRUST_MODE=zk RP_CYCLES=1 ./run_daemon.sh
+    TRUST_MODE=zk RP_CYCLES=1 ./scripts/run_daemon.sh
 
 ### Change the entry ceiling
 

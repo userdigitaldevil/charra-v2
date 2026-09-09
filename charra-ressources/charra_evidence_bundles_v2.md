@@ -2,7 +2,7 @@
 
 What the **Attester** hands the Relying Party, and what the **Relying Party** hands a Verifier. Same attestation, one cycle apart.
 
-Every value below is real output from one run — `RP_VERIFIERS=1 RP_CYCLES=1 ./run_daemon.sh`, with `ima_test_logs.txt` as the Attester's measurement log. Nothing here is illustrative.
+Every value below is real output from one run — `RP_VERIFIERS=1 RP_CYCLES=1 ./scripts/run_daemon.sh`, with `ima_test_logs.txt` as the Attester's measurement log. Nothing here is illustrative.
 
 ————————————————————————
 
@@ -237,6 +237,6 @@ Finally, a note on the certificate that does not exist: were the Attester's EK c
 
 ## 6. Reproducing the numbers
 
-    RP_VERIFIERS=1 RP_CYCLES=1 ./run_daemon.sh
+    RP_VERIFIERS=1 RP_CYCLES=1 ./scripts/run_daemon.sh
 
 The log sizes and the redaction come from `ima_test_logs.txt` through `charra_sdk_redact_ima_log()`. The quote fields were read from a live cycle by decoding the `TPMS_ATTEST` in `msg_rp_evidence_dto`'s `attestation_data` and `rp_attestation_data`.

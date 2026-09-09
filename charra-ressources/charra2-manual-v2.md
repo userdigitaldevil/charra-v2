@@ -55,7 +55,7 @@ confusing Docker error:
 To run a different image — say while comparing two — both scripts take
 `IMAGE`:
 
-    IMAGE=charra-dev:experimental ./run_daemon.sh
+    IMAGE=charra-dev:experimental ./scripts/run_daemon.sh
 
 ---
 
@@ -64,7 +64,7 @@ To run a different image — say while comparing two — both scripts take
 **You do not need the multi-terminal procedure below.** For everyday runs there
 is one command, from the repository root:
 
-    ./run_daemon.sh
+    ./scripts/run_daemon.sh
 
 That single script does all of it: starts a TPM simulator per role and wipes
 each `NVChip`, recompiles CHARRA, regenerates the trust anchor from the fresh TPMs, drops
@@ -72,7 +72,7 @@ the stale `qualified_rps.txt`, writes `verifiers_config.txt`, launches the Trust
 Manager, the Attester and every Verifier, and then runs the Relying Party
 looping until you press Ctrl-C. Logs land in `logs/`.
 
-Its counterpart is `./run_benchmark_mode.sh`, which performs the same cold setup but
+Its counterpart is `./scripts/run_benchmark_mode.sh`, which performs the same cold setup but
 runs the bounded `--benchmark` sweep and exits, writing
 `timings_RP_multi_verifiers.txt`. Use that one when you want measurements.
 
@@ -85,9 +85,9 @@ doubles as the list of what is actually adjustable.
 You can either edit those values in place, or override any of them from the
 environment **without editing the file at all**:
 
-    RP_INTERVAL=5 RP_VERIFIERS=3 ./run_daemon.sh
-    RP_DURATION=120 ./run_daemon.sh                        # stop after 2 minutes
-    VERIFIER_QUALIFICATION_VALIDITY=20 RP_CYCLES=8 ./run_daemon.sh   # watch re-qualification
+    RP_INTERVAL=5 RP_VERIFIERS=3 ./scripts/run_daemon.sh
+    RP_DURATION=120 ./scripts/run_daemon.sh                        # stop after 2 minutes
+    VERIFIER_QUALIFICATION_VALIDITY=20 RP_CYCLES=8 ./scripts/run_daemon.sh   # watch re-qualification
 
 | Variable                            |   Default    | Effect                                                                            |
 | ----------------------------------- | :----------: | --------------------------------------------------------------------------------- |
@@ -226,8 +226,8 @@ To complete a full round of remote attestation:
         bin/verifier --port=<port_number>
         bin/verifier --trust-mode=tee      # see "Trust modes" below
         bin/verifier --trust-mode=zk       # needs the prover container
-        ./start_verifiers.sh               # 5 Verifiers from port 5684 upward
-        ./start_verifiers.sh <COUNT>       # COUNT Verifiers, consecutive ports
+        ./scripts/start_verifiers.sh               # 5 Verifiers from port 5684 upward
+        ./scripts/start_verifiers.sh <COUNT>       # COUNT Verifiers, consecutive ports
 
     Its full set, from `bin/verifier --help`:
 
@@ -340,8 +340,8 @@ Before a Verifier will accept redacted evidence, the RP has to show it is not
 simply making the redaction up. There are two mechanisms, chosen with
 `TRUST_MODE`, and **both roles must be set the same way**:
 
-    TRUST_MODE=qualify ./run_daemon.sh    # default
-    TRUST_MODE=tee     ./run_daemon.sh
+    TRUST_MODE=qualify ./scripts/run_daemon.sh    # default
+    TRUST_MODE=tee     ./scripts/run_daemon.sh
 
 **`qualify`** — the `/qualify` + `/qualify_submit` handshake. The Verifier
 fabricates a synthetic log, redacts it with its own copy of the SDK, and asks
@@ -380,7 +380,7 @@ to check.
 inside the charra image:
 
     ./docker/build-zk.sh          # about two minutes, once
-    TRUST_MODE=zk ./run_daemon.sh # starts and stops the prover itself
+    TRUST_MODE=zk ./scripts/run_daemon.sh # starts and stops the prover itself
 
 Two limits worth knowing: the circuit is compiled for a fixed ceiling —
 **`global N`, currently 167 log entries**, sized to the vendor evidence log in
@@ -441,14 +441,14 @@ three are covered by `.gitignore`.
 
 **To measure the overall process, use the script:**
 
-    ./run_benchmark_mode.sh
+    ./scripts/run_benchmark_mode.sh
 
 It performs the whole cold setup and then runs the bounded sweep, so there is
 nothing to start by hand and no flag to remember. It takes the same environment
 overrides as `run_daemon.sh`. When it finishes, plot the result **on the host**
 (matplotlib is not installed in the container image):
 
-    python3 plot_multi_verifiers.py
+    python3 scripts/plot_multi_verifiers.py
 
 Only two things are not environment-tunable, because they are compile-time
 constants in **`src/rp/rp_shared.h`**:
@@ -487,8 +487,8 @@ For a per-operation breakdown rather than per-phase totals, the roles log
 - **DTLS** is off by default and turned on with one setting:
 
   ```sh
-  DTLS_MODE=psk ./run_daemon.sh     # encrypted, one shared secret
-  DTLS_MODE=rpk ./run_daemon.sh     # encrypted and mutually authenticated
+  DTLS_MODE=psk ./scripts/run_daemon.sh     # encrypted, one shared secret
+  DTLS_MODE=rpk ./scripts/run_daemon.sh     # encrypted and mutually authenticated
   ```
 
   One setting for all four roles, because they must agree. A mismatch does not

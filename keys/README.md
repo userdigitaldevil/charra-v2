@@ -13,8 +13,8 @@ DTLS is **off by default** -- `run_daemon.sh` starts every role in plain
 UDP unless `DTLS_MODE` says otherwise:
 
 ```sh
-DTLS_MODE=rpk ./run_daemon.sh     # mutual auth using these keypairs
-DTLS_MODE=psk ./run_daemon.sh     # one shared secret instead
+DTLS_MODE=rpk ./scripts/run_daemon.sh     # mutual auth using these keypairs
+DTLS_MODE=psk ./scripts/run_daemon.sh     # one shared secret instead
 ```
 
 Under `rpk` each role proves possession of its own private key and checks

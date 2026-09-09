@@ -11,11 +11,18 @@ blending them hides both:
     construction (it only happens once), so no error bars.
 """
 
+import os
 import re
 import matplotlib.pyplot as plt
 
-FILENAME = 'timings_RP_multi_verifiers.txt'
-OUTPUT = 'attestation_timing_analysis.png'
+# The RP writes its timings to the repository root and this script lives one
+# level under it, so anchor there rather than trusting the caller's cwd -- the
+# same thing the shell scripts alongside this one do.
+ROOT = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
+
+FILENAME = os.path.join(ROOT, 'timings_RP_multi_verifiers.txt')
+OUTPUT = os.path.join(ROOT, 'attestation_timing_analysis.png')
 
 with open(FILENAME) as handle:
     data = handle.read()

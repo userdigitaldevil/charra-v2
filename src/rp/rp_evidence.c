@@ -388,7 +388,7 @@ CHARRA_RC charra_rp_prepare_evidence(void) {
         charra_log_error("[" LOG_NAME "] Could not prove the redaction; no "
                          "Verifier can be answered this cycle. Is the prover "
                          "container running? (./docker/build-zk.sh, then "
-                         "TRUST_MODE=zk ./run_daemon.sh starts it)");
+                         "TRUST_MODE=zk ./scripts/run_daemon.sh starts it)");
         goto wipe_witness;
     }
     charra_log_info("[" LOG_NAME "] Proof is %u bytes, took %.3fs. One proof "
