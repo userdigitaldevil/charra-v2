@@ -417,9 +417,55 @@ which is why it is 39,831 B against 35,823 B for the same 167 entries. Entry
 count, file hashes, filenames and commitment scheme are identical. The 40-hex
 file is the one that went to GTA.
 
-**Step 4 — give GTA's agent a TPM and an AK.** Described in §4.4 below: an
-RSA-2048 attestation key in a software TPM simulator, persisted at
-`0x81010020`, with a certificate at NV index `0x150001b`.
+**Step 4 — give GTA's agent a TPM and an AK.** GTA creates no signing key and
+ships no provisioning code (§4.4), so the key was made by us, inside a software
+TPM simulator, before any GTA process started:
+
+```bash
+export TPM2TOOLS_TCTI="mssim:host=gta-tpm-sim,port=2321"
+tpm2_createprimary -C o -c primary.ctx -G rsa2048 -g sha256
+tpm2_create -C primary.ctx -G rsa2048:rsapss:null -g sha256 -u ak.pub -r ak.priv \
+  -a "fixedtpm|fixedparent|sensitivedataorigin|userwithauth|restricted|sign"
+tpm2_load -C primary.ctx -u ak.pub -r ak.priv -c ak.ctx
+tpm2_evictcontrol -C o -c ak.ctx 0x81010020      # pin it at the configured handle
+tpm2_readpublic  -c 0x81010020 -f pem -o ak_pub.pem   # export the PUBLIC half only
+```
+
+The attribute string is the point: `fixedtpm|fixedparent` means the TPM will
+never release the private half, to us or to anyone. `tpm2_createprimary` does
+not create a key on the host and load it in — it instructs the TPM to derive one
+from its own seed, so the private half is born inside and stays there.
+`tpm2_readpublic` is the only export, and it exports the public key.
+
+**Step 4b — a CA, and a certificate over the AK's public half.**
+
+```bash
+openssl genrsa -out ca.key 4096
+openssl req -x509 -new -key ca.key -out ca.crt -days 3650 -sha256 \
+  -subj "/CN=CHARRA-GTA-Test-Root-CA"                       # self-signed root
+
+openssl req -new -newkey rsa:2048 -nodes -keyout throwaway.key -out throwaway.csr \
+  -subj "/CN=charra-test-node-1"
+openssl x509 -req -in throwaway.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+  -force_pubkey ak_pub.pem -out ak_cert.pem -days 365 -sha256
+```
+
+`-force_pubkey` is what makes this correct: the CSR's own keypair is a throwaway
+that exists only because `openssl x509 -req` requires a CSR, and the certificate
+that comes out carries **the TPM's** public key, not the throwaway's. Both
+checks were run and passed — `openssl verify -CAfile ca.crt ak_cert.pem` → `OK`,
+and the certificate's public key compared byte-for-byte against `ak_pub.pem` →
+identical.
+
+**Step 4c — store the certificate where the agent looks for it**, NV
+`0x150001b`, in DER:
+
+```bash
+openssl x509 -in ak_cert.pem -outform DER -out ak_cert.der
+SIZE=$(wc -c < ak_cert.der)
+tpm2_nvdefine 0x150001b -C o -s $SIZE -a "ownerwrite|ownerread|authread|authwrite"
+tpm2_nvwrite  0x150001b -C o -i ak_cert.der
+```
 
 **Step 5 — construct PCR 10 to match the redacted log.** The 167 redacted
 `template_hash` values were recomputed from `redacted_evidence.txt` and extended
@@ -438,14 +484,45 @@ signed it with its own AK, and the server verified that signature normally.
 hardware the kernel extends PCR 10 from the *original* paths, so no redacted log
 could ever replay against a genuine quote.
 
-**Step 6 — register a trust root.** A CA was generated and its certificate
-posted, so the server would accept the agent's AK certificate chain:
+**Step 6 — register the CA as a trust anchor.** Only the **CA** certificate is
+submitted. The AK certificate is never POSTed — it lives in NV and travels
+inside every attestation request.
 
 ```bash
 curl -X POST -H "Content-Type: application/json" -H "User-Id: test_01" \
-  -d '{"name":"charra-gta-test-root-ca","type":["tpm_ima"],"content":"<PEM>"}' \
+  -d '{"name":"charra-gta-test-root-ca","type":["tpm_ima"],
+       "content":"-----BEGIN CERTIFICATE-----\nMIIF...\n-----END CERTIFICATE-----\n"}' \
   http://<server>:8080/global-trust-authority/service/v1/cert
 ```
+
+`content` is `ca.crt` as raw PEM — note that `/cert` accepts raw text, whereas
+`/ref_value` and `/policy` both require Base64. `type` scopes the anchor to a
+subsystem; the accepted values are `refvalue`, `policy`, `tpm`, `tpm_boot`,
+`tpm_ima`, `crl` and `ascend_npu`. Nothing secret is transmitted: a certificate
+carries only a public key, and `ca.key` never leaves our side.
+
+This one call is what establishes trust, and it does so by *installation* rather
+than proof — the server believes the CA because we told it to. Verification then
+runs the other way at attestation time, each step resting on the one below:
+
+```
+  the log replays to the quoted PCR
+      ↑ a PCR value alone could be invented, so —
+  that PCR value sits inside a signed quote
+      ↑ any key can sign, so —
+  the signature verifies under the public key in the AK certificate
+      ↑ anyone can mint a certificate, so —
+  the AK certificate carries the CA's signature
+      ↑ any CA could have signed, so —
+  that CA certificate is in the trust anchor store — because step 6 put it there
+```
+
+The chain walk itself (`verify_cert_chain`) climbs one hop at a time and every
+hop must come out of the database: it reads the certificate's `issuer` name,
+queries the stored anchors for that name — scoped by `user_id` and `cert_type` —
+and then verifies cryptographically with `agent_cert.verify(&parent_pub_key)`.
+The name only selects candidates; OpenSSL decides. It repeats until reaching a
+self-signed root.
 
 **Step 7 — import `NODE_evidence_baseline.json` into GTA's database.** The
 vendor baseline is not in GTA's format, so its `products[].ccFiles[]` entries
