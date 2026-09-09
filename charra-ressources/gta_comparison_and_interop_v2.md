@@ -36,9 +36,14 @@ respective binaries and loaded through a plugin manager.
 - **`attestation_agent`** — runs on the node being attested. Collects evidence
   (TPM quote, PCR values, measurement logs) and sends it to the server.
 - **`attestation_server`** — the service. Issues nonces, verifies evidence,
-  evaluates policy, and issues signed tokens. Its `verifier/` subdirectory is
-  a set of modules *inside this one binary*, not separately deployable
-  processes.
+  evaluates policy, and issues signed tokens. Its `verifier/` subdirectory
+  builds **dynamic libraries** (`crate-type = ["rlib", "dylib"]`) that the one
+  service process loads at runtime from paths named in `server_config.yaml` —
+  `/usr/lib64/libtpm_ima_verifier.so` and seven siblings, all present in the
+  running container next to the 35 MB `attestation_service` binary. They are
+  plugins inside a single process, **not separately deployable services**: the
+  project's Compose file defines two services in total, the service itself and
+  an optional `key_manager`.
 - **`attestation_cli`** — a command-line client that can perform the agent's
   work manually.
 - **`key_manager`** — optional integration with an external KMS.
@@ -310,7 +315,8 @@ per-entry cost flat in log length, several thousand entries would take minutes.
 what its `tss-esapi` dependency is for — but only to *read* and to *quote*. Its
 entire repertoire of TPM operations is `tr_from_tpm_public` to load the AK
 handle, `read_public` for its public area, `nv_read_public` and `nv_read` to
-retrieve the AK certificate, and one `quote`. There is no `pcr_extend` anywhere
+retrieve the AK certificate, `pcr_read` to report the current values, and one
+`quote`. Every one of those is a read or a signature. There is no `pcr_extend` anywhere
 in the agent, and that is not an omission: on a real machine the **kernel**
 extends PCR 10 through IMA as it measures each file, long before any
 attestation runs. By the time the agent is asked for evidence the PCR already
@@ -488,14 +494,75 @@ under which the result should be read.
 
 Five pieces of setup were required.
 
-**A TPM.** GTA's agent needs an attestation key in a TPM. An AK was created in
-a software TPM simulator (RSA-2048, RSA-PSS with SHA-256), persisted at handle
-`0x81010020`, and a certificate over its public key written to NV index
-`0x150001b`, which is where the agent's code expects to find it.
+**A TPM and an attestation key — supplied entirely by us.** GTA's agent does
+not create its signing key. Its configuration names two *locations* and expects
+both to be populated already:
 
-**A trust root.** A CA was generated and its certificate registered with the
-server through `POST /cert`, so the server would accept the AK certificate
-chain.
+```yaml
+ak_handle:   0x81010020   # a persistent object handle inside the TPM
+ak_nv_index: 0x150001b    # an NV index inside the TPM, holding its certificate
+```
+
+Neither is a file path. `0x81010020` is an address in the TPM's own persistent
+storage, and the agent reaches it with `tr_from_tpm_public` — "give me a handle
+to the object already persisted here". If nothing is there the call fails; there
+is no create-on-demand path. The private key is never read: the agent passes the
+handle to `ctx.quote(...)` and the TPM signs internally, so the key never enters
+the agent's memory, a file, or the network.
+
+**GTA ships no provisioning code at all.** Searching the whole repository — every
+file type, not only Rust — finds no `tpm2_createprimary`, `tpm2_evictcontrol`,
+`tpm2_nvdefine`, `tpm2_nvwrite` or `tpm2_createak`, and none of the twelve shell
+scripts it does ship provisions a key. This is deliberate, and their own
+documentation says so: the user guide describes `ak_handle` as *"Attestation Key
+handle, **Need to create in advance**"*, citing the TCG handle registry, and
+points at the TCG device-identity specification for obtaining an IAK
+certificate. Their docs also discuss matching `signature_alg` to "the signing
+algorithm of the ak_handle" — phrasing that only makes sense if the key was
+created before GTA ever ran.
+
+So the following was done by us, with `tpm2-tools`, before any part of GTA
+started: an AK was created in a software TPM simulator (RSA-2048, RSA-PSS with
+SHA-256), persisted at `0x81010020` with `tpm2_evictcontrol`, and an X.509
+certificate over its public key written to NV `0x150001b` with `tpm2_nvwrite`.
+This was not a workaround for a limitation; it is a precondition GTA places
+outside its own scope, on the assumption that a real node's AK arrives from
+manufacture or an enterprise PKI.
+
+**A trust root — and the distinction between the two certificates.** Two
+different X.509 certificates are involved, and only one of them is ever
+submitted to the server.
+
+| | **AK certificate** | **CA certificate** |
+|---|---|---|
+| Whose public key it carries | the attester's AK | the CA's own signing key |
+| Where it is stored | inside the TPM, NV `0x150001b` | GTA's database |
+| How the server obtains it | arrives inside **every** attestation request, in `evidence.ak_certs` | POSTed **once**, at setup |
+| Registered via `POST /cert`? | **no** | **yes** |
+
+A CA was generated (ours, not GTA's), the AK certificate above was signed with
+it, and **only the CA certificate** was registered:
+
+```bash
+curl -X POST -H "User-Id: test_01" \
+  -d '{"name":"charra-gta-test-root-ca","type":["tpm_ima"],"content":"<PEM>"}' \
+  .../v1/cert
+```
+
+That one call means "trust anything this CA signed". The AK certificate is never
+POSTed: the agent reads it out of NV on every run and ships it in the evidence,
+and `verify_cert_chain` walks upward from it — "who signed you?", look that
+issuer up in the database, verify, repeat — until it reaches a self-signed root
+it holds. The server then extracts the public key from the AK certificate and
+checks the quote signature with it. No private key is transmitted at any point.
+
+One property of that check is worth recording, because it is not obvious from
+the API. The server validates **only** that a presented certificate chains to a
+registered CA. It does not tie a certificate to a particular node: the
+`node_id` parameter is threaded down as far as `verify_cryptographic` and there
+carries the name `_node_id`, with the comment *"currently unused, reserved for
+future use"*. Any key whose certificate chains to a registered CA is therefore
+accepted as a legitimate attester, whatever node identifier accompanies it.
 
 **The baseline.** `NODE_evidence_baseline.json` — the vendor's published list
 of known-good files — was converted into GTA's format,
@@ -560,6 +627,50 @@ were **byte-for-byte identical** (35,823 bytes each). And the kernel IMA path
 that the configuration previously named does not exist inside the container, so
 had the change not taken effect the agent would have failed rather than
 silently falling back.
+
+**Two levels of use, deliberately separated.** GTA's verifier was exercised
+both as *library code* and as a *running service*, because the two answer
+different questions.
+
+The first is a direct call into their crate, with no server and no HTTP: a Rust
+test links `common_verifier` and hands the redacted log to the same parser entry
+point the service uses.
+
+```rust
+use common_verifier::ImaLog;
+let ima_log = ImaLog::new(&encoded, "sha256").expect(...);
+```
+
+It reports `input: 167 non-empty lines → parsed 167 entries`, isolating "does
+their parser accept this format" from every other consideration — no TPM, no
+quote, no certificate chain.
+
+The second is the deployed service, and **every substantive result in this
+document comes from it**: the container runs the `attestation_service` binary
+with the eight verifier plugins loaded, and evidence enters over HTTP. Two paths
+were used to submit it — through GTA's own agent as shown above, and by POSTing
+hand-built JSON directly to `/attest` for cases the agent would never produce,
+such as the tampered logs of §5.
+
+**What was supplied by us, and what GTA performed.** The distinction matters for
+reading the result, since the interoperability claim rests on GTA's own code
+doing the verification.
+
+| Step | Performed by |
+|---|---|
+| Create the AK, persist it at `0x81010020` | **us** — `tpm2_createprimary`, `tpm2_evictcontrol` |
+| Sign an AK certificate and write it to NV `0x150001b` | **us** — our CA, `tpm2_nvwrite` |
+| Redact `evidence.txt` into `redacted_evidence.txt` | **us** — CHARRA's `charra_sdk_redact_ima_log()` |
+| Extend PCR 10 from the redacted template hashes | **us** — `tpm2_pcrextend` (the artificial step; §4.8) |
+| Register the CA as a trust root | us, through **GTA's** `POST /cert` |
+| Import the baseline as reference values | us, through **GTA's** `POST /ref_value` |
+| Read the AK, quote PCR 10, assemble evidence | **GTA's agent**, unmodified |
+| Validate the certificate chain and quote signature | **GTA's service**, unmodified |
+| Replay the log, match against the baseline, issue the token | **GTA's service**, unmodified |
+
+The upper rows are inputs and preconditions. Every appraisal step — the part the
+experiment is actually about — is GTA's own code, and no GTA source file was
+modified at any point.
 
 ### 4.6 Result
 
