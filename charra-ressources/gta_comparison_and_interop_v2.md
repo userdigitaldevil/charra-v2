@@ -290,7 +290,9 @@ are not the same task.
 with a value that has already been signed. That is arithmetic; it needs no TPM.
 It is what GTA's server does — the server links no TPM library at all, only the
 agent does — and it is also what each CHARRA Verifier does. At 0.065 ms for the
-whole log, verification is effectively free on both sides.
+whole log, verification is effectively free on both sides. §5 gives the server's
+actual fold, and why replaying in software rather than in a TPM is the right
+choice for a verifier rather than a shortcut.
 
 CHARRA's Relying Party is not verifying. It is *producing a new attestation*.
 Redaction changes every `template_hash`, so `log_r` no longer replays to the
@@ -639,6 +641,61 @@ runs carry no replay protection.
 
 These were found while establishing the above, and each was confirmed by
 experiment rather than by reading alone.
+
+**The service replays the log in software, not in a TPM — and this is the
+correct design.** GTA's server performs no TPM operation of any kind on the
+evidence it receives. It cannot: it links no TPM library at all. `tss-esapi`,
+the Rust TSS binding, appears in exactly one manifest in the project, and it is
+on the node side —
+
+```
+attestation_agent/attester/tpm/common/Cargo.toml:15:   tss-esapi.workspace = true
+attestation_server/**                             :   (no match)
+```
+
+What the server does instead is fold the log's `template_hash` values together
+with OpenSSL
+([pcr.rs:356-391](evidence/global-trust-authority/attestation_server/verifier/tpm/common/src/pcr.rs#L356-L391)):
+
+```rust
+let mut current_value = hex::decode(initial_value)?;   // 32 zero bytes
+for log_value in log_values {
+    hasher.update(&current_value)?;                    // current ‖ template_hash
+    hasher.update(&log_bytes)?;
+    current_value = hasher.finish()?.to_vec();
+}
+```
+
+That is arithmetically the same recurrence a `TPM2_PCR_Extend` implements,
+`PCR ← H(PCR ‖ digest)`, computed in userspace. The result is compared against
+the PCR digest inside the agent's signed quote, and that comparison is
+`ima_replayed`.
+
+This is worth stating plainly because it is easy to read as a shortcut on GTA's
+part, and it is not. **Verifying** a log is arithmetic: you recompute a hash
+chain and compare it with a value that hardware has already signed. The
+hardware's involvement happened earlier, when it signed the quote. Re-doing the
+folds inside a TPM would prove nothing additional and cost four orders of
+magnitude more. CHARRA's Verifiers do the identical thing for the identical
+reason.
+
+The asymmetry is at CHARRA's Relying Party alone, and it is not a difference of
+efficiency but of task — measured figures from §4.2:
+
+| **Party** | **What it is doing** | **Where the fold happens** | **Whole log** | **Per entry** |
+|---|---|---|--:|--:|
+| GTA's server | verifying a log against an existing quote | software (OpenSSL) | 0.065 ms | 0.0004 ms |
+| CHARRA's Verifiers | verifying a log against an existing quote | software (OpenSSL) | 0.065 ms | 0.0004 ms |
+| CHARRA's Relying Party | **producing a new quote** over `log_r` | real TPM, one `TPM2_PCR_Extend` per entry | 14,159 ms | 84.79 ms |
+
+The RP is the outlier because it is not checking an attestation, it is making
+one. Redaction changes every `template_hash`, so `log_r` no longer replays to
+the Attester's PCR; the RP must extend it into a PCR on its own TPM and sign
+over the result. A signature over hardware-held state is, by definition, not
+something software can produce. GTA has no equivalent row because it never
+redacts, and so never needs a second quote — and no party in GTA extends a PCR
+at any point, the agent included, since on real hardware the kernel has already
+done it through IMA as each file was measured (§4.2).
 
 **The `template_hash` field in the log is ignored.** GTA recomputes it from the
 line's own `file_hash` and `file_path`, except where the field is all zeros
