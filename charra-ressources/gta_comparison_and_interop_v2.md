@@ -772,6 +772,92 @@ All three findings are positive: the AK certificate chain and quote signature
 verified, the log replayed to the quoted PCR value, and **all 167 redacted
 entries matched the Huawei baseline held in GTA's database**.
 
+**The token in full.** The excerpt above is abridged. What the service actually
+returns from `POST /attest` is a signed **EAT** (Entity Attestation Token)
+carried as a JWT, and this is its complete structure — decoded from a real
+submission in this experiment:
+
+```
+HTTP response body
+└── "tokens": [ { "node_id": "a4e7c719-…",
+                  "token": "eyJ0eXAi….eyJ2ZXIi….Xq7f…" } ]
+                            └── header │ payload │ signature      ← JWT, dot-separated
+                                        │
+                base64url-decode ───────┘
+                                        │
+                                        ▼
+                        JWT payload (JSON)
+                        ├── ver, jti, iss, iat, nbf, exp
+                        ├── ueid, intuse, eat_profile
+                        ├── status, nonce_type
+                        ├── matched_policy[], unmatched_policy[]
+                        └── tpm_ima  ◀── depth 1
+                            ├── attestation_status
+                            ├── policy_info[]
+                            ├── ima_replayed
+                            ├── ima_rv_matched
+                            └── pcrs
+```
+
+*Envelope.*
+
+| Field | Meaning |
+|---|---|
+| `tokens[].node_id` | the agent's configured UUID, distinct from `ueid` inside the token |
+| `tokens[].token` | the JWT itself: `header.payload.signature`, base64url, dot-separated |
+| header `alg` | `PS256` — the **service's** signing key, not any TPM |
+| header `jku`, `kid` | literal placeholder strings in this build; they would normally locate and name the signing key |
+| signature | 256 bytes over `header.payload` |
+
+*Standard EAT claims, at depth 1 of the payload.*
+
+| Field | Meaning |
+|---|---|
+| `ver` | token format version (`1.0`) |
+| `jti` | unique token identifier, usable for replay detection |
+| `iss` | issuer — `Global Trust Authority` |
+| `iat`, `nbf`, `exp` | issued-at, not-before, expiry; about seven days in these runs |
+| `ueid` | which node the token describes |
+| `intuse` | intended use (`generic`) |
+| `eat_profile` | another placeholder in this build |
+
+*Verdict and policy, also at depth 1.*
+
+| Field | Meaning |
+|---|---|
+| `status` | `pass` or `no_pass` — see §4.8: it reports whether the attached policies matched, not whether the evidence was sound |
+| `nonce_type` | records the freshness mode actually used; `ignore` in these runs, so a consumer can see freshness was not checked |
+| `matched_policy[]` | policies that passed, each with `id`, `version` and the **SHA-256 of the policy content**, so a consumer can confirm exactly which rules produced the verdict |
+| `unmatched_policy[]` | policies that failed |
+
+*The per-attester block.* The claim name is **the attester type**, so `tpm_ima`
+here; a `tpm_boot` submission produces a `tpm_boot` claim instead, and a
+submission covering both yields two sibling claims with `status` as the
+aggregate. This is why two `status`-like fields exist and are not redundant:
+`status` covers the whole submission, `tpm_ima.attestation_status` covers this
+attester type alone.
+
+| Field | Meaning |
+|---|---|
+| `attestation_status` | verdict for this attester type |
+| `policy_info[]` | per-policy outcome: `appraisal_policy_id`, `policy_version`, `policy_matched` |
+| `ima_replayed` | did the submitted log fold to the quoted PCR value |
+| `ima_rv_matched` | did every file hash appear in `t_ref_value_detail` |
+| `pcrs` | the hash algorithm and the PCR values the replay was compared against |
+
+Reading it takes one line, remembering that JWT strips base64 padding:
+
+```python
+payload = json.loads(base64.urlsafe_b64decode(token.split(".")[1] + "=="))
+payload["tpm_ima"]["ima_replayed"]
+```
+
+Two properties of this structure are worth noting because they are better than
+the surrounding design. The policy is **fingerprinted** by content hash rather
+than named by a mutable identifier, and the token **discloses its own
+freshness mode**, so a reader can tell that `nonce_type` was `ignore` without
+consulting the request.
+
 Matching also succeeded without naming a baseline explicitly. When the
 submission carries no `ref_value_id`, the server searches every baseline
 registered for that user and attester type, and finds the same rows.
